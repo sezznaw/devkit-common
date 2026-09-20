@@ -24,6 +24,62 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
 
 ## Packages
 
+- `zlog`: the logger on zap that replaces `log` (work in progress: `kitexx`
+  still uses `log`). `Init(Options)` installs the default used by the
+  package-level functions; `New` only builds. Fields are typed, one bracket
+  per pair: `zlog.Info("login", zlog.Int("uid", uid), zlog.Err(err))`. The
+  alternating `"key", value, ...` form was dropped on purpose: nothing checks
+  it before run time, and keeping it next to the typed form would keep it in
+  use. Eight constructors (`field.go`): `Str`, `Int`, `Float` are generic so
+  that the caller need not know int32 from int64 (Thrift mixes them); `Err`
+  fixes the key `err`. `Field` is our own struct around `zap.Field`, not an
+  alias, because it has methods: `zlog.Int("age", 15).Blue()` colors that one
+  field on the console (`Red Green Yellow Blue Purple Cyan Gray`). zap gives
+  an encoder nothing but key and value, so a colored field travels as
+  `zap.Inline(coloredField)`, which sets `consoleEncoder.fieldColor` around
+  the field; `core.zap` does that only for a colored console, so JSON and
+  `NO_COLOR` output is identical with or without colors. Arguments of `Infof`
+  and friends take the same colors as `zlog.Blue(uid)` (`color.go`, a
+  `fmt.Formatter` that applies the verb to the wrapped value); `core.logf`
+  formats the message itself so that it can take the colors off first when the
+  output is not a colored console. `logf` must not assign to `args`: go vet
+  stops treating a function as a printf wrapper when it does, and `Infof`
+  calls would no longer be checked. A field named like a
+  key every record has (`level`, `time`, `msg`, `caller`, `service`) is written
+  as `fields.level` etc. in both formats (`fieldKey`, logrus's convention): zap
+  does not deduplicate, parsers keep the last duplicate so the record loses its
+  level, and Elasticsearch rejects the record. `TestEveryRecordKeyIsProtected`
+  fails when a new record key is not added to `fieldKey`. Fields passed to the
+  raw `Zap()`/`L()` logger bypass this. `core.log` checks the
+  level before converting the fields, so a call below the level allocates
+  nothing (raw zap allocates the field slice); otherwise cost equals raw zap
+  (benchmarks in the test file).
+  Two kinds of `*Logger`: `zlog.With(...)` and `Default()` *follow the
+  default*, resolving the logger installed by `Init` each time they log
+  (`Logger.core`, cached per installed default), because a package-level
+  `var log = zlog.With(zlog.Str("component", "repo"))` runs before `main` calls `Init`
+  and would otherwise stay on the start-up defaults: info level, no `service`,
+  console text inside a JSON stream. Loggers from `New`/`Init` and their
+  children own their configuration and ignore later `Init` calls.
+  The number of zlog frames between the caller and zap is fixed per path, and
+  `wrap` sets the skip to match: two behind every logging function (the
+  function plus `core.log` or `core.logf`). Keep that invariant, the
+  reported file:line relies on it (`TestCallerOnEveryPath` guards it). The console
+  prints the caller so that GoLand's run window makes it a link and it is never
+  ambiguous (`clickablePath`): relative to the working directory for files
+  inside it, as compiler errors are, absolute otherwise. Not
+  `handler/handler.go` alone: two services of one project both have that file.
+  JSON uses zap's short form, independent of build machine and flags. The
+  console format is our own `consoleEncoder` (`console.go`), because zap's
+  prints the fields as a JSON object at the end of the line; ours prints
+  `key=value` in the order added, keys dimmed. The two formats carry the same
+  content with one exception, kept in one place, `identityFields`: what
+  identifies the process (`service`) is in the JSON records only. To see what a
+  collector gets, `go run ./examples/zlog -format json`. Console colors
+  are on unless `NO_COLOR` is set and deliberately do not test for a TTY: the
+  GoLand run window is not one. To judge the console format by eye, Run
+  `examples/zlog` (`go run ./examples/zlog`); GoLand's test runner window
+  prints the color escapes as text (`[32mINFO[0m`) instead of rendering them.
 - `log`: slog wrapper. `New(Options)` also installs the slog default;
   `WithContext`/`FromContext` carry a request-scoped logger; `Options` is
   YAML-loadable (its `Output` field is not).

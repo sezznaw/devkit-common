@@ -11,7 +11,8 @@ go get github.com/sezznaw/devkit-common@latest
 
 | 包        | 作用 |
 |-----------|------|
-| `log`     | 公司统一日志，基于 `log/slog`：`New`、`Named`、`WithContext` / `FromContext` |
+| `zlog`    | 公司统一日志，基于 zap，用于取代 `log`：编译期检查的强类型字段 `zlog.Info("login", zlog.Int("uid", uid), zlog.Err(err))`，可给单个字段在控制台上色（`zlog.Int("age", 15).Blue()`），以及 `zlog.Infof`，其参数同样可以上色（`zlog.Blue(uid)`），控制台格式给人看（可点击跳转的 `文件:行号`、每个级别一种颜色、`key=value` 字段），JSON 格式供采集系统使用，两者内容相同，唯一区别是 `service` 只出现在 JSON 里；与日志自带字段（`level`、`time`、`msg`、`caller`、`service`）同名的业务字段会自动改名为 `fields.level` 等，保证 JSON 里不出现重复的 key，`SetLevel` 运行时调级别，`L()` 提供 zap 的强类型字段 |
+| `log`     | 旧的日志包，基于 `log/slog`，目前 `kitexx` 仍在使用；`kitexx` 切到 `zlog` 后删除 |
 | `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
 | `kitexx`  | Kitex 服务端/客户端选项：Nacos 注册与发现、优雅退出、统一日志、`OnShutdown`、`Run` |
 | `nacosx`  | 由 YAML 配置构造 Nacos 命名/配置客户端 |

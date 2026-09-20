@@ -11,7 +11,8 @@ go get github.com/sezznaw/devkit-common@latest
 
 | Package   | Purpose |
 |-----------|---------|
-| `log`     | Company logger on `log/slog`: `New`, `Named`, `WithContext` / `FromContext` |
+| `zlog`    | Company logger on zap, replacing `log`: typed fields that are checked at compile time, `zlog.Info("login", zlog.Int("uid", uid), zlog.Err(err))`, a color per field for the console (`zlog.Int("age", 15).Blue()`), plus `zlog.Infof` whose arguments take colors too (`zlog.Blue(uid)`), console format for people (clickable `file:line`, one color per level, `key=value` fields) and JSON for collectors, same content except that `service` is JSON-only; a field named like a record key (`level`, `time`, `msg`, `caller`, `service`) becomes `fields.level` etc., so a JSON record never has a key twice, `SetLevel` at runtime, `L()` for zap's typed fields |
+| `log`     | Previous logger on `log/slog`, still used by `kitexx`; to be removed once `kitexx` moves to `zlog` |
 | `config`  | Load `conf/<APP_ENV>.yaml` with `${VAR}` expansion; `Dir`/`LoadDefault` find the conf directory; `Duration` for `3s`-style values |
 | `kitexx`  | Kitex server/client options: Nacos registration and discovery, graceful stop, unified logging, `OnShutdown`, `Run` |
 | `nacosx`  | Nacos naming / config clients from a YAML config block |
