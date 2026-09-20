@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"strconv"
+	"sync"
 
 	"github.com/nacos-group/nacos-sdk-go/v2/clients"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients/config_client"
@@ -62,6 +63,31 @@ func (c Config) params() (vo.NacosClientParam, error) {
 		constant.WithLogLevel("warn"),
 	)
 	return vo.NacosClientParam{ClientConfig: cc, ServerConfigs: servers}, nil
+}
+
+var (
+	sharedMu      sync.Mutex
+	sharedNaming  = map[string]naming_client.INamingClient{}
+	newNamingFunc = NewNamingClient // replaced in tests
+)
+
+// SharedNamingClient returns one naming client per distinct Nacos target for
+// the whole process. A service registers itself and resolves every downstream
+// through Nacos; without sharing, each of those would open its own connection
+// and keep its own subscription cache.
+func SharedNamingClient(c Config) (naming_client.INamingClient, error) {
+	key := fmt.Sprintf("%v|%s|%s", c.Addrs, c.Namespace, c.Username)
+	sharedMu.Lock()
+	defer sharedMu.Unlock()
+	if cli, ok := sharedNaming[key]; ok {
+		return cli, nil
+	}
+	cli, err := newNamingFunc(c)
+	if err != nil {
+		return nil, err
+	}
+	sharedNaming[key] = cli
+	return cli, nil
 }
 
 // NewNamingClient creates a service-discovery client.

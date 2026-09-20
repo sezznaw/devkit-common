@@ -29,6 +29,17 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   YAML-loadable (its `Output` field is not).
 - `config`: `Load(dir, &cfg)` reads `<dir>/<APP_ENV>.yaml` (default `dev`)
   and expands `${VAR}` from the environment *before* YAML parsing.
+- `kitexx` shutdown design, which is easy to get wrong: Kitex's `Stop()` runs
+  its own shutdown hooks, then deregisters, then closes the listener and
+  drains, and `svr.Run()` returns only after all that. Therefore (1)
+  `delayedRegistry` wraps the Nacos registry and sleeps *after* the real
+  `Deregister`, because callers still hold the instance in their cache;
+  (2) `OnShutdown` hooks are ours and run after `svr.Run()` returns, never via
+  `server.RegisterShutdownHook`, which fires while requests are still served;
+  (3) `shutdown.deregister_wait` is a `*config.Duration` so an explicit `0s`
+  differs from "unset" (default 3s).
+- `kitexx/klog.go` routes Kitex's klog through slog; a multi-line message is
+  split into message + `stack` attribute so it stays one record.
 - `kitexx`: the glue a service's `main` uses. `Options(cfg)` returns Kitex
   server options (basic info, listen address, logging middleware, Nacos
   registry unless `registry_disabled`), `ClientOptions(cfg)` returns the Nacos
