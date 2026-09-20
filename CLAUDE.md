@@ -38,6 +38,12 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `server.RegisterShutdownHook`, which fires while requests are still served;
   (3) `shutdown.deregister_wait` is a `*config.Duration` so an explicit `0s`
   differs from "unset" (default 3s).
+- `nacosx.Probe` runs inside `SharedNamingClient` before the SDK client is
+  created: nacos-sdk-go does not fail on an unreachable server, it retries in
+  the background and the first call fails with "client not connected, current
+  status:STARTING". Nacos 2.x needs the main port and main port + 1000 (gRPC);
+  both are dialled, any one reachable server is enough. `kitexx.Options` adds
+  the `registry_disabled: true` hint, because only it knows that setting.
 - `kitexx/klog.go` routes Kitex's klog through slog; a multi-line message is
   split into message + `stack` attribute so it stays one record.
 - `kitexx`: the glue a service's `main` uses. `Options(cfg)` returns Kitex

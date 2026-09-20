@@ -80,7 +80,7 @@ func Options(cfg Config) ([]server.Option, error) {
 	if !cfg.RegistryDisabled {
 		cli, err := nacosx.SharedNamingClient(cfg.Nacos)
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("%w. To run without Nacos, for example on your own machine, set registry_disabled: true", err)
 		}
 		wait := defaultDeregisterWait
 		if cfg.Shutdown.DeregisterWait != nil {

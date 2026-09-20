@@ -34,6 +34,7 @@ kitexx.Run(svr, cfg.Config)
 - **优雅退出。** 收到 SIGINT/SIGTERM/SIGHUP 后，服务先从 Nacos 注销，继续服务 `shutdown.deregister_wait`（默认 3 秒）让调用方刷新实例列表，然后关闭监听，给在途请求最多 `shutdown.drain_timeout`（默认 15 秒），最后按注册的相反顺序执行 `OnShutdown` 钩子。这两个值之和要小于平台的强杀超时（Kubernetes 默认 30 秒）。
 - **统一的日志格式。** Kitex 内部日志和你的日志走同一个 `slog` logger（带 `logger=kitex`），handler 的 panic 是一条记录，堆栈放在 `stack` 属性里，JSON 日志采集不会被破坏。
 - **不依赖启动目录的配置加载。** `config.LoadDefault` 依次查找 `$CONF_DIR`、`./conf`、可执行文件旁边，文件缺失时给出明确的文字说明而不是 panic。
+- **连不上 Nacos 时给出明确的提示。** 在创建 Nacos 客户端之前，服务会先检查配置的服务器，Nacos 2.x 客户端需要的两个端口都检查（主端口，以及用于 gRPC 的主端口加 1000）。连不上就直接停下，并说明是哪个地址、什么原因、该看哪个配置项，而不是 SDK 那句 `client not connected, current status:STARTING`。
 - **每个进程只有一个 Nacos 连接**，注册和所有下游客户端共用（`nacosx.SharedNamingClient`）。
 - 请求日志中间件，并把请求级 logger 放进 context；handler 的 panic 会被转成错误（这一点由 Kitex 自身提供）。
 

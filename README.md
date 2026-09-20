@@ -43,6 +43,11 @@ kitexx.Run(svr, cfg.Config)
 - **Config that does not depend on the start directory.** `config.LoadDefault`
   looks at `$CONF_DIR`, `./conf`, then next to the executable, and reports
   missing files in plain words instead of panicking.
+- **A clear message when Nacos cannot be reached.** Before creating the Nacos
+  client the service checks the configured servers on both ports a Nacos 2.x
+  client needs (the main port and main port + 1000 for gRPC) and stops with
+  the address, the reason and the setting to look at, instead of the SDK's
+  `client not connected, current status:STARTING`.
 - **One Nacos connection per process**, shared by registration and every
   downstream client (`nacosx.SharedNamingClient`).
 - Request logging middleware with a request-scoped logger in the context, and
