@@ -37,6 +37,12 @@ type Config struct {
 		// to listen on one interface only ("127.0.0.1:8888"). ":8888" is
 		// the same as 8888. Empty: 8888.
 		Addr string `yaml:"addr"`
+		// Advertise is the address callers reach this instance at, when it
+		// is not the one the process sees: "host" or "host:port". A
+		// container that is reached through the host's address and a
+		// mapped port needs it; the deployment sets it. Empty: the address
+		// this machine reaches Nacos from, and the listen port.
+		Advertise string `yaml:"advertise"`
 	} `yaml:"service"`
 	Nacos nacosx.Config `yaml:"nacos"`
 	Log   zlog.Options  `yaml:"log"`
@@ -113,6 +119,15 @@ func Options(cfg Config) ([]server.Option, error) {
 		server.WithExitWaitTime(cfg.Shutdown.DrainTimeout.Or(defaultDrainTimeout)),
 	}
 	if !cfg.RegistryDisabled {
+		// Before anything is started: a laptop must not announce itself in a
+		// Nacos that other people use.
+		if err := cfg.Nacos.CheckRegistration(); err != nil {
+			return nil, err
+		}
+		advertise, err := advertiseAddr(cfg.Service.Advertise, addr.Port)
+		if err != nil {
+			return nil, err
+		}
 		cli, err := Nacos(cfg)
 		if err != nil {
 			return nil, err
@@ -122,7 +137,7 @@ func Options(cfg Config) ([]server.Option, error) {
 			wait = cfg.Shutdown.DeregisterWait.Std()
 		}
 		opts = append(opts, server.WithRegistry(&delayedRegistry{
-			Registry: newNacosRegistry(cli),
+			Registry: newNacosRegistry(cli, advertise),
 			wait:     wait,
 		}))
 	}
@@ -251,6 +266,29 @@ func normalizeAddr(v string) string {
 		return ":" + v
 	}
 	return v
+}
+
+// advertiseAddr turns service.advertise into the "host:port" to register, ""
+// when it is not set. Without a port it is the port the service listens on.
+func advertiseAddr(v string, listenPort int) (string, error) {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return "", nil
+	}
+	const accepts = `a host such as "10.0.0.5", or "host:port" such as "10.0.0.5:30888"`
+	host, port := v, strconv.Itoa(listenPort)
+	if h, p, err := net.SplitHostPort(v); err == nil {
+		host, port = h, p
+	} else if strings.Contains(v, ":") && net.ParseIP(v) == nil {
+		return "", fmt.Errorf("kitexx: service.advertise is %q; it must be %s", v, accepts)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return "", fmt.Errorf("kitexx: service.advertise is %q: %q is not a port between 1 and 65535; it must be %s", v, port, accepts)
+	}
+	if host == "" || host == "0.0.0.0" || host == "::" {
+		return "", fmt.Errorf("kitexx: service.advertise is %q: it has to name the host callers connect to; it must be %s", v, accepts)
+	}
+	return net.JoinHostPort(host, port), nil
 }
 
 // listenAddr resolves service.addr. The errors name the setting and what it

@@ -27,7 +27,10 @@ type Registration struct {
 	// Service is the name callers find the service by.
 	Service string
 	// Addr is "host:port" of the listener. With an empty host (":8888") the
-	// first IPv4 address of this machine that is not loopback is registered.
+	// address this machine reaches Nacos from is registered: on a machine
+	// with several networks (a VPN, Docker) that is the one the others are
+	// on too, and with a Nacos on this machine it is 127.0.0.1, which keeps
+	// working when the Wi-Fi address changes.
 	Addr string
 	// Weight is the share of the traffic, relative to the other instances.
 	// Default 10.
@@ -68,7 +71,14 @@ func (c *Client) Register(r Registration) (deregister func() error, err error) {
 		zlog.Debug("nacos is switched off, not registered", zlog.Str("name", r.Service))
 		return func() error { return nil }, nil
 	}
-	ip, port, err := instanceAddr(r.Addr)
+	if !c.cfg.Registers() {
+		zlog.Info("not registered in Nacos: nacos.register is false", zlog.Str("name", r.Service))
+		return func() error { return nil }, nil
+	}
+	if err := c.cfg.CheckRegistration(); err != nil {
+		return nil, err
+	}
+	ip, port, err := instanceAddr(r.Addr, c.cfg.Addrs)
 	if err != nil {
 		return nil, fmt.Errorf("nacosx: register %s: %w", r.Service, err)
 	}
@@ -123,7 +133,7 @@ func (c *Client) Register(r Registration) (deregister func() error, err error) {
 // instanceAddr splits "host:port" and fills in this machine's address for an
 // empty host: a listener on all interfaces has no address of its own, and
 // callers need one.
-func instanceAddr(addr string) (ip string, port uint64, err error) {
+func instanceAddr(addr string, nacos []string) (ip string, port uint64, err error) {
 	host, portStr, err := net.SplitHostPort(addr)
 	if err != nil {
 		return "", 0, fmt.Errorf("addr %q is not host:port", addr)
@@ -133,11 +143,31 @@ func instanceAddr(addr string) (ip string, port uint64, err error) {
 		return "", 0, fmt.Errorf("addr %q has no usable port", addr)
 	}
 	if host == "" || host == "::" || host == "0.0.0.0" {
-		if host, err = localIPv4(); err != nil {
-			return "", 0, err
+		if host = outboundIP(nacos); host == "" {
+			if host, err = localIPv4(); err != nil {
+				return "", 0, err
+			}
 		}
 	}
 	return host, port, nil
+}
+
+// outboundIP is the address this machine uses to reach Nacos. Nothing is
+// sent: connecting a UDP socket only asks the routing table. "" when that
+// gives no IPv4 address.
+func outboundIP(nacos []string) string {
+	for _, a := range nacos {
+		conn, err := net.Dial("udp4", a)
+		if err != nil {
+			continue
+		}
+		ip := conn.LocalAddr().(*net.UDPAddr).IP
+		conn.Close()
+		if v4 := ip.To4(); v4 != nil && !v4.IsUnspecified() {
+			return v4.String()
+		}
+	}
+	return ""
 }
 
 func localIPv4() (string, error) {

@@ -34,6 +34,7 @@ func fakeTarget(t *testing.T) (naming *fakeNaming, config *fakeConfig, made *int
 
 func newTestClient(t *testing.T) (*Client, *fakeNaming, *fakeConfig) {
 	t.Helper()
+	t.Setenv("APP_ENV", "test") // not a developer's machine: see CheckRegistration
 	naming, config, _ := fakeTarget(t)
 	c, err := New(Config{Addrs: []string{"n1:8848"}, Namespace: "dev"})
 	if err != nil {

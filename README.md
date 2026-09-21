@@ -128,8 +128,21 @@ Outside Kitex the same is `nc, err := nacosx.New(cfg.Nacos)` and
 - **The Nacos SDK logs through zlog** (`logger=nacos-sdk`) instead of into
   `nacos-sdk.log`, from `nacos.sdk_log_level` up (default `warn`; at `info`
   the SDK prints the content of every configuration, passwords included).
-- **Without Nacos** (`registry_disabled: true`, the usual setting on a
-  developer's machine) configurations are files, `conf/nacos/<data id>`, and
+- **A laptop never ends up in a Nacos that other people use.** With
+  `nacos.register: false` a service finds the others and reads its
+  configuration, and is not announced: that is how a developer's machine works
+  against the Nacos of the development server. Without it, the local
+  environment (no `APP_ENV`) registers in a Nacos on the same machine only;
+  anything else is refused at start, with the address and the way out, because
+  everybody who uses that Nacos would have requests sent to the laptop.
+- **What gets registered is an address callers can reach.** An empty host
+  becomes the address this machine reaches Nacos from: the right one on a
+  machine with a VPN or Docker networks, and 127.0.0.1 with a Nacos on the same
+  machine, which survives a change of the Wi-Fi address. A container that is
+  reached through the host and a mapped port sets `service.advertise`
+  (`"host"` or `"host:port"`, usually `"${ADVERTISE_ADDR}"`).
+- **Without Nacos** (`registry_disabled: true`, for tests and for working
+  offline) configurations are files, `conf/nacos/<data id>`, and
   saving the file is a change like one in the console. Nothing is registered
   and no service is looked up: `client.WithHostPorts` says where one is.
 - Lower level: `nc.Get(dataID)`, `nc.OnChange(dataID, func(content string))`,

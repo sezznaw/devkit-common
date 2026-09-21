@@ -144,3 +144,81 @@ func TestInstanceChangesOnTheConsole(t *testing.T) {
 		t.Errorf("got:\n%s\nwant:\n%s", got, want)
 	}
 }
+
+// nacos.register: false is how a laptop works against the Nacos of the
+// development server: everything but the announcement.
+func TestRegisterSwitchedOff(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	t.Setenv("APP_ENV", "") // a developer's machine
+	naming, _, _ := fakeTarget(t)
+	no := false
+	c, err := New(Config{Addrs: []string{"10.0.0.5:8848"}, Register: &no})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { c.Close() })
+	dereg, err := c.Register(Registration{Service: "order", Addr: ":8888"})
+	if err != nil || dereg() != nil {
+		t.Fatalf("Register: %v", err)
+	}
+	if len(naming.registered) != 0 || len(naming.deregistered) != 0 {
+		t.Errorf("nothing may reach Nacos: %+v", naming.registered)
+	}
+	if !logs.Has("INFO", "not registered in Nacos: nacos.register is false") {
+		t.Errorf("records: %s", logs)
+	}
+	naming.push("user", inst("10.0.0.7", true))
+	if list, err := c.Instances("user"); err != nil || len(list) != 1 {
+		t.Errorf("discovery must keep working: %v %v", list, err)
+	}
+}
+
+// A laptop announces itself only in a Nacos on the laptop.
+func TestALaptopDoesNotRegisterInASharedNacos(t *testing.T) {
+	zlogtest.Discard(t)
+	for _, c := range []struct {
+		env   string
+		addrs []string
+		ok    bool
+	}{
+		{"", []string{"127.0.0.1:8848"}, true},
+		{"", []string{"localhost:8848"}, true},
+		{"", []string{"[::1]:8848"}, true},
+		{"local", []string{"10.0.0.5:8848"}, false},
+		{"", []string{"nacos.dev.company:8848"}, false},
+		{"", []string{"127.0.0.1:8848", "10.0.0.5:8848"}, false},
+		{"dev", []string{"10.0.0.5:8848"}, true},
+		{"prod", []string{"nacos.prod:8848"}, true},
+	} {
+		t.Setenv("APP_ENV", c.env)
+		err := Config{Addrs: c.addrs}.CheckRegistration()
+		if (err == nil) != c.ok {
+			t.Errorf("APP_ENV=%q %v: %v", c.env, c.addrs, err)
+		}
+		if err != nil && (!strings.Contains(err.Error(), "nacos.register: false") || !strings.Contains(err.Error(), c.addrs[len(c.addrs)-1])) {
+			t.Errorf("the error must name the address and the way out: %v", err)
+		}
+	}
+
+	t.Setenv("APP_ENV", "")
+	naming, _, _ := fakeTarget(t)
+	cli, err := New(Config{Addrs: []string{"10.0.0.5:8848"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { cli.Close() })
+	if _, err := cli.Register(Registration{Service: "order", Addr: ":8888"}); err == nil || len(naming.registered) != 0 {
+		t.Errorf("must be refused before anything reaches Nacos: %v", err)
+	}
+}
+
+// With a Nacos on this machine the instance is 127.0.0.1: it stays reachable
+// when the Wi-Fi address changes.
+func TestRegisterWithANacosOnThisMachine(t *testing.T) {
+	if ip, _, err := instanceAddr(":8080", []string{"127.0.0.1:8848"}); err != nil || ip != "127.0.0.1" {
+		t.Errorf("ip = %q, %v", ip, err)
+	}
+	if ip, _, err := instanceAddr("10.1.2.3:8080", []string{"127.0.0.1:8848"}); err != nil || ip != "10.1.2.3" {
+		t.Errorf("a given host is kept: %q, %v", ip, err)
+	}
+}

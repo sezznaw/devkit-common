@@ -82,7 +82,9 @@ if level > dyn.Get().Battle.MaxLevel {               // 永远是当前生效的
 - **服务注册与发现**，给不是 Kitex 服务的程序用：`deregister, err := nc.Register(nacosx.Registration{Service: "gateway", Addr: ":8080"})`、`nc.Instances("order")`、`nc.Pick("order")`（按权重随机）、`nc.Subscribe("order", fn)`。Kitex 服务由 `kitexx.Options` 和 `kitexx.ClientOptions` 代劳。两种方式日志里都能看到 `registered in Nacos`、`service discovered`、`instances changed`（每个实例一行：`+ 10.0.0.7:8888  weight=10`、`- 10.0.0.6:8888`）。
 - **Nacos 故障期间只有三种记录，而不是几百条。** `nacos connection lost`（`cause` 是 SDK 的第一条报错）、每 30 秒一条 `nacos is still unreachable`、恢复时一条 `nacos connection restored down_for=48.7s sdk_records_hidden=194`。期间服务继续使用手上已有的实例列表和配置，恢复之后 SDK 会自己重新注册和订阅。
 - **Nacos SDK 自己的日志也走 zlog**（带 `logger=nacos-sdk`），不再写 `nacos-sdk.log` 文件；由 `nacos.sdk_log_level` 控制从哪个级别起输出（默认 `warn`；设为 `info` 时 SDK 会打印每一份配置的内容，包括密码）。
-- **没有 Nacos 时**（`registry_disabled: true`，本机开发的常用设置）配置就是文件：`conf/nacos/<data id>`，保存文件就等同于在控制台里改配置。此时不注册、也不查找服务：用 `client.WithHostPorts` 指明服务地址。
+- **笔记本不会出现在别人也在用的 Nacos 里。** 设置 `nacos.register: false` 后，服务照常查找其他服务、读取配置，只是不注册自己：开发者的电脑连开发服务器的 Nacos 时就这样用。不设置它时，本机环境（没有 `APP_ENV`）只允许注册到本机上的 Nacos；其余情况启动时直接拒绝，并说明地址和解决办法，因为否则所有使用那个 Nacos 的人都会有一部分请求被发到这台笔记本上。
+- **注册进去的一定是调用方连得上的地址。** 主机留空时，注册的是“本机连向 Nacos 时使用的地址”：电脑上有 VPN 或 Docker 网络时它就是对的那一个；Nacos 在本机时它是 127.0.0.1，Wi-Fi 地址变了也不受影响。通过宿主机地址和映射端口访问的容器要设置 `service.advertise`（`"主机"` 或 `"主机:端口"`，通常写 `"${ADVERTISE_ADDR}"`）。
+- **没有 Nacos 时**（`registry_disabled: true`，用于测试和断网时工作）配置就是文件：`conf/nacos/<data id>`，保存文件就等同于在控制台里改配置。此时不注册、也不查找服务：用 `client.WithHostPorts` 指明服务地址。
 - 更底层的接口：`nc.Get(dataID)`、`nc.OnChange(dataID, func(content string))`、`nacosx.Group("other")`（配置在别的分组）、`nacosx.Static(&Dynamic{...})`（测试用）、`nacosx.NewFrom`（在底下放假的 SDK 客户端）。`go run ./examples/nacosx` 可以看到以上全部效果。
 
 ```yaml

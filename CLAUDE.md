@@ -210,7 +210,14 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   (`loglevel.go`, through `Client.Get` and `Client.OnChange`); failing to set that up is a warning, not a start failure.
 - `kitexx`: the glue a service's `main` uses. `Options(cfg)` returns Kitex
   server options (basic info, listen address, logging middleware, meta
-  handler, Nacos registry unless `registry_disabled`) and installs the logger,
+  handler, Nacos registry unless `registry_disabled`) and installs the logger.
+  It refuses, before anything starts, a developer's machine that would
+  register in a Nacos that is not on it (`nacosx.Config.CheckRegistration`:
+  `config.IsLocal()` and a Nacos address that is not loopback; the owner's
+  rule, since a laptop in the shared Nacos receives everybody's requests);
+  `nacos.register: false` is the way to work against such a Nacos, and the
+  planned "dev takeover" relies on it. `service.advertise` is registered
+  instead of the listener's address (containers behind a mapped port).
   `Nacos(cfg)` returns the client of the process, `WatchConfig[T](cfg)` the
   configuration that refreshes itself (data id `config_data_id`, default
   `<service.name>.yaml`),

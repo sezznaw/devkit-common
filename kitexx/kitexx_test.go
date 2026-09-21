@@ -210,10 +210,11 @@ func (f *fakeNaming) Subscribe(*vo.SubscribeParam) error { return nil }
 
 func TestRegistryAndResolverGoThroughNacosx(t *testing.T) {
 	logs := zlogtest.Capture(t)
+	t.Setenv("APP_ENV", "test") // not a developer's machine, which registers in its own Nacos only
 	naming := &fakeNaming{}
 	cli := nacosx.NewFrom(nacosx.Config{Addrs: []string{"n1:8848"}}, naming, nil)
 
-	reg := newNacosRegistry(cli)
+	reg := newNacosRegistry(cli, "")
 	info := &registry.Info{ServiceName: "order", Addr: utils.NewNetAddr("tcp", "10.0.0.5:8888"), Weight: 20, Tags: map[string]string{"zone": "a"}}
 	if err := reg.Register(info); err != nil {
 		t.Fatal(err)
@@ -279,5 +280,56 @@ func TestLoggerSettingsFilledInByOptionsSayWhereTheyAreFrom(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// A container is reached through the host's address and a mapped port: what is
+// registered then is service.advertise, not what the process listens on.
+func TestAdvertisedAddressIsWhatGetsRegistered(t *testing.T) {
+	zlogtest.Discard(t)
+	t.Setenv("APP_ENV", "dev")
+	for in, want := range map[string]string{
+		"":                "",
+		"10.0.0.5":        "10.0.0.5:8888",
+		"10.0.0.5:30888":  "10.0.0.5:30888",
+		"host.dev:30888":  "host.dev:30888",
+		" 10.0.0.5 ":      "10.0.0.5:8888",
+		"[fd00::5]:30888": "[fd00::5]:30888",
+	} {
+		if got, err := advertiseAddr(in, 8888); err != nil || got != want {
+			t.Errorf("advertiseAddr(%q) = %q, %v; want %q", in, got, err, want)
+		}
+	}
+	for _, in := range []string{":30888", "0.0.0.0:30888", "10.0.0.5:0", "10.0.0.5:x", "a:b:c"} {
+		if _, err := advertiseAddr(in, 8888); err == nil || !strings.Contains(err.Error(), "service.advertise") {
+			t.Errorf("advertiseAddr(%q) must fail and name the setting: %v", in, err)
+		}
+	}
+
+	naming := &fakeNaming{}
+	cli := nacosx.NewFrom(nacosx.Config{Addrs: []string{"n1:8848"}}, naming, nil)
+	reg := newNacosRegistry(cli, "10.0.0.5:30888")
+	info := &registry.Info{ServiceName: "order", Addr: utils.NewNetAddr("tcp", "[::]:8888")}
+	if err := reg.Register(info); err != nil {
+		t.Fatal(err)
+	}
+	if p := naming.registered[0]; p.Ip != "10.0.0.5" || p.Port != 30888 {
+		t.Errorf("registered as %s:%d", p.Ip, p.Port)
+	}
+	if err := reg.Deregister(info); err != nil || len(naming.deregistered) != 1 || naming.deregistered[0].Port != 30888 {
+		t.Errorf("deregister: %v %+v", err, naming.deregistered)
+	}
+}
+
+// Options refuses before anything is started.
+func TestOptionsRefusesALaptopInASharedNacos(t *testing.T) {
+	t.Setenv("APP_ENV", "")
+	var cfg Config
+	cfg.Service.Name = "order"
+	cfg.Log.Output = &bytes.Buffer{}
+	cfg.Nacos.Addrs = []string{"10.0.0.5:8848"}
+	_, err := Options(cfg)
+	if err == nil || !strings.Contains(err.Error(), "nacos.register: false") {
+		t.Fatalf("err = %v", err)
 	}
 }

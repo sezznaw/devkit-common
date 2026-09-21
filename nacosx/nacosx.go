@@ -32,6 +32,7 @@ import (
 	"github.com/nacos-group/nacos-sdk-go/v2/common/constant"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
 
+	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -46,6 +47,12 @@ type Config struct {
 	Group    string `yaml:"group"`
 	Username string `yaml:"username"`
 	Password string `yaml:"password"`
+	// Register says whether this process announces itself. false keeps
+	// everything else: the services it calls are found and its configuration
+	// is read, it just does not become an instance that others are sent to.
+	// That is how a developer's machine works against the Nacos of the
+	// development server. Default true.
+	Register *bool `yaml:"register"`
 	// CacheDir defaults to /tmp/nacos/cache.
 	CacheDir string `yaml:"cache_dir"`
 	// SDKLogLevel is the level from which the Nacos SDK's own records are let
@@ -64,6 +71,42 @@ func (c Config) GroupName() string {
 		return constant.DEFAULT_GROUP
 	}
 	return c.Group
+}
+
+// Registers reports whether Register announces this process (nacos.register).
+func (c Config) Registers() bool { return c.Register == nil || *c.Register }
+
+// CheckRegistration refuses the one registration that hurts other people: a
+// developer's machine (the local environment) announcing itself in a Nacos
+// that is not on that machine. Everybody who uses that Nacos would have a
+// share of their requests sent to a laptop, to code that is half written or
+// standing on a breakpoint.
+func (c Config) CheckRegistration() error {
+	if !c.Registers() || !config.IsLocal() {
+		return nil
+	}
+	for _, a := range c.Addrs {
+		if !isLoopback(a) {
+			return fmt.Errorf("nacosx: this is a developer's machine (%s is %q) and Nacos at %s is not on it: "+
+				"registered there, this machine would receive requests of everybody who uses that Nacos. "+
+				"To work against it, set nacos.register: false, which finds the other services and reads the configuration without announcing this one",
+				config.EnvVar, config.Env(), a)
+		}
+	}
+	return nil
+}
+
+// isLoopback reports whether the Nacos address "host:port" is this machine.
+func isLoopback(addr string) bool {
+	host := addr
+	if h, _, err := net.SplitHostPort(addr); err == nil {
+		host = h
+	}
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
 }
 
 func (c Config) namespaceName() string {

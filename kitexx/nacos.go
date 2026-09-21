@@ -70,13 +70,15 @@ func WatchConfig[T any](cfg Config) (*nacosx.Value[T], error) {
 // nacosRegistry registers a Kitex server through nacosx.
 type nacosRegistry struct {
 	cli *nacosx.Client
+	// advertise, when set, is registered instead of the listener's address.
+	advertise string
 
 	mu         sync.Mutex
 	deregister map[string]func() error
 }
 
-func newNacosRegistry(cli *nacosx.Client) *nacosRegistry {
-	return &nacosRegistry{cli: cli, deregister: map[string]func() error{}}
+func newNacosRegistry(cli *nacosx.Client, advertise string) *nacosRegistry {
+	return &nacosRegistry{cli: cli, advertise: advertise, deregister: map[string]func() error{}}
 }
 
 func registryKey(info *registry.Info) (string, error) {
@@ -91,9 +93,13 @@ func (r *nacosRegistry) Register(info *registry.Info) error {
 	if err != nil {
 		return err
 	}
+	addr := info.Addr.String()
+	if r.advertise != "" {
+		addr = r.advertise
+	}
 	dereg, err := r.cli.Register(nacosx.Registration{
 		Service:  info.ServiceName,
-		Addr:     info.Addr.String(),
+		Addr:     addr,
 		Weight:   float64(info.Weight),
 		Metadata: info.Tags,
 	})
