@@ -10,8 +10,10 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"flag"
+	"log/slog"
 	"os"
 	"time"
 
@@ -21,7 +23,7 @@ import (
 func main() {
 	format := flag.String("format", zlog.FormatConsole, "console or json")
 	flag.Parse()
-	zlog.Init(zlog.Options{Level: "debug", Format: *format, Service: "demo"})
+	zlog.Init(zlog.Options{Level: "debug", Format: *format, Service: "demo", Env: "dev", Stacktrace: "error"})
 	defer zlog.Sync()
 
 	zlog.Debug("cache miss", zlog.Str("key", "player:1001"))
@@ -40,6 +42,25 @@ func main() {
 		zlog.Str("g", "Gray").Gray(), zlog.Str("h", "no color"))
 
 	savePlayer(1001) // logs from repo.go
+
+	// The logger of a request: what kitexx puts into the context of every RPC.
+	ctx := zlog.CtxWith(context.Background(), zlog.Str("trace_id", "4bf92f3577b34da6"), zlog.Str("method", "Login"))
+	zlog.Ctx(ctx).Info("password checked", zlog.Str("user", "neo"), zlog.Secret("password", "hunter2"))
+
+	// A value of several lines goes below the record. Stacktrace: "error" adds
+	// the stack of the call to every Error; each frame is a link.
+	zlog.Ctx(ctx).Error("query failed", zlog.Str("sql", "SELECT *\nFROM player\nWHERE uid = ?"), zlog.Err(errors.New("connection refused")))
+
+	// A field of the call replaces the one of the same key given to With, and
+	// a field named like a key of the record itself is renamed.
+	zlog.With(zlog.Int("uid", 1)).Info("no key twice", zlog.Int("uid", 2), zlog.Int("level", 15))
+
+	// What dependencies log with log/slog comes out in the same format.
+	slog.Warn("from a dependency that uses log/slog", "attempt", 3)
+
+	if zlog.Enabled(zlog.LevelDebug) { // for records that are expensive to build
+		zlog.Debug("only built when debug is on")
+	}
 
 	// Code outside the working directory (the module cache, a sibling
 	// checkout) is reported with its absolute path. A logger built after

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 	"unicode"
 
@@ -22,6 +23,15 @@ var bufPool = buffer.NewPool()
 // zap's own console encoder prints the fields as a JSON object at the end of
 // the line. Here they are key=value in the order they were added, the keys
 // dimmed, so that the values stand out.
+//
+// A value of several lines, which is what the stack of an error or of a panic
+// is, would be one long quoted line. It is printed below the record instead,
+// as it is, so that the file:line of every frame is a link:
+//
+//	2006-01-02 15:04:05.000 ERROR handler/handler.go:27 save failed err=boom
+//	    errVerbose:
+//	      main.save
+//	      	/Users/me/game/ser-auth/handler/handler.go:27
 type consoleEncoder struct {
 	color bool
 	cwd   string
@@ -35,6 +45,8 @@ type consoleEncoder struct {
 	// field is then written in this color, key included, instead of a dimmed
 	// key and a plain value.
 	fieldColor string
+	// tail holds the values of several lines, to be printed below the record.
+	tail *buffer.Buffer
 }
 
 func newConsoleEncoder(color bool) zapcore.Encoder {
@@ -48,6 +60,10 @@ func (e *consoleEncoder) Clone() zapcore.Encoder {
 	c := *e
 	c.buf = bufPool.Get()
 	c.buf.Write(e.buf.Bytes())
+	if e.tail != nil {
+		c.tail = bufPool.Get()
+		c.tail.Write(e.tail.Bytes())
+	}
 	return &c
 }
 
@@ -81,12 +97,37 @@ func (e *consoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) 
 	for i := range fields {
 		fields[i].AddTo(w)
 	}
-	line.AppendByte('\n')
 	if ent.Stack != "" {
-		line.AppendString(ent.Stack)
-		line.AppendByte('\n')
+		w.block(keyStack, ent.Stack)
+	}
+	line.AppendByte('\n')
+	if e.tail != nil {
+		line.Write(e.tail.Bytes())
+	}
+	if w.tail != nil {
+		line.Write(w.tail.Bytes())
+		w.tail.Free()
 	}
 	return line, nil
+}
+
+// block queues a value of several lines to be printed below the record.
+func (e *consoleEncoder) block(k, v string) {
+	if e.tail == nil {
+		e.tail = bufPool.Get()
+	}
+	e.tail.AppendString("    ")
+	e.dim(e.tail, true)
+	e.tail.AppendString(e.ns)
+	e.tail.AppendString(k)
+	e.tail.AppendByte(':')
+	e.dim(e.tail, false)
+	e.tail.AppendByte('\n')
+	for _, ln := range strings.Split(strings.TrimRight(v, "\n"), "\n") {
+		e.tail.AppendString("      ")
+		e.tail.AppendString(ln)
+		e.tail.AppendByte('\n')
+	}
 }
 
 func (e *consoleEncoder) dim(b *buffer.Buffer, on bool) {
@@ -168,8 +209,15 @@ func (e *consoleEncoder) AddReflected(k string, v any) error {
 
 func (e *consoleEncoder) OpenNamespace(k string) { e.ns += k + "." }
 
-func (e *consoleEncoder) AddString(k, v string)            { e.key(k); e.str(v) }
-func (e *consoleEncoder) AddByteString(k string, v []byte) { e.key(k); e.str(string(v)) }
+func (e *consoleEncoder) AddString(k, v string) {
+	if strings.Contains(v, "\n") {
+		e.block(k, v)
+		return
+	}
+	e.key(k)
+	e.str(v)
+}
+func (e *consoleEncoder) AddByteString(k string, v []byte) { e.AddString(k, string(v)) }
 func (e *consoleEncoder) AddBool(k string, v bool)         { e.key(k); e.buf.AppendBool(v) }
 func (e *consoleEncoder) AddInt64(k string, v int64)       { e.key(k); e.buf.AppendInt(v) }
 func (e *consoleEncoder) AddUint64(k string, v uint64)     { e.key(k); e.buf.AppendUint(v) }

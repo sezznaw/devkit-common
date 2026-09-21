@@ -6,35 +6,45 @@
 //	zlog.Info("player login", zlog.Int("uid", uid), zlog.Str("ip", ip))
 //	zlog.Error("save player failed", zlog.Int("uid", uid), zlog.Err(err))
 //	zlog.Infof("player %d login from %s", uid, ip) // printf style, no fields
+//	zlog.Ctx(ctx).Info("saved")                    // with the fields of the request
 //
 // A field is one key and one value in a bracket of their own: Str, Int, Float,
-// Bool, Dur, Time, Err, Any. A missing value, a value too many or a key that
-// is not a string does not compile.
+// Bool, Dur, Time, Err, Any, Secret. A missing value, a value too many or a
+// key that is not a string does not compile.
 //
 // The two formats carry the same content, with one exception: the fields that
-// identify the process (Options.Service) are in the JSON records only.
+// identify the process (service, env, host, version) are in the JSON records
+// only.
 //
 // Every record carries the file and line of the call. The console format
 // prints them in the form IDEs and terminals turn into a link: relative to
 // the working directory, like compiler errors, or absolute for code outside
 // of it.
 //
-// A field may be named like one of the keys every record has (level, time,
-// msg, caller, service): it is written as "fields.level" and so on, in both
-// formats, so that a JSON record never has the same key twice.
+// A JSON record never has the same key twice. A field named like one of the
+// keys every record has (level, time, msg, caller, ...) is written as
+// "fields.level" and so on, in both formats. Of two fields with the same key
+// the later one is kept: a field of the call replaces the one given to With.
 //
 // A field can be given a color for the console, zlog.Int("age", 15).Blue(),
 // and so can an argument of Infof and friends, zlog.Blue(uid).
+//
+// Init also routes the standard library's log and log/slog here, so that what
+// dependencies print is in the same format.
 //
 // L returns the underlying *zap.Logger where the full zap API is wanted.
 package zlog
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"os"
+	"runtime/debug"
 	"strings"
 	"sync/atomic"
+	"syscall"
+	"time"
 
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -45,23 +55,79 @@ const (
 	FormatJSON    = "json"
 )
 
-// Options controls how a Logger is built.
+// Level is the severity of a record, for Enabled.
+type Level int8
+
+const (
+	LevelDebug = Level(zapcore.DebugLevel)
+	LevelInfo  = Level(zapcore.InfoLevel)
+	LevelWarn  = Level(zapcore.WarnLevel)
+	LevelError = Level(zapcore.ErrorLevel)
+)
+
+// Options controls how a Logger is built. Only Level and Format matter to
+// most services; the zero value of everything else is a sensible default.
 type Options struct {
 	// Level is one of debug, info, warn, error. Defaults to info.
 	Level string `yaml:"level"`
 	// Format is "console" (colored, for people; the default) or "json" (one
 	// object per line, for log collectors; recommended in production).
 	Format string `yaml:"format"`
-	// Service is attached to every JSON record as the "service" field. The
-	// console format leaves it out; see identityFields.
+	// JSON is what the log package before zlog had instead of Format.
+	//
+	// Deprecated: use Format. It is still read, because a configuration file
+	// that says "json: true" would otherwise turn into console output in
+	// production without anybody noticing.
+	JSON bool `yaml:"json"`
+
+	// Service, Env and Version identify the process on every JSON record, next
+	// to "host", which is the host name (the pod name in Kubernetes). The
+	// console format leaves them out; see identityFields. An empty Version
+	// falls back to the VCS revision the binary was built from.
 	Service string `yaml:"service"`
+	Env     string `yaml:"env"`
+	Version string `yaml:"version"`
+
+	// Stacktrace is the level from which records carry the stack of the call,
+	// usually "error". Empty means never. On the console every line of the
+	// stack is a link.
+	Stacktrace string `yaml:"stacktrace"`
+
+	// Sampling protects disks and collectors from a flood of one and the same
+	// record. Off unless First is set.
+	Sampling Sampling `yaml:"sampling"`
+	// Buffer collects output in memory and writes it in larger pieces. Off
+	// unless Size is set.
+	Buffer Buffer `yaml:"buffer"`
+	// MaxFieldBytes cuts the message and every field value that is longer.
+	// Container runtimes split lines of more than 16 KB, after which a
+	// collector no longer sees one JSON object. 0 means no limit.
+	MaxFieldBytes int `yaml:"max_field_bytes"`
+
 	// Output defaults to os.Stdout. Not loadable from config.
 	Output io.Writer `yaml:"-"`
 }
 
+// Sampling: within every second, records with the same level and message are
+// written First times, and after that only every Thereafter-th one. The
+// message of Infof and friends is the formatted one, so records that differ in
+// their arguments are different records.
+type Sampling struct {
+	First      int `yaml:"first"`
+	Thereafter int `yaml:"thereafter"`
+}
+
+// Buffer: up to Size bytes wait in memory for at most FlushInterval (default
+// 1s). Records of level Fatal are flushed at once, and Sync flushes; what is
+// lost is the last interval when the process is killed.
+type Buffer struct {
+	Size          int           `yaml:"size"`
+	FlushInterval time.Duration `yaml:"flush_interval"`
+}
+
 // Logger is a leveled, structured logger. There are two kinds:
 //
-//   - Default and the package-level With return a logger that follows the
+//   - Default, Ctx and the package-level With return a logger that follows the
 //     default: it looks up the logger installed by Init each time it logs.
 //     It is therefore safe to create one before main has called Init, which
 //     is what a package-level variable does:
@@ -81,12 +147,19 @@ type Logger struct {
 	cached atomic.Pointer[derived]
 }
 
-// core is a configured zap logger in the two forms the API needs.
+// core is a configured zap logger and the fields added with With. The fields
+// are not handed to zap's own With, which would encode them for good: a field
+// of a call has to be able to replace one of them.
 type core struct {
-	z       *zap.Logger // handed out by Zap and L
-	z2      *zap.Logger // behind the logging functions, by way of core.log and core.logf
-	level   zap.AtomicLevel
-	colored bool // a console that renders colors
+	z0       *zap.Logger // reports its direct caller; the base of Zap and L
+	z2       *zap.Logger // behind the logging functions, by way of core.log and core.logf
+	level    zap.AtomicLevel
+	colored  bool // a console that renders colors
+	maxField int
+	stop     func() // flushes and stops the buffer, if there is one
+
+	added     []zap.Field // the fields of With, ready to be written
+	addedKeys []string    // the keys they were given, added[i] under addedKeys[i]
 }
 
 type derived struct {
@@ -100,7 +173,20 @@ var (
 )
 
 func init() {
-	std.Store(New(Options{}).own)
+	std.Store(New(envOptions()).own)
+}
+
+// envOptions configures the logger that is in place until Init is called. A
+// service logs before that when it cannot read its configuration, and that is
+// the line a collector must not fail to parse: deployments set
+// ZLOG_FORMAT=json.
+func envOptions() Options {
+	return Options{
+		Level:   os.Getenv("ZLOG_LEVEL"),
+		Format:  os.Getenv("ZLOG_FORMAT"),
+		Service: os.Getenv("ZLOG_SERVICE"),
+		Env:     os.Getenv("ZLOG_ENV"),
+	}
 }
 
 // New builds a Logger without installing it as the default.
@@ -115,6 +201,9 @@ func New(o Options) *Logger {
 	var identity []zap.Field
 	colored := false
 	format := strings.ToLower(o.Format)
+	if format == "" && o.JSON {
+		format = FormatJSON
+	}
 	switch format {
 	case FormatJSON:
 		enc = zapcore.NewJSONEncoder(jsonEncoderConfig())
@@ -124,15 +213,47 @@ func New(o Options) *Logger {
 		enc = newConsoleEncoder(colored)
 	}
 
-	z := zap.New(zapcore.NewCore(enc, zapcore.Lock(zapcore.AddSync(o.Output)), level), zap.AddCaller()).With(identity...)
-	l := &Logger{own: wrap(z, level, colored)}
+	var ws zapcore.WriteSyncer
+	var stop func()
+	if o.Buffer.Size > 0 {
+		b := &zapcore.BufferedWriteSyncer{WS: zapcore.AddSync(o.Output), Size: o.Buffer.Size, FlushInterval: o.Buffer.FlushInterval}
+		if b.FlushInterval <= 0 {
+			b.FlushInterval = time.Second
+		}
+		ws, stop = b, func() { _ = b.Stop() }
+	} else {
+		ws = zapcore.Lock(zapcore.AddSync(o.Output))
+	}
 
-	// A typo in the config must not pass silently as "info" or "console".
+	zc := zapcore.NewCore(enc, ws, level)
+	if o.Sampling.First > 0 {
+		zc = zapcore.NewSamplerWithOptions(zc, time.Second, o.Sampling.First, o.Sampling.Thereafter)
+	}
+	zopts := []zap.Option{zap.AddCaller()}
+	stackLevel, stackOK := parseLevel(o.Stacktrace)
+	if o.Stacktrace != "" && stackOK {
+		zopts = append(zopts, zap.AddStacktrace(stackLevel))
+	}
+	z := zap.New(zc, zopts...).With(identity...)
+
+	l := &Logger{own: &core{
+		z0:       z,
+		z2:       z.WithOptions(zap.AddCallerSkip(2)),
+		level:    level,
+		colored:  colored,
+		maxField: o.MaxFieldBytes,
+		stop:     stop,
+	}}
+
+	// A typo in the config must not pass silently as a default.
 	if !levelOK {
 		l.Warn("zlog: unknown level, using info", Str("given", o.Level))
 	}
 	if format != "" && format != FormatJSON && format != FormatConsole {
 		l.Warn("zlog: unknown format, using console", Str("given", o.Format))
+	}
+	if !stackOK {
+		l.Warn("zlog: unknown stacktrace level, no stack traces", Str("given", o.Stacktrace))
 	}
 	return l
 }
@@ -147,46 +268,89 @@ func New(o Options) *Logger {
 // belongs in fieldKey.
 func identityFields(o Options) []zap.Field {
 	var f []zap.Field
-	if o.Service != "" {
-		f = append(f, zap.String(keyService, o.Service))
+	add := func(key, v string) {
+		if v != "" {
+			f = append(f, zap.String(key, v))
+		}
 	}
+	add(keyService, o.Service)
+	add(keyEnv, o.Env)
+	host, _ := os.Hostname()
+	add(keyHost, host)
+	if o.Version == "" {
+		o.Version = vcsRevision()
+	}
+	add(keyVersion, o.Version)
 	return f
 }
 
+func vcsRevision() string {
+	info, ok := debug.ReadBuildInfo()
+	if !ok {
+		return ""
+	}
+	for _, s := range info.Settings {
+		if s.Key == "vcs.revision" {
+			return s.Value[:min(12, len(s.Value))]
+		}
+	}
+	return ""
+}
+
 // Init builds a Logger and installs it as the one used by the package-level
-// functions. Call it once at the start of main.
+// functions, and by the standard library's log and log/slog. Call it once at
+// the start of main, and zlog.Sync before the process exits.
 func Init(o Options) *Logger {
 	l := New(o)
-	std.Store(l.own)
+	if old := std.Swap(l.own); old != nil && old.stop != nil {
+		old.stop()
+	}
+	redirectStdLoggers()
 	return l
+}
+
+// SetDefault installs l as the default, as Init does with the logger it
+// builds, and returns a function that puts the previous one back. It is meant
+// for tests; see package zlogtest.
+func SetDefault(l *Logger) (restore func()) {
+	prev := std.Swap(l.core())
+	return func() { std.Store(prev) }
 }
 
 // Default returns a logger that writes where the package-level functions do.
 // It follows Init; see Logger.
 func Default() *Logger { return followStd }
 
-// wrap takes a zap logger that reports its direct caller. The frames of this
-// package between the caller and zap are fixed on every path, and the skips
-// account for them: two behind the logging functions (the function itself and
-// core.log or core.logf), none for z.
-func wrap(z *zap.Logger, level zap.AtomicLevel, colored bool) *core {
-	return &core{
-		z:       z,
-		z2:      z.WithOptions(zap.AddCallerSkip(2)),
-		level:   level,
-		colored: colored,
-	}
-}
-
+// with returns a core that also writes fields. Of two fields with the same key
+// the later one stays, at the position of the earlier one.
 func (c *core) with(fields []Field) *core {
-	return wrap(c.z.With(c.zap(fields)...), c.level, c.colored)
+	d := *c
+	d.added = make([]zap.Field, 0, len(c.added)+len(fields))
+	d.addedKeys = make([]string, 0, len(c.added)+len(fields))
+	d.added = append(d.added, c.added...)
+	d.addedKeys = append(d.addedKeys, c.addedKeys...)
+next:
+	for _, f := range fields {
+		for i, k := range d.addedKeys {
+			if k == f.z.Key && k != "" {
+				d.added[i] = c.convert(f)
+				continue next
+			}
+		}
+		d.added = append(d.added, c.convert(f))
+		d.addedKeys = append(d.addedKeys, f.z.Key)
+	}
+	return &d
 }
 
+// The frames of this package between the caller and zap are fixed on every
+// path, and z2 skips them: the logging function itself and log or logf.
+//
 // log converts the fields only once the record is known to be written, so a
 // call below the level costs no allocation: the caller's fields never leave
 // its stack.
 func (c *core) log(lv zapcore.Level, msg string, fields []Field) {
-	if ce := c.z2.Check(lv, msg); ce != nil {
+	if ce := c.z2.Check(lv, c.clip(msg)); ce != nil {
 		ce.Write(c.zap(fields)...)
 	}
 }
@@ -208,9 +372,19 @@ func (c *core) logf(lv zapcore.Level, format string, args ...any) {
 	default:
 		msg = fmt.Sprintf(format, plainArgs(args)...)
 	}
-	if ce := c.z2.Check(lv, msg); ce != nil {
-		ce.Write()
+	if ce := c.z2.Check(lv, c.clip(msg)); ce != nil {
+		ce.Write(c.zap(nil)...)
 	}
+}
+
+// sync leaves out the error that is not one: a terminal or a pipe cannot be
+// synced, and stdout is one of the two more often than not.
+func (c *core) sync() error {
+	err := c.z0.Sync()
+	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF) {
+		return nil
+	}
+	return err
 }
 
 // core returns what l logs to right now. For a logger that follows the
@@ -248,7 +422,8 @@ func parseLevel(s string) (zapcore.Level, bool) {
 }
 
 // With returns a child logger that adds the fields to every record, e.g.
-// l.With(zlog.Str("component", "repo")).
+// l.With(zlog.Str("component", "repo")). A field with a key that l already
+// adds replaces that one.
 func (l *Logger) With(fields ...Field) *Logger {
 	if l.own != nil {
 		return &Logger{own: l.own.with(fields)}
@@ -258,16 +433,33 @@ func (l *Logger) With(fields ...Field) *Logger {
 }
 
 // Zap returns the underlying zap logger, for what this package does not wrap
-// (Named, Check, WithOptions, ...). Fields passed to it directly are not
-// renamed when they clash with a key of the record; see fieldKey. The result is a plain zap logger and cannot follow Init: ask for it where it
-// is used rather than keeping it in a package-level variable.
-func (l *Logger) Zap() *zap.Logger { return l.core().z }
+// (Named, Check, WithOptions, ...). Fields passed to it directly are neither
+// renamed when they clash with a key of the record nor replaced by a later
+// field of the same key. The result is a plain zap logger and cannot follow
+// Init: ask for it where it is used rather than keeping it in a package-level
+// variable.
+func (l *Logger) Zap() *zap.Logger {
+	c := l.core()
+	if len(c.added) == 0 {
+		return c.z0
+	}
+	return c.z0.With(c.added...)
+}
+
+// Enabled reports whether a record of that level would be written. It is for
+// records that are expensive to put together, because Go evaluates the
+// arguments of a call whether or not anything is logged:
+//
+//	if zlog.Enabled(zlog.LevelDebug) {
+//		zlog.Debug("room state", zlog.Any("room", room.Snapshot()))
+//	}
+func (l *Logger) Enabled(lv Level) bool { return l.core().level.Enabled(zapcore.Level(lv)) }
 
 // SetLevel changes the level at runtime. It also applies to every logger
 // derived from l with With. An unknown level is ignored and reported.
 func (l *Logger) SetLevel(level string) {
 	lv, ok := parseLevel(level)
-	if !ok {
+	if !ok || level == "" {
 		l.Warn("zlog: unknown level, keeping the current one", Str("given", level))
 		return
 	}
@@ -275,7 +467,7 @@ func (l *Logger) SetLevel(level string) {
 }
 
 // Sync flushes buffered records. Call it before the process exits.
-func (l *Logger) Sync() error { return l.core().z.Sync() }
+func (l *Logger) Sync() error { return l.core().sync() }
 
 func (l *Logger) Debug(msg string, fields ...Field) { l.core().log(zapcore.DebugLevel, msg, fields) }
 func (l *Logger) Info(msg string, fields ...Field)  { l.core().log(zapcore.InfoLevel, msg, fields) }
@@ -308,13 +500,17 @@ func (l *Logger) Fatalf(format string, args ...any) {
 func With(fields ...Field) *Logger { return followStd.With(fields...) }
 
 // L returns the default logger's underlying zap logger; see Logger.Zap.
-func L() *zap.Logger { return std.Load().z }
+func L() *zap.Logger { return followStd.Zap() }
+
+// Enabled reports whether the default logger writes records of that level;
+// see Logger.Enabled.
+func Enabled(lv Level) bool { return std.Load().level.Enabled(zapcore.Level(lv)) }
 
 // SetLevel changes the default logger's level at runtime; see Logger.SetLevel.
 func SetLevel(level string) { followStd.SetLevel(level) }
 
 // Sync flushes the default logger; see Logger.Sync.
-func Sync() error { return std.Load().z.Sync() }
+func Sync() error { return std.Load().sync() }
 
 func Debug(msg string, fields ...Field) { std.Load().log(zapcore.DebugLevel, msg, fields) }
 func Info(msg string, fields ...Field)  { std.Load().log(zapcore.InfoLevel, msg, fields) }

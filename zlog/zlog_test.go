@@ -354,8 +354,8 @@ func TestConsoleFieldsAreKeyValue(t *testing.T) {
 		{"scalars, in the order given", func(l *Logger) { l.Info("msg", Int("uid", 1001), Bool("vip", true), Float("rate", 0.5)) }, " uid=1001 vip=true rate=0.5"},
 		{"a plain word is not quoted", func(l *Logger) { l.Info("msg", Str("ip", "10.0.0.7"), Str("name", "张三")) }, " ip=10.0.0.7 name=张三"},
 		{"quoted when it would not read as one word", func(l *Logger) {
-			l.Info("msg", Str("a", "two words"), Str("b", ""), Str("c", "x=y"), Str("d", "line\nbreak"))
-		}, ` a="two words" b="" c="x=y" d="line\nbreak"`},
+			l.Info("msg", Str("a", "two words"), Str("b", ""), Str("c", "x=y"), Str("d", "tab\there"))
+		}, ` a="two words" b="" c="x=y" d="tab\there"`},
 		{"error", func(l *Logger) { l.Info("msg", Err(errors.New("redis: i/o timeout"))) }, ` err="redis: i/o timeout"`},
 		{"duration and time", func(l *Logger) { l.Info("msg", Dur("took", 1500*time.Millisecond), Time("at", at)) }, " took=1.5s at=2026-09-20T08:30:00.000Z"},
 		{"values without a typed field are JSON", func(l *Logger) { l.Info("msg", Any("pos", point{1, 2}), Any("ids", []int{1, 2}), Any("none", nil)) }, ` pos={"X":1,"Y":2} ids=[1,2] none=null`},

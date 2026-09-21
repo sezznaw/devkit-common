@@ -89,13 +89,15 @@ func clickablePath(cwd, file string) string {
 
 func jsonEncoderConfig() zapcore.EncoderConfig {
 	return zapcore.EncoderConfig{
-		TimeKey:     keyTime,
-		LevelKey:    keyLevel,
-		CallerKey:   keyCaller,
-		MessageKey:  keyMsg,
-		LineEnding:  zapcore.DefaultLineEnding,
-		EncodeTime:  zapcore.TimeEncoderOfLayout(jsonTimeLayout),
-		EncodeLevel: zapcore.CapitalLevelEncoder,
+		TimeKey:    keyTime,
+		LevelKey:   keyLevel,
+		CallerKey:  keyCaller,
+		MessageKey: keyMsg,
+		// keyStack is also what the klog bridge of kitexx uses for a panic.
+		StacktraceKey: keyStack,
+		LineEnding:    zapcore.DefaultLineEnding,
+		EncodeTime:    zapcore.TimeEncoderOfLayout(jsonTimeLayout),
+		EncodeLevel:   zapcore.CapitalLevelEncoder,
 		// "handler/handler.go:27": with the service field that is enough to
 		// find the line, and unlike the full path it does not depend on the
 		// machine or the flags the binary was built with.
