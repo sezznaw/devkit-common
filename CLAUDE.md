@@ -48,9 +48,8 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     absolute for the rest. The owner asked for the short forms on 2026-09-21
     because absolute paths made every framework record a very wide line.
     Until then everything outside the working directory was absolute, for the
-    sake of the link; whether GoLand links the two new forms (it looks a
-    relative path up by its end when the project directory is open) was NOT
-    confirmed at the time of the change. JSON uses zap's short form.
+    sake of the link; the owner confirmed on 2026-09-21 that GoLand's run window links the
+    new forms too (with the project directory open). JSON uses zap's short form.
   - *No key twice in a record.* zap does not deduplicate; parsers keep the
     last duplicate and Elasticsearch rejects the record. So (1) a field named
     like a key of the record becomes `fields.<key>` (`fieldKey`, logrus's
