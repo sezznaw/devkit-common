@@ -57,7 +57,7 @@ func TestShutdownHooksRunInReverseAndSurviveFailures(t *testing.T) {
 	OnShutdown("db", func() error { order = append(order, "db"); return nil })
 	OnShutdown("cache", func() error { order = append(order, "cache"); return errors.New("close failed") })
 	OnShutdown("consumer", func() error { order = append(order, "consumer"); panic("boom") })
-	runShutdownHooks()
+	RunShutdownHooks()
 	if strings.Join(order, ",") != "consumer,cache,db" {
 		t.Fatalf("order = %v; want last registered first, and all of them despite panic/error", order)
 	}
@@ -68,7 +68,7 @@ func TestShutdownHooksRunInReverseAndSurviveFailures(t *testing.T) {
 		}
 	}
 	order = nil
-	runShutdownHooks()
+	RunShutdownHooks()
 	if len(order) != 0 {
 		t.Error("hooks must run only once")
 	}

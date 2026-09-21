@@ -84,8 +84,42 @@ const (
 // registry (unless disabled) and logging middleware. It also installs the
 // default logger.
 func Options(cfg Config) ([]server.Option, error) {
+	if err := Bootstrap(&cfg); err != nil {
+		return nil, err
+	}
+
+	addr, err := ListenAddr(cfg.Service.Addr)
+	if err != nil {
+		return nil, err
+	}
+	opts := []server.Option{
+		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
+		server.WithServiceAddr(addr),
+		server.WithMiddleware(LoggingMiddleware()),
+		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
+		server.WithExitWaitTime(DrainTimeout(cfg)),
+	}
+	if !cfg.RegistryDisabled {
+		cli, advertise, err := Registration(cfg, addr.Port)
+		if err != nil {
+			return nil, err
+		}
+		opts = append(opts, server.WithRegistry(&delayedRegistry{
+			Registry: newNacosRegistry(cli, advertise),
+			wait:     DeregisterWait(cfg),
+		}))
+	}
+	return opts, nil
+}
+
+// Bootstrap is what a service of any kind does first, an RPC service in
+// Options and an API service in hertzx.New: it checks service.name, installs
+// the logger (Kitex's own records go through it too) and lets the level follow
+// Nacos when log_level_data_id says so. What it fills into cfg.Log is for the
+// "logger configured" record.
+func Bootstrap(cfg *Config) error {
 	if cfg.Service.Name == "" {
-		return nil, fmt.Errorf("kitexx: service.name is required")
+		return fmt.Errorf("kitexx: service.name is required")
 	}
 	// What is filled in here says so in the "logger configured" record, or the
 	// value would look as if it had been written into the log section.
@@ -101,7 +135,7 @@ func Options(cfg Config) ([]server.Option, error) {
 	bridgeKlog(zlog.Init(cfg.Log))
 	if cfg.LogLevelDataID != "" {
 		// The level is a convenience: a service must start without it.
-		nc, err := Nacos(cfg)
+		nc, err := Nacos(*cfg)
 		if err == nil {
 			err = watchLogLevel(nc, cfg.LogLevelDataID)
 		}
@@ -109,46 +143,41 @@ func Options(cfg Config) ([]server.Option, error) {
 			zlog.Warn("log level does not follow Nacos", zlog.Str("data_id", cfg.LogLevelDataID), zlog.Err(err))
 		}
 	}
-
-	addr, err := listenAddr(cfg.Service.Addr)
-	if err != nil {
-		return nil, err
-	}
-	opts := []server.Option{
-		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
-		server.WithServiceAddr(addr),
-		server.WithMiddleware(LoggingMiddleware()),
-		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
-		server.WithExitWaitTime(cfg.Shutdown.DrainTimeout.Or(defaultDrainTimeout)),
-	}
-	if !cfg.RegistryDisabled {
-		// Before anything is started: a laptop must not announce itself in a
-		// Nacos that other people use.
-		if err := cfg.Nacos.CheckRegistration(); err != nil {
-			return nil, err
-		}
-		advertise, err := advertiseAddr(cfg.Service.Advertise, addr.Port)
-		if err != nil {
-			return nil, err
-		}
-		cli, err := Nacos(cfg)
-		if err != nil {
-			return nil, err
-		}
-		if cfg.Nacos.WatchesServices() {
-			cli.WatchServices(serviceListInterval)
-		}
-		wait := defaultDeregisterWait
-		if cfg.Shutdown.DeregisterWait != nil {
-			wait = cfg.Shutdown.DeregisterWait.Std()
-		}
-		opts = append(opts, server.WithRegistry(&delayedRegistry{
-			Registry: newNacosRegistry(cli, advertise),
-			wait:     wait,
-		}))
-	}
-	return opts, nil
+	return nil
 }
+
+// Registration prepares what registering in Nacos needs, before anything is
+// started: it refuses a developer's machine that would announce itself in a
+// Nacos other people use, resolves service.advertise ("" when the listener's
+// own address is to be registered), connects, and starts the record of which
+// services are alive.
+func Registration(cfg Config, listenPort int) (cli *nacosx.Client, advertise string, err error) {
+	if err := cfg.Nacos.CheckRegistration(); err != nil {
+		return nil, "", err
+	}
+	if advertise, err = advertiseAddr(cfg.Service.Advertise, listenPort); err != nil {
+		return nil, "", err
+	}
+	if cli, err = Nacos(cfg); err != nil {
+		return nil, "", err
+	}
+	if cfg.Nacos.WatchesServices() {
+		cli.WatchServices(serviceListInterval)
+	}
+	return cli, advertise, nil
+}
+
+// DeregisterWait is how long a service keeps serving after it has left Nacos
+// (shutdown.deregister_wait, default 3s), and DrainTimeout how long requests in
+// progress get after that (shutdown.drain_timeout, default 15s).
+func DeregisterWait(cfg Config) time.Duration {
+	if cfg.Shutdown.DeregisterWait != nil {
+		return cfg.Shutdown.DeregisterWait.Std()
+	}
+	return defaultDeregisterWait
+}
+
+func DrainTimeout(cfg Config) time.Duration { return cfg.Shutdown.DrainTimeout.Or(defaultDrainTimeout) }
 
 // ClientOptions builds client options for calling other services: discovery
 // through Nacos, and the TTHeader transport, which is what carries the
@@ -184,7 +213,7 @@ func Run(svr server.Server, cfg Config) error {
 	defer zlog.Sync()
 	zlog.Info("server starting", zlog.Str("addr", normalizeAddr(cfg.Service.Addr)), zlog.Bool("registry", !cfg.RegistryDisabled))
 	err := svr.Run()
-	runShutdownHooks()
+	RunShutdownHooks()
 	nacosx.CloseShared()
 	if err != nil {
 		zlog.Error("server stopped with error", zlog.Err(err))
@@ -224,7 +253,7 @@ func LoggingMiddleware() endpoint.Middleware {
 			}
 			traceID, ok := metainfo.GetPersistentValue(ctx, TraceIDKey)
 			if !ok || traceID == "" {
-				traceID = newTraceID()
+				traceID = NewTraceID()
 				ctx = metainfo.WithPersistentValue(ctx, TraceIDKey, traceID)
 			}
 			ctx = zlog.CtxWith(ctx, zlog.Str(traceIDField, traceID), zlog.Str("method", method))
@@ -251,7 +280,8 @@ func TraceID(ctx context.Context) string {
 	return id
 }
 
-func newTraceID() string {
+// NewTraceID returns a new trace_id: 32 hex characters.
+func NewTraceID() string {
 	var b [16]byte
 	_, _ = rand.Read(b[:])
 	return hex.EncodeToString(b[:])
@@ -297,9 +327,9 @@ func advertiseAddr(v string, listenPort int) (string, error) {
 	return net.JoinHostPort(host, port), nil
 }
 
-// listenAddr resolves service.addr. The errors name the setting and what it
+// ListenAddr resolves service.addr. The errors name the setting and what it
 // accepts, because the net package's own ("missing port in address") do not.
-func listenAddr(v string) (*net.TCPAddr, error) {
+func ListenAddr(v string) (*net.TCPAddr, error) {
 	const accepts = `a port such as 8888, or "host:port" such as "127.0.0.1:8888"`
 	norm := normalizeAddr(v)
 	_, port, err := net.SplitHostPort(norm)

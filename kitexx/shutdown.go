@@ -54,8 +54,9 @@ func OnShutdown(name string, fn func() error) {
 	hooks = append(hooks, namedHook{name, fn})
 }
 
-// runShutdownHooks runs every hook even if an earlier one fails or panics.
-func runShutdownHooks() {
+// RunShutdownHooks runs every hook even if an earlier one fails or panics.
+// kitexx.Run and hertzx.Run call it once the server has stopped.
+func RunShutdownHooks() {
 	hooksMu.Lock()
 	list := hooks
 	hooks = nil

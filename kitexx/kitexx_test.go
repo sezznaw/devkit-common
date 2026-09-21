@@ -53,23 +53,23 @@ func TestListenAddr(t *testing.T) {
 		"127.0.0.1:9001": "127.0.0.1:9001",
 		"[::1]:9001":     "[::1]:9001",
 	} {
-		got, err := listenAddr(in)
+		got, err := ListenAddr(in)
 		if err != nil {
-			t.Errorf("listenAddr(%q): %v", in, err)
+			t.Errorf("ListenAddr(%q): %v", in, err)
 			continue
 		}
 		if got.String() != want {
-			t.Errorf("listenAddr(%q) = %s, want %s", in, got, want)
+			t.Errorf("ListenAddr(%q) = %s, want %s", in, got, want)
 		}
 	}
 	for _, in := range []string{"0", "70000", "abc", "8888:", "localhost", "-1"} {
-		_, err := listenAddr(in)
+		_, err := ListenAddr(in)
 		if err == nil {
-			t.Errorf("listenAddr(%q) must fail", in)
+			t.Errorf("ListenAddr(%q) must fail", in)
 			continue
 		}
 		if !strings.Contains(err.Error(), "service.addr") || !strings.Contains(err.Error(), "a port such as 8888") {
-			t.Errorf("listenAddr(%q): the error must name the setting and what it accepts: %v", in, err)
+			t.Errorf("ListenAddr(%q): the error must name the setting and what it accepts: %v", in, err)
 		}
 	}
 }
@@ -81,7 +81,7 @@ func TestAddrFromYAML(t *testing.T) {
 		if err := yaml.Unmarshal([]byte(doc), &cfg); err != nil {
 			t.Fatalf("%q: %v", doc, err)
 		}
-		got, err := listenAddr(cfg.Service.Addr)
+		got, err := ListenAddr(cfg.Service.Addr)
 		if err != nil || got.String() != ":8888" {
 			t.Errorf("%q: got %v, %v", doc, got, err)
 		}
