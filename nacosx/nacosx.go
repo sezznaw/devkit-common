@@ -17,9 +17,13 @@
 package nacosx
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
+	"net/http"
+	"net/url"
 	"sort"
 	"strconv"
 	"strings"
@@ -337,12 +341,52 @@ func Probe(c Config, timeout time.Duration) error {
 	for range c.Addrs {
 		r := <-ch
 		if r.err == nil {
-			return nil
+			return checkAccount(r.addr, c, timeout)
 		}
 		failures = append(failures, r.err.Error())
 	}
 	sort.Strings(failures)
 	return fmt.Errorf("cannot reach Nacos: %s. Check nacos.addrs in the service configuration", strings.Join(failures, "; "))
+}
+
+// checkAccount makes sure that a Nacos with authentication accepts the
+// configured account. The SDK does not: it logs "login in err" and carries on,
+// the server then answers every request with 403, and the SDK reports
+// RegisterInstance as a success all the same. The service would run on, say
+// "registered in Nacos", and be invisible to every caller.
+//
+// A server that does not say whether it authenticates (another version, a
+// proxy in between) is not second-guessed: nil.
+func checkAccount(addr string, c Config, timeout time.Duration) error {
+	hc := &http.Client{Timeout: timeout}
+	base := "http://" + addr + "/nacos"
+	resp, err := hc.Get(base + "/v1/console/server/state")
+	if err != nil {
+		return nil
+	}
+	var state struct {
+		AuthEnabled string `json:"auth_enabled"`
+	}
+	err = json.NewDecoder(resp.Body).Decode(&state)
+	resp.Body.Close()
+	if err != nil || state.AuthEnabled != "true" {
+		return nil
+	}
+	const where = "nacos.username and nacos.password in the service configuration, which usually take them from NACOS_USERNAME and NACOS_PASSWORD"
+	if c.Username == "" {
+		return fmt.Errorf("Nacos at %s requires an account and none is configured. Check %s", addr, where)
+	}
+	resp, err = hc.PostForm(base+"/v1/auth/users/login", url.Values{"username": {c.Username}, "password": {c.Password}})
+	if err != nil {
+		return nil
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode == http.StatusOK {
+		return nil
+	}
+	body, _ := io.ReadAll(io.LimitReader(resp.Body, 300))
+	return fmt.Errorf("Nacos at %s does not accept the account %q (HTTP %d: %s). Check %s",
+		addr, c.Username, resp.StatusCode, strings.TrimSpace(string(body)), where)
 }
 
 func probeOne(addr string, timeout time.Duration) error {

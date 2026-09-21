@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"sync"
 
 	"github.com/cloudwego/kitex/pkg/discovery"
@@ -31,7 +32,7 @@ func Nacos(cfg Config) (*nacosx.Client, error) {
 	if !cfg.RegistryDisabled {
 		cli, err := nacosx.Shared(cfg.Nacos)
 		if err != nil {
-			return nil, fmt.Errorf("%w. To run without Nacos, for example on your own machine, set registry_disabled: true", err)
+			return nil, withNacosHint(err)
 		}
 		return cli, nil
 	}
@@ -45,6 +46,21 @@ func Nacos(cfg Config) (*nacosx.Client, error) {
 		offline = nacosx.Offline(filepath.Join(dir, "nacos"))
 	}
 	return offline, nil
+}
+
+// withNacosHint says what to do about a Nacos that cannot be reached. Every
+// environment uses Nacos, a developer's machine too, so there the first thing
+// to say is how to start one; an account that Nacos rejects needs no hint.
+func withNacosHint(err error) error {
+	if !strings.Contains(err.Error(), "cannot reach Nacos") {
+		return err
+	}
+	if config.IsLocal() {
+		return fmt.Errorf("%w. On your own machine, start one (both ports are needed):\n"+
+			"  docker run -d --name nacos --restart unless-stopped -e MODE=standalone -p 8848:8848 -p 9848:9848 nacos/nacos-server:v2.4.3\n"+
+			"To work without Nacos (tests, no network), set registry_disabled: true", err)
+	}
+	return fmt.Errorf("%w. A deployed service does not start without Nacos", err)
 }
 
 // WatchConfig reads the configuration of the service from Nacos into a T and
