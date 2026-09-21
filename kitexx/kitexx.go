@@ -73,6 +73,9 @@ type Config struct {
 }
 
 const (
+	// serviceListInterval is how often Nacos is asked for service names that
+	// were not there before; instances of known services are pushed.
+	serviceListInterval   = 3 * time.Second
 	defaultDeregisterWait = 3 * time.Second
 	defaultDrainTimeout   = 15 * time.Second
 )
@@ -131,6 +134,9 @@ func Options(cfg Config) ([]server.Option, error) {
 		cli, err := Nacos(cfg)
 		if err != nil {
 			return nil, err
+		}
+		if cfg.Nacos.WatchesServices() {
+			cli.WatchServices(serviceListInterval)
 		}
 		wait := defaultDeregisterWait
 		if cfg.Shutdown.DeregisterWait != nil {

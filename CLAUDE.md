@@ -121,6 +121,13 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `server.RegisterShutdownHook`, which fires while requests are still served;
   (3) `shutdown.deregister_wait` is a `*config.Duration` so an explicit `0s`
   differs from "unset" (default 3s).
+- `nacosx/services.go`: `WatchServices`, the owner's requirement that every service logs who came,
+  who went and everything that is alive (name, number of instances). It needs a naming client of
+  its own with `UpdateCacheWhenEmpty`: measured against Nacos 2.4.3, the default client is never
+  pushed the departure of a service's last instance and `SelectAllInstances` keeps returning it.
+  Do not "simplify" it onto the shared client, and do not turn the protection off for the calling
+  path. Nacos keeps a service name in its list after the last instance is gone, so the overview
+  counts instances, not names. New names are polled (`serviceListInterval`, 3s), instances pushed.
 - `nacosx`: one `Client` per process (`Shared`, reached from services through
   `kitexx.Nacos`) for registration, discovery and configuration. What it is
   built around are facts of nacos-sdk-go v2.3.5 that are easy to forget:

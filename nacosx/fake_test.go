@@ -2,6 +2,7 @@ package nacosx
 
 import (
 	"errors"
+	"sort"
 	"sync"
 	"sync/atomic"
 
@@ -85,6 +86,7 @@ type fakeNaming struct {
 	instances    map[string][]model.Instance
 	callbacks    map[string]func([]model.Instance, error)
 	registered   []vo.RegisterInstanceParam
+	listErr      error
 	deregistered []vo.DeregisterInstanceParam
 }
 
@@ -115,6 +117,22 @@ func (f *fakeNaming) SelectAllInstances(p vo.SelectAllInstancesParam) ([]model.I
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.instances[p.ServiceName], nil
+}
+
+// GetAllServicesInfo lists every service that was ever pushed: Nacos keeps the
+// name of a service for a while after its last instance has gone.
+func (f *fakeNaming) GetAllServicesInfo(p vo.GetAllServiceInfoParam) (model.ServiceList, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.listErr != nil {
+		return model.ServiceList{}, f.listErr
+	}
+	var names []string
+	for name := range f.instances {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return model.ServiceList{Count: int64(len(names)), Doms: names}, nil
 }
 
 func (f *fakeNaming) Subscribe(p *vo.SubscribeParam) error {

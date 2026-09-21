@@ -82,6 +82,23 @@ if level > dyn.Get().Battle.MaxLevel {               // 永远是当前生效的
 - **服务注册与发现**，给不是 Kitex 服务的程序用：`deregister, err := nc.Register(nacosx.Registration{Service: "gateway", Addr: ":8080"})`、`nc.Instances("order")`、`nc.Pick("order")`（按权重随机）、`nc.Subscribe("order", fn)`。Kitex 服务由 `kitexx.Options` 和 `kitexx.ClientOptions` 代劳。两种方式日志里都能看到 `registered in Nacos`、`service discovered`、`instances changed`（每个实例一行：`+ 10.0.0.7:8888  weight=10`、`- 10.0.0.6:8888`）。
 - **Nacos 故障期间只有三种记录，而不是几百条。** `nacos connection lost`（`cause` 是 SDK 的第一条报错）、每 30 秒一条 `nacos is still unreachable`、恢复时一条 `nacos connection restored down_for=48.7s sdk_records_hidden=194`。期间服务继续使用手上已有的实例列表和配置，恢复之后 SDK 会自己重新注册和订阅。
 - **Nacos SDK 自己的日志也走 zlog**（带 `logger=nacos-sdk`），不再写 `nacos-sdk.log` 文件；由 `nacos.sdk_log_level` 控制从哪个级别起输出（默认 `warn`；设为 `info` 时 SDK 会打印每一份配置的内容，包括密码）。
+- **每个服务都会说明当前有哪些服务存活。** 启动时打一条 `services alive`，列出每个服务的实例数和地址。之后每当有服务上线（`service online`）、下线（`service offline`）或实例数变化（`service instances changed`），都会打一条记录，既说明谁来了、谁走了，也再次列出当前存活的全部服务，所以最后一条这类记录永远反映当前的状况：
+
+  ```
+  INFO service online name=ser-auth alive=1 services=2 instances=3
+      overview:
+        ┌──────────┬───┬──────────────────────────────────┐
+        │ SERVICE  │ N │ INSTANCES                        │
+        ├──────────┼───┼──────────────────────────────────┤
+        │ ser-auth │ 1 │ + 127.0.0.1:8889                 │
+        │ ser-user │ 2 │   127.0.0.1:8888  ← this process │
+        │          │   │   127.0.0.1:8890                 │
+        └──────────┴───┴──────────────────────────────────┘
+  ```
+
+  `+` 表示新上线（绿色），`-` 表示已下线（红色；整个服务都没了时它仍保留一行，N 为 0），`~` 表示状态变了（黄色）。JSON 格式下同样的内容是 `overview: {service, changed, alive}`。
+
+  已知服务的实例变化由 Nacos 推送（一秒以内）；全新的服务名靠每 3 秒查询一次服务列表来发现。这个功能使用一个单独的 Nacos 客户端，因为调用路径上的那个客户端永远收不到“某个服务的最后一个实例下线了”：Nacos 推来空列表时，SDK 会保留上一份列表，用来保护调用方不受 Nacos 丢数据的影响。这层保护保持不变，只有这些记录能看穿它。开启后，调用路径自己的 `service discovered` / `instances changed` 降为 debug 级别。`nacos.watch_services: false` 可以关闭；不是 Kitex 服务的程序调用 `nc.WatchServices(every)`。
 - **笔记本不会出现在别人也在用的 Nacos 里。** 设置 `nacos.register: false` 后，服务照常查找其他服务、读取配置，只是不注册自己：开发者的电脑连开发服务器的 Nacos 时就这样用。不设置它时，本机环境（没有 `APP_ENV`）只允许注册到本机上的 Nacos；其余情况启动时直接拒绝，并说明地址和解决办法，因为否则所有使用那个 Nacos 的人都会有一部分请求被发到这台笔记本上。
 - **注册进去的一定是调用方连得上的地址。** 主机留空时，注册的是“本机连向 Nacos 时使用的地址”：电脑上有 VPN 或 Docker 网络时它就是对的那一个；Nacos 在本机时它是 127.0.0.1，Wi-Fi 地址变了也不受影响。通过宿主机地址和映射端口访问的容器要设置 `service.advertise`（`"主机"` 或 `"主机:端口"`，通常写 `"${ADVERTISE_ADDR}"`）。
 - **没有 Nacos 时**（`registry_disabled: true`，用于测试和断网时工作）配置就是文件：`conf/nacos/<data id>`，保存文件就等同于在控制台里改配置。此时不注册、也不查找服务：用 `client.WithHostPorts` 指明服务地址。

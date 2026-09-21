@@ -128,6 +128,36 @@ Outside Kitex the same is `nc, err := nacosx.New(cfg.Nacos)` and
 - **The Nacos SDK logs through zlog** (`logger=nacos-sdk`) instead of into
   `nacos-sdk.log`, from `nacos.sdk_log_level` up (default `warn`; at `info`
   the SDK prints the content of every configuration, passwords included).
+- **Every service says which services are alive.** At start one record,
+  `services alive`, lists every service with its number of instances and their
+  addresses. After that, `service online`, `service offline` and `service
+  instances changed` say what came or went and, again, everything that is alive,
+  so the last of these records always tells how things are:
+
+  ```
+  INFO service online name=ser-auth alive=1 services=2 instances=3
+      overview:
+        ┌──────────┬───┬──────────────────────────────────┐
+        │ SERVICE  │ N │ INSTANCES                        │
+        ├──────────┼───┼──────────────────────────────────┤
+        │ ser-auth │ 1 │ + 127.0.0.1:8889                 │
+        │ ser-user │ 2 │   127.0.0.1:8888  ← this process │
+        │          │   │   127.0.0.1:8890                 │
+        └──────────┴───┴──────────────────────────────────┘
+  ```
+
+  `+` came (green), `-` went (red; a service of which nothing is left keeps a row with N = 0),
+  `~` is not what it was (yellow). In JSON the same is `overview: {service, changed, alive}`.
+
+  Instances of a known service are pushed by Nacos (under a second); a service
+  name that is new is found by asking for the list every 3 seconds. The watch
+  has a Nacos client of its own, because the one that calls go through never
+  hears that the LAST instance of a service has gone: the SDK keeps the last
+  list when Nacos pushes an empty one, to protect callers from a Nacos that lost
+  its data. That protection stays; only the records see through it. With the
+  watch on, the calling path's own `service discovered` / `instances changed`
+  go to debug. `nacos.watch_services: false` turns it off;
+  `nc.WatchServices(every)` is the call for programs that are not Kitex services.
 - **A laptop never ends up in a Nacos that other people use.** With
   `nacos.register: false` a service finds the others and reads its
   configuration, and is not announced: that is how a developer's machine works

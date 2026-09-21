@@ -57,6 +57,10 @@ type Config struct {
 	// That is how a developer's machine works against the Nacos of the
 	// development server. Default true.
 	Register *bool `yaml:"register"`
+	// WatchServices puts the state of all services on record: what is alive
+	// at start, and every service that comes, goes or changes its number of
+	// instances, each time with everything that is alive. Default true.
+	WatchServices *bool `yaml:"watch_services"`
 	// CacheDir defaults to /tmp/nacos/cache.
 	CacheDir string `yaml:"cache_dir"`
 	// SDKLogLevel is the level from which the Nacos SDK's own records are let
@@ -76,6 +80,10 @@ func (c Config) GroupName() string {
 	}
 	return c.Group
 }
+
+// WatchesServices reports whether the state of all services is put on record
+// (nacos.watch_services).
+func (c Config) WatchesServices() bool { return c.WatchServices == nil || *c.WatchServices }
 
 // Registers reports whether Register announces this process (nacos.register).
 func (c Config) Registers() bool { return c.Register == nil || *c.Register }
@@ -160,12 +168,15 @@ type Client struct {
 
 	naming naming_client.INamingClient
 
-	mu       sync.Mutex
-	config   config_client.IConfigClient // created when first needed
-	watches  map[string]*watch           // by group + data id
-	services map[string]*service         // by service name
-	closed   bool
-	stop     chan struct{}
+	mu           sync.Mutex
+	config       config_client.IConfigClient // created when first needed
+	watches      map[string]*watch           // by group + data id
+	services     map[string]*service         // by service name
+	watch        *serviceWatch               // set by WatchServices
+	watchStarted bool
+	registered   map[string]bool // "service@address" registered through this client
+	closed       bool
+	stop         chan struct{}
 }
 
 var (

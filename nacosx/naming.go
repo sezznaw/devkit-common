@@ -102,6 +102,12 @@ func (c *Client) Register(r Registration) (deregister func() error, err error) {
 		return nil, fmt.Errorf("nacosx: register %s: %w", r.Service, err)
 	}
 	instance := net.JoinHostPort(ip, strconv.FormatUint(port, 10))
+	c.mu.Lock()
+	if c.registered == nil {
+		c.registered = map[string]bool{}
+	}
+	c.registered[r.Service+"@"+instance] = true
+	c.mu.Unlock()
 	zlog.Info("registered in Nacos",
 		zlog.Str("name", r.Service).Green(),
 		zlog.Str("instance", instance),
@@ -124,6 +130,9 @@ func (c *Client) Register(r Registration) (deregister func() error, err error) {
 				err = fmt.Errorf("nacosx: deregister %s: %w", r.Service, err)
 				return
 			}
+			c.mu.Lock()
+			delete(c.registered, r.Service+"@"+instance)
+			c.mu.Unlock()
 			zlog.Info("deregistered from Nacos", zlog.Str("name", r.Service), zlog.Str("instance", instance))
 		})
 		return err
@@ -188,6 +197,7 @@ func localIPv4() (string, error) {
 // service is what the client knows about one service it discovers.
 type service struct {
 	name string
+	cli  *Client
 
 	// subMu guards param only. It is not mu: the SDK calls the callback from
 	// inside Subscribe, on the same goroutine, and the callback takes mu.
@@ -287,7 +297,7 @@ func (c *Client) subscribe(name string) (*service, error) {
 	}
 	s, ok := c.services[name]
 	if !ok {
-		s = &service{name: name, known: map[string]Instance{}}
+		s = &service{name: name, cli: c, known: map[string]Instance{}}
 		c.services[name] = s
 	}
 	c.mu.Unlock()
@@ -347,13 +357,20 @@ func (s *service) observe(list []Instance, pushed bool) {
 	if len(changes) > 0 {
 		fields = append(fields, zlog.Any("instances", changes))
 	}
+	// With WatchServices the comings and goings of every service are on
+	// record already, from a client that also sees the last instance leave;
+	// this is then the view of the calling path, for debugging.
+	info := zlog.Info
+	if s.cli != nil && s.cli.watching() {
+		info = zlog.Debug
+	}
 	switch {
 	case usable == 0:
 		zlog.Warn("instances changed: none can take requests", fields...)
 	case first:
-		zlog.Info("service discovered", fields...)
+		info("service discovered", fields...)
 	default:
-		zlog.Info("instances changed", fields...)
+		info("instances changed", fields...)
 	}
 	for _, fn := range s.subs {
 		s.call(fn, s.list())
