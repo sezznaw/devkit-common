@@ -5,14 +5,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"maps"
 	"os"
 	"os/exec"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"go.uber.org/zap/zapcore"
 	"gopkg.in/yaml.v3"
 )
 
@@ -262,9 +266,15 @@ func TestSampling(t *testing.T) {
 		l.Error("redis down", Int("i", i))
 	}
 	l.Error("another message")
-	// 3 at once, then the 10th and the 20th after those, and the other message.
-	if got := strings.Count(buf.String(), "\n"); got != 6 {
-		t.Errorf("wrote %d records, want 6:\n%s", got, buf.String())
+	// Sync reports what was dropped, and stops the timer that would otherwise
+	// write into buf after this test has read it.
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	// 3 at once, then the 10th and the 20th after those, the other message,
+	// and the report.
+	if got := strings.Count(buf.String(), "\n"); got != 7 {
+		t.Errorf("wrote %d records, want 7:\n%s", got, buf.String())
 	}
 
 	buf.Reset()
@@ -548,4 +558,131 @@ func TestInitAnnouncesTheSettingsInEffect(t *testing.T) {
 	if own.Len() != 0 {
 		t.Errorf("New wrote %q", own.String())
 	}
+}
+
+// What sampling leaves out is counted and reported, or a flood would look like
+// a few errors.
+func TestSamplingReportsWhatItDropped(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	var buf bytes.Buffer
+	l := New(Options{Format: "json", Service: "svc", Output: &buf, Sampling: Sampling{First: 2, Thereafter: 1000}})
+	for i := 0; i < 50; i++ {
+		l.Error("redis down", Int("i", i))
+	}
+	for i := 0; i < 12; i++ {
+		l.With(Str("component", "repo")).Warn("slow query")
+	}
+	l.Info("a record that is not dropped")
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+
+	type report struct {
+		Level   string `json:"level"`
+		Msg     string `json:"msg"`
+		Service string `json:"service"`
+		Of      string `json:"dropped_msg"`
+		Dropped int    `json:"dropped"`
+	}
+	var reports []report
+	for _, ln := range strings.Split(strings.TrimSpace(buf.String()), "\n") {
+		var r report
+		if err := json.Unmarshal([]byte(ln), &r); err != nil {
+			t.Fatalf("%v: %s", err, ln)
+		}
+		if r.Msg == dropReportMsg {
+			reports = append(reports, r)
+		}
+	}
+	// One report per level and message, at the level of what was dropped, the
+	// worst first, with the identity of the process like any other record.
+	want := []report{
+		{"ERROR", dropReportMsg, "svc", "redis down", 48},
+		{"WARN", dropReportMsg, "svc", "slow query", 10},
+	}
+	if !slices.Equal(reports, want) {
+		t.Errorf("\n got %+v\nwant %+v", reports, want)
+	}
+
+	// Reported once: a second Sync has nothing to add, and neither has a
+	// logger that dropped nothing.
+	before := buf.Len()
+	if err := l.Sync(); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() != before {
+		t.Errorf("the same drops were reported twice: %s", buf.String()[before:])
+	}
+
+	// The console shows the same.
+	buf.Reset()
+	c := New(Options{Output: &buf, Sampling: Sampling{First: 1, Thereafter: 1000}})
+	c.Error("redis down")
+	c.Error("redis down")
+	c.Error("redis down")
+	_ = c.Sync()
+	if !strings.HasSuffix(buf.String(), ` ERROR zlog: records dropped by sampling dropped_msg="redis down" dropped=2`+"\n") {
+		t.Errorf("console: %q", buf.String())
+	}
+}
+
+// Without Sync the report comes by itself once the second is over, and a flood
+// of messages that all differ cannot make the reporter grow without bound.
+func TestSamplingReportTimerAndBound(t *testing.T) {
+	out := &lockedWriter{}
+	l := New(Options{Format: "json", Output: out, Sampling: Sampling{First: 1, Thereafter: 1000}})
+	l.Error("redis down")
+	l.Error("redis down")
+	deadline := time.Now().Add(5 * time.Second)
+	for !strings.Contains(out.String(), dropReportMsg) {
+		if time.Now().After(deadline) {
+			t.Fatalf("no report within 5s: %q", out.String())
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if !strings.Contains(out.String(), `"dropped_msg":"redis down","dropped":1`) {
+		t.Errorf("report: %s", out.String())
+	}
+
+	d := &dropReporter{out: zapcore.NewNopCore()}
+	for i := 0; i < maxDropKeys+40; i++ {
+		d.hook(zapcore.Entry{Level: zapcore.InfoLevel, Message: "msg " + strconv.Itoa(i)}, zapcore.LogDropped)
+	}
+	d.hook(zapcore.Entry{Message: "written, not dropped"}, zapcore.LogSampled)
+	d.mu.Lock()
+	keys, other := len(d.pending), d.other
+	d.mu.Unlock()
+	if keys != maxDropKeys || other != 40 {
+		t.Errorf("pending keys = %d, other = %d; want %d and 40", keys, other, maxDropKeys)
+	}
+	d.flush() // also stops the timer
+}
+
+type lockedWriter struct {
+	mu sync.Mutex
+	b  bytes.Buffer
+}
+
+func (w *lockedWriter) Write(p []byte) (int, error) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.Write(p)
+}
+
+func (w *lockedWriter) String() string {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.b.String()
+}
+
+// A flood: nearly every record takes the dropped path, which now counts.
+func BenchmarkSamplingFlood(b *testing.B) {
+	l := New(Options{Format: "json", Output: io.Discard, Sampling: Sampling{First: 100, Thereafter: 100}})
+	b.ReportAllocs()
+	b.RunParallel(func(pb *testing.PB) {
+		for pb.Next() {
+			l.Error("redis down", Int("uid", 1))
+		}
+	})
+	_ = l.Sync()
 }

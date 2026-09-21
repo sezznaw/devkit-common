@@ -120,6 +120,11 @@ type Options struct {
 // written First times, and after that only every Thereafter-th one. The
 // message of Infof and friends is the formatted one, so records that differ in
 // their arguments are different records.
+//
+// What is left out is counted: for every second with drops there is one record
+// per level and message, "zlog: records dropped by sampling" with the fields
+// dropped_msg and dropped, so that the size of a flood can be read from the
+// log. Sync writes the count of the current second at once.
 type Sampling struct {
 	First      int `yaml:"first"`
 	Thereafter int `yaml:"thereafter"`
@@ -164,8 +169,9 @@ type core struct {
 	level    zap.AtomicLevel
 	colored  bool // a console that renders colors
 	maxField int
-	stop     func()      // flushes and stops the buffer, if there is one
-	config   []zap.Field // what Init announces: the settings in effect
+	stop     func()        // reports pending drops; flushes and stops the buffer, if there is one
+	drops    *dropReporter // nil without sampling
+	config   []zap.Field   // what Init announces: the settings in effect
 
 	added     []zap.Field // the fields of With, ready to be written
 	addedKeys []string    // the keys they were given, added[i] under addedKeys[i]
@@ -235,8 +241,18 @@ func New(o Options) *Logger {
 	}
 
 	zc := zapcore.NewCore(enc, ws, level)
+	var drops *dropReporter
 	if o.Sampling.First > 0 {
-		zc = zapcore.NewSamplerWithOptions(zc, time.Second, o.Sampling.First, o.Sampling.Thereafter)
+		// The reports carry the identity fields like every other record.
+		drops = &dropReporter{out: zc.With(identity)}
+		zc = zapcore.NewSamplerWithOptions(zc, dropWindow, o.Sampling.First, o.Sampling.Thereafter, zapcore.SamplerHook(drops.hook))
+		flushBuffer := stop
+		stop = func() { // first the report, then the buffer it may sit in
+			drops.flush()
+			if flushBuffer != nil {
+				flushBuffer()
+			}
+		}
 	}
 	zopts := []zap.Option{zap.AddCaller()}
 	stackLevel, stackOK := parseLevel(o.Stacktrace)
@@ -252,6 +268,7 @@ func New(o Options) *Logger {
 		colored:  colored,
 		maxField: o.MaxFieldBytes,
 		stop:     stop,
+		drops:    drops,
 		config:   describe(o, format, lv, colored, stackLevel, o.Stacktrace != "" && stackOK),
 	}}
 
@@ -510,6 +527,9 @@ func (c *core) logf(lv zapcore.Level, format string, args ...any) {
 // sync leaves out the error that is not one: a terminal or a pipe cannot be
 // synced, and stdout is one of the two more often than not.
 func (c *core) sync() error {
+	if c.drops != nil {
+		c.drops.flush()
+	}
 	err := c.z0.Sync()
 	if errors.Is(err, syscall.EINVAL) || errors.Is(err, syscall.ENOTTY) || errors.Is(err, syscall.EBADF) {
 		return nil

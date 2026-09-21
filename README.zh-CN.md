@@ -63,6 +63,7 @@ var log = zlog.With(zlog.Str("component", "repo"))           // 写在包顶层�
 - **只有一种输出格式。** `Init` 会把标准库的 `log` 和 `log/slog` 也接到 zlog，`kitexx` 对 Kitex 的 klog 做同样的事，所以依赖库打的日志也是同一种格式。
 - **服务一启动就能看到日志是怎么配置的。** `Init` 的第一条记录 `logger configured` 会列出实际生效的全部设置，名字与配置文件里的一致：没写的项显示默认值（控制台里标注 `(default)`），写错的项显示回落后的值。它不受日志级别影响，配置写错时的告警也一样；JSON 格式下这些设置放在一个对象里：`"config": {...}`。由 `kitexx` 代填的值会注明来源：`service: order (from service.name)`、`env: prod (from APP_ENV)`，或 `env: dev (APP_ENV is not set)`；JSON 格式下这些说明放在 `"config_notes": {...}` 里。
 - **`Init` 之前**（比如服务读不到配置）的日志由环境变量 `ZLOG_FORMAT`、`ZLOG_LEVEL`、`ZLOG_SERVICE`、`ZLOG_ENV` 决定格式；部署环境应设置 `ZLOG_FORMAT=json`。
+- **采样会说明它丢了多少。** 开启 `sampling` 后，凡是有日志被丢弃的那一秒，结束时都会按“级别 + 消息”各补一条记录：`zlog: records dropped by sampling dropped_msg="redis down" dropped=4213`，级别与被丢弃的日志相同，这样从日志里就能看出洪峰的规模。`zlog.Sync()` 会立即写出当前这一秒的计数。
 - `zlog.Enabled(zlog.LevelDebug)` 用于保护构造代价高的日志；`zlog.SetLevel("debug")` 运行时调整级别；退出前调用 `zlog.Sync()`；`zlog/zlogtest` 包用于在测试里捕获或静音日志。
 
 ```yaml

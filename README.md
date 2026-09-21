@@ -111,6 +111,11 @@ var log = zlog.With(zlog.Str("component", "repo"))           // fine at package 
 - **Before `Init`** (a service that cannot read its configuration) the logger
   is configured by `ZLOG_FORMAT`, `ZLOG_LEVEL`, `ZLOG_SERVICE`, `ZLOG_ENV`;
   deployments set `ZLOG_FORMAT=json`.
+- **Sampling says what it left out.** With `sampling` on, every second in
+  which records were dropped ends with one record per level and message,
+  `zlog: records dropped by sampling dropped_msg="redis down" dropped=4213`, at
+  the level of what was dropped, so the size of a flood can be read from the
+  log. `zlog.Sync()` writes the count of the current second at once.
 - `zlog.Enabled(zlog.LevelDebug)` guards records that are expensive to build;
   `zlog.SetLevel("debug")` changes the level at run time; `zlog.Sync()` before
   exit; package `zlog/zlogtest` captures or silences logs in tests.

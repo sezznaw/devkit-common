@@ -85,6 +85,16 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     can only tell "default" for what it defaults itself. In JSON the remarks
     are `config_notes`, placed before the `config` namespace, which swallows
     every field after it.
+  - Sampling reports what it drops (`sampling.go`, zap's `SamplerHook`): per
+    second, level and message one record "zlog: records dropped by sampling"
+    at the level of the dropped records, written to the core *behind* the
+    sampler so that it is never sampled itself, with the identity fields. No
+    goroutine while nothing is dropped: the first drop of a window arms a
+    one-shot timer. `sync` and `stop` flush the pending count and stop that
+    timer, which is also why a test that samples must `Sync` before it reads
+    its buffer (the timer would write into it later, a data race). At most
+    `maxDropKeys` messages are tracked per window, the rest counts as "(other
+    messages)".
   - `Sync` drops EINVAL/ENOTTY/EBADF: stdout as a terminal or pipe cannot be
     synced. `Options.JSON` is the deprecated key of the old `log` package,
     still read so that an upgraded service does not silently turn to console
