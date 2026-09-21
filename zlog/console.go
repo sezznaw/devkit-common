@@ -203,6 +203,12 @@ func (e *consoleEncoder) AddObject(k string, v zapcore.ObjectMarshaler) error {
 }
 
 func (e *consoleEncoder) AddReflected(k string, v any) error {
+	if b, ok := v.(Blocker); ok {
+		if text := b.LogBlock(e.color); text != "" {
+			e.block(k, text)
+			return nil
+		}
+	}
 	e.asJSON(k, v)
 	return nil
 }

@@ -202,6 +202,9 @@ func clipField(z zap.Field, max int) zap.Field {
 		if len(b) > max {
 			return zap.String(z.Key, clip(string(b), max))
 		}
+		if _, ok := z.Interface.(Blocker); ok {
+			return z // the console still has to ask it for its lines
+		}
 		z.Interface = json.RawMessage(b)
 	}
 	return z
@@ -254,6 +257,20 @@ func Err(err error) Field { return Field{z: zap.NamedError("err", err), color: r
 // Mind Any: zlog.Any("req", req) writes the whole request, the password in it
 // included. Log the fields that are wanted instead.
 func Secret(key string, _ any) Field { return Field{z: zap.String(key, "***")} }
+
+// Blocker is implemented by a value that reads better as lines of its own than
+// as one long key=value: the keys of a configuration that changed, the
+// instances of a service. Passed to Any, the console prints what LogBlock
+// returns below the record, like a stack; JSON gets the value itself, as
+// json.Marshal writes it, so that a collector can still query it.
+//
+// colored says whether the console takes colors: only then may the text carry
+// them, for which fmt.Sprint(zlog.Green("+")) and friends are enough. An empty
+// text leaves the value to be written as JSON on the console as well. The type
+// must not also be a fmt.Stringer or an error, which Any writes as a string.
+type Blocker interface {
+	LogBlock(colored bool) string
+}
 
 // Any is a field for everything else: structs, slices, maps, or a value whose
 // type the caller does not want to look up. Values zap has no typed field for
