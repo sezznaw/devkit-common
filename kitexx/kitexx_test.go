@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/bytedance/gopkg/cloud/metainfo"
@@ -134,5 +135,41 @@ func TestLogLevelFollowsNacos(t *testing.T) {
 
 	if err := watchLogLevel(&fakeConfigClient{err: errors.New("nacos down")}, "x", "g"); err == nil {
 		t.Error("a failure to read must be reported")
+	}
+}
+
+// Options fills in log.service and log.env when the configuration leaves them
+// out, and the "logger configured" record has to say so.
+func TestLoggerSettingsFilledInByOptionsSayWhereTheyAreFrom(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
+	announced := func(t *testing.T, env string) string {
+		t.Helper()
+		t.Cleanup(zlog.SetDefault(zlog.Default())) // Options installs a logger
+		var buf bytes.Buffer
+		var cfg Config
+		cfg.Service.Name, cfg.RegistryDisabled = "order", true
+		cfg.Log.Env, cfg.Log.Output = env, &buf
+		if _, err := Options(cfg); err != nil {
+			t.Fatal(err)
+		}
+		return buf.String()
+	}
+	for _, c := range []struct {
+		name, appEnv, logEnv string
+		want                 []string
+	}{
+		{"APP_ENV not set", "", "", []string{"      service: order (from service.name)\n", "      env: dev (APP_ENV is not set)\n"}},
+		{"APP_ENV set", "prod", "", []string{"      env: prod (from APP_ENV)\n"}},
+		{"log.env written", "prod", "prod-cn", []string{"      env: prod-cn\n"}},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			t.Setenv("APP_ENV", c.appEnv)
+			got := announced(t, c.logEnv)
+			for _, w := range c.want {
+				if !strings.Contains(got, w) {
+					t.Errorf("want %q in:\n%s", w, got)
+				}
+			}
+		})
 	}
 }

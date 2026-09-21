@@ -79,7 +79,12 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     It and the typo warnings of `New` go to the zap core directly
     (`core.write`), past the level: at `level: error` a warning about a typo
     would otherwise hide itself. Tests that count records after `Init` reset
-    their buffer first.
+    their buffer first. `Options.ServiceNote`/`EnvNote` (not from YAML) let the
+    code that fills in those two values say where they are from; `kitexx` does
+    ("from service.name", "from APP_ENV", "APP_ENV is not set"), because zlog
+    can only tell "default" for what it defaults itself. In JSON the remarks
+    are `config_notes`, placed before the `config` namespace, which swallows
+    every field after it.
   - `Sync` drops EINVAL/ENOTTY/EBADF: stdout as a terminal or pipe cannot be
     synced. `Options.JSON` is the deprecated key of the old `log` package,
     still read so that an upgraded service does not silently turn to console

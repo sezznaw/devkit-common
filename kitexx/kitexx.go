@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"net"
+	"os"
 	"time"
 
 	"github.com/bytedance/gopkg/cloud/metainfo"
@@ -70,11 +71,16 @@ func Options(cfg Config) ([]server.Option, error) {
 	if cfg.Service.Name == "" {
 		return nil, fmt.Errorf("kitexx: service.name is required")
 	}
+	// What is filled in here says so in the "logger configured" record, or the
+	// value would look as if it had been written into the log section.
 	if cfg.Log.Service == "" {
-		cfg.Log.Service = cfg.Service.Name
+		cfg.Log.Service, cfg.Log.ServiceNote = cfg.Service.Name, "from service.name"
 	}
 	if cfg.Log.Env == "" {
-		cfg.Log.Env = config.Env()
+		cfg.Log.Env, cfg.Log.EnvNote = config.Env(), "from "+config.EnvVar
+		if os.Getenv(config.EnvVar) == "" {
+			cfg.Log.EnvNote = config.EnvVar + " is not set"
+		}
 	}
 	bridgeKlog(zlog.Init(cfg.Log))
 	if cfg.LogLevelDataID != "" {

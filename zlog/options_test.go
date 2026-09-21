@@ -476,7 +476,7 @@ func TestInitAnnouncesTheSettingsInEffect(t *testing.T) {
 	// came of it. The level is "error", and the record is there all the same.
 	var console bytes.Buffer
 	at := here(1)
-	Init(Options{Level: "error", Format: "consol", Service: "ser-auth", Env: "dev", Stacktrace: "error", Output: &console})
+	Init(Options{Level: "error", Format: "consol", Service: "ser-auth", ServiceNote: "from service.name", Env: "dev", EnvNote: "APP_ENV is not set", Stacktrace: "error", Output: &console})
 	got := console.String()
 	want := " " + at + " logger configured\n" +
 		"    config:\n" +
@@ -486,8 +486,8 @@ func TestInitAnnouncesTheSettingsInEffect(t *testing.T) {
 		"      sampling: off (default)\n" +
 		"      buffer: off (default)\n" +
 		"      max_field_bytes: no limit (default)\n" +
-		"      service: ser-auth\n" +
-		"      env: dev\n" +
+		"      service: ser-auth (from service.name)\n" +
+		"      env: dev (APP_ENV is not set)\n" +
 		"      version: (not set)\n" +
 		"      host: " + host + "\n" +
 		"      output: custom writer\n" +
@@ -505,7 +505,7 @@ func TestInitAnnouncesTheSettingsInEffect(t *testing.T) {
 	// setting spelled out.
 	var js bytes.Buffer
 	Init(Options{
-		Format: "json", Service: "ser-auth", Env: "prod", Version: "v1.2.3", MaxFieldBytes: 8192,
+		Format: "json", Service: "ser-auth", Env: "prod", EnvNote: "from APP_ENV", Version: "v1.2.3", MaxFieldBytes: 8192,
 		Sampling: Sampling{First: 100, Thereafter: 50}, Buffer: Buffer{Size: 4096}, Output: &js,
 	})
 	if err := Sync(); err != nil {
@@ -523,6 +523,7 @@ func TestInitAnnouncesTheSettingsInEffect(t *testing.T) {
 		Msg    string            `json:"msg"`
 		Level  string            `json:"level"`
 		Config map[string]string `json:"config"`
+		Notes  map[string]string `json:"config_notes"`
 	}
 	if err := json.Unmarshal([]byte(line), &rec); err != nil {
 		t.Fatalf("%v: %s", err, line)
@@ -534,6 +535,11 @@ func TestInitAnnouncesTheSettingsInEffect(t *testing.T) {
 	}
 	if rec.Msg != "logger configured" || rec.Level != "INFO" || !maps.Equal(rec.Config, wantConfig) {
 		t.Errorf("\n got %+v\nwant config %v", rec, wantConfig)
+	}
+	// Only what was not written down as it is has a note; Service was, here.
+	wantNotes := map[string]string{"level": "default", "stacktrace": "default", "env": "from APP_ENV"}
+	if !maps.Equal(rec.Notes, wantNotes) {
+		t.Errorf("config_notes = %v, want %v", rec.Notes, wantNotes)
 	}
 
 	// New does not announce anything: it is not the start of a service.

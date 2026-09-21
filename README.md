@@ -104,7 +104,10 @@ var log = zlog.With(zlog.Str("component", "repo"))           // fine at package 
   in the configuration file: a default where nothing was written (marked
   `(default)` on the console), the fallback where it was a typo. It is written
   whatever the level, and so are the warnings about such typos; in JSON the
-  settings are an object, `"config": {...}`.
+  settings are an object, `"config": {...}`. What `kitexx` fills in says where
+  it is from: `service: order (from service.name)`, `env: prod (from APP_ENV)`,
+  or `env: dev (APP_ENV is not set)`; in JSON these remarks are in
+  `"config_notes": {...}`.
 - **Before `Init`** (a service that cannot read its configuration) the logger
   is configured by `ZLOG_FORMAT`, `ZLOG_LEVEL`, `ZLOG_SERVICE`, `ZLOG_ENV`;
   deployments set `ZLOG_FORMAT=json`.

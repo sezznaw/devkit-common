@@ -89,6 +89,12 @@ type Options struct {
 	Service string `yaml:"service"`
 	Env     string `yaml:"env"`
 	Version string `yaml:"version"`
+	// ServiceNote and EnvNote are for code that fills in Service or Env instead
+	// of the configuration file, as kitexx does: a few words on where the value
+	// is from, shown behind it by the "logger configured" record of Init, e.g.
+	// "from APP_ENV". Not loadable from config.
+	ServiceNote string `yaml:"-"`
+	EnvNote     string `yaml:"-"`
 
 	// Stacktrace is the level from which records carry the stack of the call,
 	// usually "error". Empty means never. On the console every line of the
@@ -343,8 +349,10 @@ func (c *core) announce() {
 // default where nothing was written and the fallback where it was a typo.
 //
 // JSON gets an object, "config": {...}, whose keys cannot clash with those of
-// the record. The console gets the same as lines below the record, with
-// "(default)" behind what was not set.
+// the record, and next to it "config_notes": {...} for the settings that were
+// not written down as they are: "default", or where the value is from. The
+// console gets the same as lines below the record, the note in brackets behind
+// the value.
 func describe(o Options, format string, lv zapcore.Level, colored bool, stackLevel zapcore.Level, stack bool) []zap.Field {
 	host, _ := os.Hostname()
 	version := o.Version
@@ -380,39 +388,50 @@ func describe(o Options, format string, lv zapcore.Level, colored bool, stackLev
 
 	type setting struct {
 		key, value string
-		isDefault  bool
+		note       string // "" for a value that was written down as it is
+	}
+	ifDefault := func(unset bool) string {
+		if unset {
+			return "default"
+		}
+		return ""
 	}
 	settings := []setting{
-		{"level", lv.String(), o.Level == ""},
-		{"format", format, o.Format == "" && !o.JSON},
-		{"stacktrace", stacktrace, o.Stacktrace == ""},
-		{"sampling", sampling, o.Sampling.First <= 0},
-		{"buffer", buffer, o.Buffer.Size <= 0},
-		{"max_field_bytes", maxField, o.MaxFieldBytes <= 0},
-		{"service", o.Service, false},
-		{"env", o.Env, false},
-		{"version", version, o.Version == ""},
-		{"host", host, false},
-		{"output", output, false},
+		{"level", lv.String(), ifDefault(o.Level == "")},
+		{"format", format, ifDefault(o.Format == "" && !o.JSON)},
+		{"stacktrace", stacktrace, ifDefault(o.Stacktrace == "")},
+		{"sampling", sampling, ifDefault(o.Sampling.First <= 0)},
+		{"buffer", buffer, ifDefault(o.Buffer.Size <= 0)},
+		{"max_field_bytes", maxField, ifDefault(o.MaxFieldBytes <= 0)},
+		{"service", o.Service, o.ServiceNote},
+		{"env", o.Env, o.EnvNote},
+		{"version", version, ifDefault(o.Version == "")},
+		{"host", host, ""},
+		{"output", output, ""},
 	}
 	if format == FormatConsole {
-		settings = append(settings, setting{"color", strconv.FormatBool(colored), false})
+		settings = append(settings, setting{"color", strconv.FormatBool(colored), ""})
 	}
 
 	if format == FormatJSON {
+		notes := map[string]string{}
 		fields := []zap.Field{zap.Namespace("config")}
 		for _, s := range settings {
 			fields = append(fields, zap.String(s.key, s.value))
+			if s.note != "" && s.value != "" {
+				notes[s.key] = s.note
+			}
 		}
-		return fields
+		// Before the namespace, which takes in everything that follows it.
+		return append([]zap.Field{zap.Any("config_notes", notes)}, fields...)
 	}
 	var b strings.Builder
 	for _, s := range settings {
 		switch {
 		case s.value == "":
 			fmt.Fprintf(&b, "%s: (not set)\n", s.key)
-		case s.isDefault:
-			fmt.Fprintf(&b, "%s: %s (default)\n", s.key, s.value)
+		case s.note != "":
+			fmt.Fprintf(&b, "%s: %s (%s)\n", s.key, s.value, s.note)
 		default:
 			fmt.Fprintf(&b, "%s: %s\n", s.key, s.value)
 		}

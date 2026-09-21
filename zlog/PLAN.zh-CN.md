@@ -51,5 +51,7 @@
   - 结果：`Err` 默认红色，可用 `.Yellow()` 等覆盖
 - [x] 20.（2026-09-21 追加的需求）服务启动时打印日志系统的全部配置
   - 结果：`Init` 的第一条记录 `logger configured` 列出实际生效的设置；控制台是记录下方的缩进块并标注 `(default)`，JSON 是 `"config": {...}` 对象；不受日志级别影响。顺带修复：配置写错的告警在 `level: error` 时会把自己过滤掉，现在同样绕过级别
+- [x] 21.（2026-09-21 追加）配置块里注明 `service`、`env` 这两个由 kitexx 代填的值来自哪里
+  - 结果：`Options.ServiceNote` / `EnvNote`；kitexx 填入 `from service.name`、`from APP_ENV` 或 `APP_ENV is not set`；JSON 里是 `config_notes` 对象
 - [-] 19. JSON 里 `level` 排在 `time` 前面
   - 不做：这个顺序是 zap 的 JSON 编码器写死的，要改只能自己重写整个 JSON 编码器；采集系统不关心字段顺序，不值得
