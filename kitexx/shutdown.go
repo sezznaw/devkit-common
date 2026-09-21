@@ -1,11 +1,12 @@
 package kitexx
 
 import (
-	"log/slog"
 	"sync"
 	"time"
 
 	"github.com/cloudwego/kitex/pkg/registry"
+
+	"github.com/sezznaw/devkit-common/zlog"
 )
 
 // delayedRegistry keeps the listener open for a while after deregistering.
@@ -24,7 +25,7 @@ type delayedRegistry struct {
 func (d *delayedRegistry) Deregister(info *registry.Info) error {
 	err := d.Registry.Deregister(info)
 	if d.wait > 0 {
-		slog.Info("deregistered; still serving while callers refresh their instance lists", "wait", d.wait)
+		zlog.Info("deregistered; still serving while callers refresh their instance lists", zlog.Dur("wait", d.wait))
 		time.Sleep(d.wait)
 	}
 	return err
@@ -64,15 +65,15 @@ func runShutdownHooks() {
 		func() {
 			defer func() {
 				if r := recover(); r != nil {
-					slog.Error("shutdown hook panicked", "hook", h.name, "panic", r)
+					zlog.Error("shutdown hook panicked", zlog.Str("hook", h.name), zlog.Any("panic", r))
 				}
 			}()
 			start := time.Now()
 			if err := h.fn(); err != nil {
-				slog.Error("shutdown hook failed", "hook", h.name, "err", err)
+				zlog.Error("shutdown hook failed", zlog.Str("hook", h.name), zlog.Err(err))
 				return
 			}
-			slog.Info("shutdown hook done", "hook", h.name, "took", time.Since(start).Round(time.Millisecond))
+			zlog.Info("shutdown hook done", zlog.Str("hook", h.name), zlog.Dur("took", time.Since(start).Round(time.Millisecond)))
 		}()
 	}
 }

@@ -1,25 +1,29 @@
 // Package kitexx wires a Kitex server or client to the company infrastructure:
-// Nacos registration / discovery, structured logging and request logging
-// middleware. A service's main() should only need Options() and Run().
+// Nacos registration / discovery, structured logging with a trace_id that
+// follows a request from service to service, and request logging middleware. A service's main() should only need Options() and Run().
 package kitexx
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
-	"log/slog"
 	"net"
 	"time"
 
+	"github.com/bytedance/gopkg/cloud/metainfo"
 	"github.com/cloudwego/kitex/client"
 	"github.com/cloudwego/kitex/pkg/endpoint"
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
+	"github.com/cloudwego/kitex/pkg/transmeta"
 	"github.com/cloudwego/kitex/server"
+	"github.com/cloudwego/kitex/transport"
 	nacosregistry "github.com/kitex-contrib/registry-nacos/v2/registry"
 	nacosresolver "github.com/kitex-contrib/registry-nacos/v2/resolver"
 
 	"github.com/sezznaw/devkit-common/config"
-	"github.com/sezznaw/devkit-common/log"
 	"github.com/sezznaw/devkit-common/nacosx"
+	"github.com/sezznaw/devkit-common/zlog"
 )
 
 // Config is the part of a service config that kitexx understands. Embed it in
@@ -32,7 +36,12 @@ type Config struct {
 		Addr string `yaml:"addr"`
 	} `yaml:"service"`
 	Nacos nacosx.Config `yaml:"nacos"`
-	Log   log.Options   `yaml:"log"`
+	Log   zlog.Options  `yaml:"log"`
+	// LogLevelDataID names a Nacos configuration whose content is a log level
+	// (debug, info, warn, error). The level of the running service follows
+	// it, which is how debug logging is switched on in production without a
+	// restart. Empty: the level stays what log.level says.
+	LogLevelDataID string `yaml:"log_level_data_id"`
 	// RegistryDisabled skips Nacos registration (handy for local runs).
 	RegistryDisabled bool `yaml:"registry_disabled"`
 	// Shutdown tunes the graceful stop. Both values accept "3s"-style durations.
@@ -64,8 +73,16 @@ func Options(cfg Config) ([]server.Option, error) {
 	if cfg.Log.Service == "" {
 		cfg.Log.Service = cfg.Service.Name
 	}
-	l := log.New(cfg.Log)
-	bridgeKlog(l, log.ParseLevel(cfg.Log.Level))
+	if cfg.Log.Env == "" {
+		cfg.Log.Env = config.Env()
+	}
+	bridgeKlog(zlog.Init(cfg.Log))
+	if cfg.LogLevelDataID != "" {
+		// The level is a convenience: a service must start without it.
+		if err := watchLogLevelFromNacos(cfg); err != nil {
+			zlog.Warn("log level does not follow Nacos", zlog.Str("data_id", cfg.LogLevelDataID), zlog.Err(err))
+		}
+	}
 
 	addr, err := net.ResolveTCPAddr("tcp", orDefault(cfg.Service.Addr, ":8888"))
 	if err != nil {
@@ -74,7 +91,8 @@ func Options(cfg Config) ([]server.Option, error) {
 	opts := []server.Option{
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
 		server.WithServiceAddr(addr),
-		server.WithMiddleware(LoggingMiddleware(l)),
+		server.WithMiddleware(LoggingMiddleware()),
+		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
 		server.WithExitWaitTime(cfg.Shutdown.DrainTimeout.Or(defaultDrainTimeout)),
 	}
 	if !cfg.RegistryDisabled {
@@ -94,16 +112,29 @@ func Options(cfg Config) ([]server.Option, error) {
 	return opts, nil
 }
 
-// ClientOptions builds client options for calling other services through Nacos.
+// ClientOptions builds client options for calling other services: discovery
+// through Nacos, and the TTHeader transport, which is what carries the
+// trace_id of the request to the service that is called. With
+// registry_disabled there is no discovery and the caller says where the
+// service is, client.WithHostPorts.
 func ClientOptions(cfg Config) ([]client.Option, error) {
+	opts := []client.Option{
+		client.WithTransportProtocol(transport.TTHeader),
+		client.WithMetaHandler(transmeta.ClientTTHeaderHandler),
+	}
+	if cfg.Service.Name != "" {
+		// Who is calling: the "from" of the request log of the service called.
+		opts = append(opts, client.WithClientBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}))
+	}
+	if cfg.RegistryDisabled {
+		return opts, nil
+	}
 	cli, err := nacosx.SharedNamingClient(cfg.Nacos)
 	if err != nil {
 		return nil, err
 	}
-	return []client.Option{
-		client.WithResolver(nacosresolver.NewNacosResolver(cli,
-			nacosresolver.WithGroup(cfg.Nacos.GroupName()))),
-	}, nil
+	return append(opts, client.WithResolver(nacosresolver.NewNacosResolver(cli,
+		nacosresolver.WithGroup(cfg.Nacos.GroupName())))), nil
 }
 
 // Run starts the server and blocks until it has stopped completely.
@@ -113,38 +144,79 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 // gives in-flight requests up to drain_timeout. Only after all of that does
 // svr.Run return, which is when the OnShutdown hooks run.
 func Run(svr server.Server, cfg Config) error {
-	slog.Info("server starting", "addr", orDefault(cfg.Service.Addr, ":8888"), "registry", !cfg.RegistryDisabled)
+	defer zlog.Sync()
+	zlog.Info("server starting", zlog.Str("addr", orDefault(cfg.Service.Addr, ":8888")), zlog.Bool("registry", !cfg.RegistryDisabled))
 	err := svr.Run()
 	runShutdownHooks()
 	if err != nil {
-		slog.Error("server stopped with error", "err", err)
+		zlog.Error("server stopped with error", zlog.Err(err))
 		return err
 	}
-	slog.Info("server stopped")
+	zlog.Info("server stopped")
 	return nil
 }
 
-// LoggingMiddleware logs every RPC with method, latency and error, and puts a
-// request-scoped logger into the context for handlers.
-func LoggingMiddleware(l *slog.Logger) endpoint.Middleware {
+// TraceIDKey is the metainfo key under which the trace_id of a request travels
+// from service to service, and traceIDField the field it is logged under.
+const (
+	TraceIDKey   = "TRACE_ID"
+	traceIDField = "trace_id"
+)
+
+// LoggingMiddleware logs every RPC with method, caller, latency and error, and
+// gives the context the logger of the request: what a handler logs with
+// zlog.Ctx(ctx) carries trace_id and method.
+//
+// The trace_id is the one the caller sent, or a new one for a request that
+// starts here. It is put back into the context as a persistent metainfo value,
+// so the clients this service calls with that context pass it on (see
+// ClientOptions), and a collector shows the whole chain under one id.
+func LoggingMiddleware() endpoint.Middleware {
 	return func(next endpoint.Endpoint) endpoint.Endpoint {
 		return func(ctx context.Context, req, resp any) error {
 			start := time.Now()
-			method := "unknown"
-			if ri := rpcinfo.GetRPCInfo(ctx); ri != nil && ri.Invocation() != nil {
-				method = ri.Invocation().MethodName()
+			method, from := "unknown", ""
+			if ri := rpcinfo.GetRPCInfo(ctx); ri != nil {
+				if ri.Invocation() != nil {
+					method = ri.Invocation().MethodName()
+				}
+				if ri.From() != nil {
+					from = ri.From().ServiceName()
+				}
 			}
-			rl := l.With("method", method)
-			ctx = log.WithContext(ctx, rl)
+			traceID, ok := metainfo.GetPersistentValue(ctx, TraceIDKey)
+			if !ok || traceID == "" {
+				traceID = newTraceID()
+				ctx = metainfo.WithPersistentValue(ctx, TraceIDKey, traceID)
+			}
+			ctx = zlog.CtxWith(ctx, zlog.Str(traceIDField, traceID), zlog.Str("method", method))
+
 			err := next(ctx, req, resp)
+
+			fields := []zlog.Field{zlog.Dur("latency", time.Since(start))}
+			if from != "" {
+				fields = append(fields, zlog.Str("from", from))
+			}
 			if err != nil {
-				rl.Error("rpc", "latency", time.Since(start), "err", err)
+				zlog.Ctx(ctx).Error("rpc", append(fields, zlog.Err(err))...)
 			} else {
-				rl.Info("rpc", "latency", time.Since(start))
+				zlog.Ctx(ctx).Info("rpc", fields...)
 			}
 			return err
 		}
 	}
+}
+
+// TraceID returns the trace_id of the request ctx belongs to, or "".
+func TraceID(ctx context.Context) string {
+	id, _ := metainfo.GetPersistentValue(ctx, TraceIDKey)
+	return id
+}
+
+func newTraceID() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return hex.EncodeToString(b[:])
 }
 
 func orDefault(v, d string) string {

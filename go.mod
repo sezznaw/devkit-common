@@ -3,6 +3,7 @@ module github.com/sezznaw/devkit-common
 go 1.26.0
 
 require (
+	github.com/bytedance/gopkg v0.1.4
 	github.com/cloudwego/kitex v0.16.3
 	github.com/kitex-contrib/registry-nacos/v2 v2.0.0
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.5
@@ -36,7 +37,6 @@ require (
 	github.com/aliyun/credentials-go v1.4.3 // indirect
 	github.com/beorn7/perks v1.0.1 // indirect
 	github.com/buger/jsonparser v1.1.1 // indirect
-	github.com/bytedance/gopkg v0.1.4 // indirect
 	github.com/bytedance/sonic v1.15.0 // indirect
 	github.com/bytedance/sonic/loader v0.5.0 // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect

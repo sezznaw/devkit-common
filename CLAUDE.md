@@ -24,65 +24,60 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
 
 ## Packages
 
-- `zlog`: the logger on zap that replaces `log` (work in progress: `kitexx`
-  still uses `log`). `Init(Options)` installs the default used by the
-  package-level functions; `New` only builds. Fields are typed, one bracket
-  per pair: `zlog.Info("login", zlog.Int("uid", uid), zlog.Err(err))`. The
-  alternating `"key", value, ...` form was dropped on purpose: nothing checks
-  it before run time, and keeping it next to the typed form would keep it in
-  use. Eight constructors (`field.go`): `Str`, `Int`, `Float` are generic so
-  that the caller need not know int32 from int64 (Thrift mixes them); `Err`
-  fixes the key `err`. `Field` is our own struct around `zap.Field`, not an
-  alias, because it has methods: `zlog.Int("age", 15).Blue()` colors that one
-  field on the console (`Red Green Yellow Blue Purple Cyan Gray`). zap gives
-  an encoder nothing but key and value, so a colored field travels as
-  `zap.Inline(coloredField)`, which sets `consoleEncoder.fieldColor` around
-  the field; `core.zap` does that only for a colored console, so JSON and
-  `NO_COLOR` output is identical with or without colors. Arguments of `Infof`
-  and friends take the same colors as `zlog.Blue(uid)` (`color.go`, a
-  `fmt.Formatter` that applies the verb to the wrapped value); `core.logf`
-  formats the message itself so that it can take the colors off first when the
-  output is not a colored console. `logf` must not assign to `args`: go vet
-  stops treating a function as a printf wrapper when it does, and `Infof`
-  calls would no longer be checked. A field named like a
-  key every record has (`level`, `time`, `msg`, `caller`, `service`) is written
-  as `fields.level` etc. in both formats (`fieldKey`, logrus's convention): zap
-  does not deduplicate, parsers keep the last duplicate so the record loses its
-  level, and Elasticsearch rejects the record. `TestEveryRecordKeyIsProtected`
-  fails when a new record key is not added to `fieldKey`. Fields passed to the
-  raw `Zap()`/`L()` logger bypass this. `core.log` checks the
-  level before converting the fields, so a call below the level allocates
-  nothing (raw zap allocates the field slice); otherwise cost equals raw zap
-  (benchmarks in the test file).
-  Two kinds of `*Logger`: `zlog.With(...)` and `Default()` *follow the
-  default*, resolving the logger installed by `Init` each time they log
-  (`Logger.core`, cached per installed default), because a package-level
-  `var log = zlog.With(zlog.Str("component", "repo"))` runs before `main` calls `Init`
-  and would otherwise stay on the start-up defaults: info level, no `service`,
-  console text inside a JSON stream. Loggers from `New`/`Init` and their
-  children own their configuration and ignore later `Init` calls.
-  The number of zlog frames between the caller and zap is fixed per path, and
-  `wrap` sets the skip to match: two behind every logging function (the
-  function plus `core.log` or `core.logf`). Keep that invariant, the
-  reported file:line relies on it (`TestCallerOnEveryPath` guards it). The console
-  prints the caller so that GoLand's run window makes it a link and it is never
-  ambiguous (`clickablePath`): relative to the working directory for files
-  inside it, as compiler errors are, absolute otherwise. Not
-  `handler/handler.go` alone: two services of one project both have that file.
-  JSON uses zap's short form, independent of build machine and flags. The
-  console format is our own `consoleEncoder` (`console.go`), because zap's
-  prints the fields as a JSON object at the end of the line; ours prints
-  `key=value` in the order added, keys dimmed. The two formats carry the same
-  content with one exception, kept in one place, `identityFields`: what
-  identifies the process (`service`) is in the JSON records only. To see what a
-  collector gets, `go run ./examples/zlog -format json`. Console colors
-  are on unless `NO_COLOR` is set and deliberately do not test for a TTY: the
-  GoLand run window is not one. To judge the console format by eye, Run
-  `examples/zlog` (`go run ./examples/zlog`); GoLand's test runner window
-  prints the color escapes as text (`[32mINFO[0m`) instead of rendering them.
-- `log`: slog wrapper. `New(Options)` also installs the slog default;
-  `WithContext`/`FromContext` carry a request-scoped logger; `Options` is
-  YAML-loadable (its `Output` field is not).
+- `zlog`: the company logger on zap. Design decisions that are easy to undo
+  by accident:
+  - *Two kinds of `*Logger`.* `zlog.With`, `Default()` and `Ctx(ctx)` follow
+    the default, resolving the logger installed by `Init` each time they log
+    (`Logger.core`, cached per installed default), because a package-level
+    `var log = zlog.With(...)` runs before `main` calls `Init` and would
+    otherwise stay on the start-up defaults. Loggers from `New`/`Init` and
+    their children own their configuration.
+  - *Fields are typed*, `zlog.Info("login", zlog.Int("uid", uid), zlog.Err(err))`.
+    The alternating `"key", value` form was dropped on purpose: nothing checks
+    it before run time. `Str`, `Int`, `Float` are generic (Thrift mixes int32
+    and int64). `Field` is our own struct around `zap.Field`, not an alias,
+    because it has methods (`.Blue()`).
+  - *Caller.* The number of zlog frames between the caller and zap is fixed,
+    and `z2` skips them: the logging function plus `core.log`/`core.logf`.
+    `TestCallerOnEveryPath` guards it. The console prints the caller relative
+    to the working directory for files inside it, absolute otherwise
+    (`clickablePath`), which GoLand's run window turns into a link (confirmed
+    by the user) and which is never ambiguous; JSON uses zap's short form.
+  - *No key twice in a record.* zap does not deduplicate; parsers keep the
+    last duplicate and Elasticsearch rejects the record. So (1) a field named
+    like a key of the record becomes `fields.<key>` (`fieldKey`, logrus's
+    convention; `TestEveryRecordKeyIsProtected` and `TestIdentityFields` fail
+    when a new record key is not added there), and (2) of two fields with the
+    same key the later one wins, which is why the fields of `With` are kept in
+    `core.added` and written with every record instead of being handed to
+    zap's `With`, where they could no longer be replaced. Fields passed to the
+    raw `Zap()`/`L()` logger bypass both.
+  - *Two formats, same content*, except `identityFields` (`service`, `env`,
+    `host`, `version`), which are JSON-only; that function is the single place
+    for JSON-only content. The console encoder is our own (`console.go`):
+    `key=value`, dimmed keys, values of several lines and stacks as a block
+    below the record so that every frame is a link.
+  - *Colors* are on unless `NO_COLOR` is set and deliberately do not test for a
+    TTY: the GoLand run window is not one. GoLand's *test* window prints the
+    escapes as text; judge the console format with `go run ./examples/zlog`.
+    A colored field travels as `zap.Inline(coloredField)`; colored printf
+    arguments are a `fmt.Formatter` (`color.go`), taken off in `core.logf` when
+    the output is not a colored console. `logf` must not assign to `args`: go
+    vet stops treating a function as a printf wrapper when it does.
+  - *Cost.* `core.log` checks the level before converting fields, so a call
+    below the level allocates nothing; otherwise cost equals raw zap
+    (benchmarks in the test file).
+  - `Init` also redirects `log/slog` (and with it the std `log`) through
+    `slogHandler`, which resolves the default logger per record and passes
+    `testing/slogtest`. Before `Init` the logger is configured by `ZLOG_*`
+    environment variables (`envOptions`): a service that cannot read its
+    config logs before `Init`, and that line must be JSON in production.
+  - `Sync` drops EINVAL/ENOTTY/EBADF: stdout as a terminal or pipe cannot be
+    synced. `Options.JSON` is the deprecated key of the old `log` package,
+    still read so that an upgraded service does not silently turn to console
+    output. `zlog/zlogtest` captures or silences the default logger in tests.
+  - `zlog/PLAN.zh-CN.md` is the review checklist of 2026-09-20 with the state
+    of every item.
 - `config`: `Load(dir, &cfg)` reads `<dir>/<APP_ENV>.yaml` (default `dev`)
   and expands `${VAR}` from the environment *before* YAML parsing.
 - `kitexx` shutdown design, which is easy to get wrong: Kitex's `Stop()` runs
@@ -100,12 +95,24 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   status:STARTING". Nacos 2.x needs the main port and main port + 1000 (gRPC);
   both are dialled, any one reachable server is enough. `kitexx.Options` adds
   the `registry_disabled: true` hint, because only it knows that setting.
-- `kitexx/klog.go` routes Kitex's klog through slog; a multi-line message is
-  split into message + `stack` attribute so it stays one record.
+- `kitexx/klog.go` routes Kitex's klog through zlog, using the raw zap logger
+  with `AddCallerSkip(klogFrames)` so that `caller` is the line of Kitex that
+  logged, and so that the panic stack keeps the key `stack` (a zlog field of
+  that name would become `fields.stack`). A multi-line message is split into
+  message + `stack` so it stays one record.
+- `kitexx` trace_id: `LoggingMiddleware` reads the persistent metainfo value
+  `TRACE_ID` or creates one, puts it back into the context and into the logger
+  of the request (`zlog.Ctx(ctx)`). It only crosses the wire because
+  `ClientOptions` selects the TTHeader transport and `Options` adds the server
+  meta handler; verified with two real Kitex services, not only unit tests.
+  `log_level_data_id` makes the level follow a Nacos configuration
+  (`loglevel.go`); failing to set that up is a warning, not a start failure.
 - `kitexx`: the glue a service's `main` uses. `Options(cfg)` returns Kitex
-  server options (basic info, listen address, logging middleware, Nacos
-  registry unless `registry_disabled`), `ClientOptions(cfg)` returns the Nacos
-  resolver, `Run` starts the server. `kitexx.Config` is meant to be embedded
+  server options (basic info, listen address, logging middleware, meta
+  handler, Nacos registry unless `registry_disabled`) and installs the logger,
+  `ClientOptions(cfg)` returns TTHeader transport, caller name and the Nacos
+  resolver (no resolver with `registry_disabled`), `Run` starts the server and
+  syncs the logger on exit. `kitexx.Config` is meant to be embedded
   inline in the service's own config struct; the `kitex-service` template in
   `../devkit-registry` depends on its field names and YAML keys.
 - `nacosx`, `redisx`, `etcdx`: thin constructors from YAML-loadable config

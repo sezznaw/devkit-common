@@ -3,7 +3,9 @@ package kitexx
 import (
 	"bytes"
 	"errors"
-	"log/slog"
+	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -12,7 +14,8 @@ import (
 	"github.com/cloudwego/kitex/pkg/registry"
 
 	"github.com/sezznaw/devkit-common/config"
-	"github.com/sezznaw/devkit-common/log"
+	"github.com/sezznaw/devkit-common/zlog"
+	"github.com/sezznaw/devkit-common/zlog/zlogtest"
 )
 
 type fakeRegistry struct{ deregisteredAt time.Time }
@@ -24,7 +27,7 @@ func (f *fakeRegistry) Deregister(*registry.Info) error {
 }
 
 func TestDelayedRegistryWaitsAfterDeregistering(t *testing.T) {
-	log.New(log.Options{Output: &bytes.Buffer{}})
+	zlogtest.Discard(t)
 	inner := &fakeRegistry{}
 	d := &delayedRegistry{Registry: inner, wait: 150 * time.Millisecond}
 	start := time.Now()
@@ -47,8 +50,9 @@ func TestDelayedRegistryWaitsAfterDeregistering(t *testing.T) {
 }
 
 func TestShutdownHooksRunInReverseAndSurviveFailures(t *testing.T) {
+	t.Setenv("NO_COLOR", "1")
 	var buf bytes.Buffer
-	log.New(log.Options{Output: &buf})
+	t.Cleanup(zlog.SetDefault(zlog.New(zlog.Options{Output: &buf})))
 	var order []string
 	OnShutdown("db", func() error { order = append(order, "db"); return nil })
 	OnShutdown("cache", func() error { order = append(order, "cache"); return errors.New("close failed") })
@@ -70,10 +74,13 @@ func TestShutdownHooksRunInReverseAndSurviveFailures(t *testing.T) {
 	}
 }
 
-func TestKlogGoesThroughSlogAsSingleRecords(t *testing.T) {
+func TestKlogGoesThroughZlogAsSingleRecords(t *testing.T) {
 	var buf bytes.Buffer
-	l := log.New(log.Options{Output: &buf, JSON: true})
-	bridgeKlog(l, slog.LevelInfo)
+	l := zlog.New(zlog.Options{Output: &buf, Format: "json"})
+	t.Cleanup(zlog.SetDefault(l))
+	bridgeKlog(l)
+
+	_, file, line, _ := runtime.Caller(0)
 	klog.Infof("KITEX: server listen at addr=%s", "[::]:8888")
 	klog.Debugf("hidden at info level")
 	klog.Errorf("KITEX: processing request error, error=panic: boom\ngoroutine 1 [running]:\nmain.go:10")
@@ -84,8 +91,20 @@ func TestKlogGoesThroughSlogAsSingleRecords(t *testing.T) {
 	if !strings.Contains(lines[0], `"msg":"server listen at addr=[::]:8888"`) || !strings.Contains(lines[0], `"logger":"kitex"`) || !strings.Contains(lines[0], `"level":"INFO"`) {
 		t.Errorf("info record wrong: %s", lines[0])
 	}
+	// The caller is the line that called klog, not a line of the bridge.
+	if want := `"caller":"kitexx/` + filepath.Base(file) + ":" + strconv.Itoa(line+1) + `"`; !strings.Contains(lines[0], want) {
+		t.Errorf("want %s: %s", want, lines[0])
+	}
 	if !strings.Contains(lines[1], `"level":"ERROR"`) || !strings.Contains(lines[1], `"stack":"goroutine 1 [running]:\nmain.go:10"`) {
-		t.Errorf("panic record must carry the stack as one attribute: %s", lines[1])
+		t.Errorf("panic record must carry the stack as one field: %s", lines[1])
+	}
+
+	// The level of Kitex's lines follows zlog.SetLevel.
+	buf.Reset()
+	l.SetLevel("debug")
+	klog.CtxDebugf(nil, "now %s", "visible") //nolint:staticcheck // klog takes a nil context
+	if !strings.Contains(buf.String(), `"msg":"now visible"`) || !strings.Contains(buf.String(), `"level":"DEBUG"`) {
+		t.Errorf("after SetLevel: %q", buf.String())
 	}
 }
 
