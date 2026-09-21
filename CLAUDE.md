@@ -99,8 +99,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     synced. `Options.JSON` is the deprecated key of the old `log` package,
     still read so that an upgraded service does not silently turn to console
     output. `zlog/zlogtest` captures or silences the default logger in tests.
-  - `zlog/PLAN.zh-CN.md` is the review checklist of 2026-09-20 with the state
-    of every item.
+  - Deliberately not done: JSON keys stay in zap's order (`level` before
+    `time`; changing it means writing a JSON encoder of our own, and collectors
+    do not care), and a message of several lines stays as it is on the console
+    (JSON is one line regardless). There is no limit on the size of a whole
+    record, only per value (`max_field_bytes`).
 - `config`: `Load(dir, &cfg)` reads `<dir>/<APP_ENV>.yaml` (default `dev`)
   and expands `${VAR}` from the environment *before* YAML parsing.
 - `kitexx` shutdown design, which is easy to get wrong: Kitex's `Stop()` runs

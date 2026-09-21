@@ -306,6 +306,11 @@ func (w *countingWriter) snapshot() (int, string) {
 	return w.writes, w.buf.String()
 }
 
+func (w *countingWriter) String() string {
+	_, out := w.snapshot()
+	return out
+}
+
 func TestBuffer(t *testing.T) {
 	w := &countingWriter{}
 	l := New(Options{Format: "json", Output: w, Buffer: Buffer{Size: 64 << 10, FlushInterval: time.Hour}})
@@ -629,7 +634,7 @@ func TestSamplingReportsWhatItDropped(t *testing.T) {
 // Without Sync the report comes by itself once the second is over, and a flood
 // of messages that all differ cannot make the reporter grow without bound.
 func TestSamplingReportTimerAndBound(t *testing.T) {
-	out := &lockedWriter{}
+	out := &countingWriter{}
 	l := New(Options{Format: "json", Output: out, Sampling: Sampling{First: 1, Thereafter: 1000}})
 	l.Error("redis down")
 	l.Error("redis down")
@@ -656,23 +661,6 @@ func TestSamplingReportTimerAndBound(t *testing.T) {
 		t.Errorf("pending keys = %d, other = %d; want %d and 40", keys, other, maxDropKeys)
 	}
 	d.flush() // also stops the timer
-}
-
-type lockedWriter struct {
-	mu sync.Mutex
-	b  bytes.Buffer
-}
-
-func (w *lockedWriter) Write(p []byte) (int, error) {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.b.Write(p)
-}
-
-func (w *lockedWriter) String() string {
-	w.mu.Lock()
-	defer w.mu.Unlock()
-	return w.b.String()
 }
 
 // A flood: nearly every record takes the dropped path, which now counts.
