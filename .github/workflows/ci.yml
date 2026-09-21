@@ -1,7 +1,8 @@
 name: ci
+# Every branch: a release is tagged only from a commit that was green here,
+# against a real Nacos included, before it is merged.
 on:
   push:
-    branches: [main]
   pull_request:
 jobs:
   test:
@@ -14,3 +15,31 @@ jobs:
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
       - run: go test ./...
+
+  # The tests above put fakes underneath nacosx. This one runs it against a
+  # real server, where the assumptions the fakes are built on are checked.
+  nacos:
+    runs-on: ubuntu-latest
+    services:
+      nacos:
+        image: nacos/nacos-server:v2.4.3
+        env:
+          MODE: standalone
+        ports:
+          - 8848:8848
+          - 9848:9848
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: wait for Nacos
+        run: |
+          for i in $(seq 1 60); do
+            curl -fs http://127.0.0.1:8848/nacos/v1/console/health/readiness && exit 0
+            sleep 2
+          done
+          echo "Nacos did not become ready"; exit 1
+      - run: go test ./nacosx/ -run TestAgainstNacos -v -count=1
+        env:
+          NACOS_ADDR: 127.0.0.1:8848

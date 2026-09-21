@@ -8,30 +8,61 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nacos-group/nacos-sdk-go/v2/clients/config_client"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
+	sdklogger "github.com/nacos-group/nacos-sdk-go/v2/common/logger"
+	"go.uber.org/zap/zapcore"
+
+	"github.com/sezznaw/devkit-common/zlog"
+	"github.com/sezznaw/devkit-common/zlog/zlogtest"
 )
 
-func TestSharedNamingClientIsCreatedOncePerTarget(t *testing.T) {
-	calls := 0
-	orig, origProbe := newNamingFunc, probeFunc
-	newNamingFunc = func(c Config) (naming_client.INamingClient, error) {
-		calls++
-		return &naming_client.NamingClient{}, nil
-	}
+// fakeTarget makes New work without a server, and counts the clients made.
+func fakeTarget(t *testing.T) (naming *fakeNaming, config *fakeConfig, made *int) {
+	t.Helper()
+	naming, config, made = newFakeNaming(), &fakeConfig{}, new(int)
+	origN, origC, origP := newNamingFunc, newConfigFunc, probeFunc
+	newNamingFunc = func(Config) (naming_client.INamingClient, error) { *made++; return naming, nil }
+	newConfigFunc = func(Config) (config_client.IConfigClient, error) { return config, nil }
 	probeFunc = func(Config, time.Duration) error { return nil }
-	defer func() {
-		newNamingFunc, probeFunc = orig, origProbe
-		sharedNaming = map[string]naming_client.INamingClient{}
-	}()
+	t.Cleanup(func() {
+		newNamingFunc, newConfigFunc, probeFunc = origN, origC, origP
+		CloseShared()
+	})
+	return naming, config, made
+}
 
-	a := Config{Addrs: []string{"n1:8848"}, Namespace: "dev"}
-	c1, _ := SharedNamingClient(a)
-	c2, _ := SharedNamingClient(a)
-	if c1 != c2 || calls != 1 {
-		t.Fatalf("same target must share one client: calls=%d", calls)
+func newTestClient(t *testing.T) (*Client, *fakeNaming, *fakeConfig) {
+	t.Helper()
+	naming, config, _ := fakeTarget(t)
+	c, err := New(Config{Addrs: []string{"n1:8848"}, Namespace: "dev"})
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, _ = SharedNamingClient(Config{Addrs: []string{"n1:8848"}, Namespace: "prod"}); calls != 2 {
-		t.Fatalf("a different namespace needs its own client: calls=%d", calls)
+	t.Cleanup(func() { c.Close() })
+	return c, naming, config
+}
+
+func TestSharedIsCreatedOncePerTarget(t *testing.T) {
+	zlogtest.Discard(t)
+	_, _, made := fakeTarget(t)
+	a := Config{Addrs: []string{"n1:8848"}, Namespace: "dev"}
+	c1, _ := Shared(a)
+	c2, _ := Shared(a)
+	if c1 != c2 || *made != 1 {
+		t.Fatalf("same target must share one client: made=%d", *made)
+	}
+	if _, _ = Shared(Config{Addrs: []string{"n1:8848"}, Namespace: "prod"}); *made != 2 {
+		t.Fatalf("a different namespace needs its own client: made=%d", *made)
+	}
+}
+
+func TestNewAnnouncesTheConnection(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	newTestClient(t)
+	recs := logs.Records()
+	if len(recs) != 1 || recs[0].Msg != "nacos connected" || recs[0].Fields["namespace"] != "dev" || recs[0].Fields["group"] != "DEFAULT_GROUP" {
+		t.Fatalf("records: %s", logs)
 	}
 }
 
@@ -92,19 +123,87 @@ func TestProbe(t *testing.T) {
 	}
 }
 
-func TestSharedNamingClientProbesFirst(t *testing.T) {
-	created := false
-	orig, origProbe := newNamingFunc, probeFunc
-	newNamingFunc = func(Config) (naming_client.INamingClient, error) {
-		created = true
-		return &naming_client.NamingClient{}, nil
-	}
+func TestNewProbesFirst(t *testing.T) {
+	_, _, made := fakeTarget(t)
 	probeFunc = func(Config, time.Duration) error { return errors.New("cannot reach Nacos: x") }
-	defer func() {
-		newNamingFunc, probeFunc = orig, origProbe
-		sharedNaming = map[string]naming_client.INamingClient{}
-	}()
-	if _, err := SharedNamingClient(Config{Addrs: []string{"h:1"}}); err == nil || created {
-		t.Fatalf("an unreachable Nacos must stop before the SDK client is created (err=%v created=%v)", err, created)
+	if _, err := New(Config{Addrs: []string{"h:1"}}); err == nil || *made != 0 {
+		t.Fatalf("an unreachable Nacos must stop before the SDK client is created (err=%v made=%d)", err, *made)
 	}
+}
+
+// resetOutage gives a test the state of a process that has just started.
+func resetOutage(t *testing.T) {
+	t.Helper()
+	fresh := func() {
+		outage.mu.Lock()
+		outage.down, outage.suppressed, outage.unhealthy = false, 0, map[*Client]bool{}
+		outage.mu.Unlock()
+	}
+	fresh()
+	t.Cleanup(fresh)
+}
+
+func TestConnectionLostAndRestored(t *testing.T) {
+	resetOutage(t)
+	logs := zlogtest.Capture(t)
+	naming := newFakeNaming()
+	c := NewFrom(Config{Addrs: []string{"n1:8848"}}, naming, nil)
+	go c.watchConnection(time.Millisecond)
+	defer c.Close()
+
+	naming.healthy.Store(false)
+	waitFor(t, func() bool { return logs.Has("WARN", "nacos connection lost") })
+	naming.healthy.Store(true)
+	waitFor(t, func() bool { return logs.Has("INFO", "nacos connection restored") })
+	if n := len(logs.Records()); n != 2 {
+		t.Errorf("one record per transition, not per look: %d\n%s", n, logs)
+	}
+}
+
+// What the SDK has to say about an outage is one record of ours when it
+// begins and a count when it is over.
+func TestOutageIsNotAFloodOfSDKRecords(t *testing.T) {
+	resetOutage(t)
+	logs := zlogtest.Capture(t)
+	sdklogger.SetLogger(&sdkLogger{l: zlog.With(zlog.Str("logger", "nacos-sdk")), min: zapcore.WarnLevel})
+	naming := newFakeNaming()
+	c := NewFrom(Config{}, naming, nil)
+
+	sdklogger.Warn("something else") // not an outage: written
+	naming.healthy.Store(false)
+	sdklogger.Warnf("x fail to connect server, after trying 1 times, error=%s", "connection refused")
+	for i := 0; i < 50; i++ {
+		sdklogger.Errorf("Send request fail, request=ConfigBatchListenRequest, retryTimes=%d", i)
+	}
+	outage.report(c, false, 0)
+	outage.report(c, true, 0)
+	sdklogger.Warn("after the outage") // written again
+
+	recs := logs.Records()
+	if len(recs) != 4 {
+		t.Fatalf("want 4 records, got %d:\n%s", len(recs), logs)
+	}
+	if r := recs[1]; r.Msg[:21] != "nacos connection lost" || !strings.Contains(r.Fields["cause"].(string), "connection refused") {
+		t.Errorf("the outage begins with the SDK's first complaint as the cause: %+v", r)
+	}
+	if r := recs[2]; r.Msg[:25] != "nacos connection restored" || r.Fields["sdk_records_hidden"] != float64(51) {
+		t.Errorf("the outage ends with the count of what was left out: %+v", r)
+	}
+
+	// At debug the SDK's own account is wanted, all of it.
+	sdklogger.SetLogger(&sdkLogger{l: zlog.With(), min: zapcore.DebugLevel})
+	sdklogger.Warn("y fail to connect server")
+	if !logs.Has("WARN", "y fail to connect server") || outage.down {
+		t.Errorf("sdk_log_level debug hides nothing: %s", logs)
+	}
+}
+
+func waitFor(t *testing.T, cond func() bool) {
+	t.Helper()
+	for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); time.Sleep(2 * time.Millisecond) {
+		if cond() {
+			return
+		}
+	}
+	t.Fatal("timed out waiting")
 }

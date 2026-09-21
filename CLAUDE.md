@@ -64,6 +64,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     arguments are a `fmt.Formatter` (`color.go`), taken off in `core.logf` when
     the output is not a colored console. `logf` must not assign to `args`: go
     vet stops treating a function as a printf wrapper when it does.
+  - *`Blocker`*: a value passed to `Any` that implements it is a block below
+    the record on the console (`AddReflected`) and itself in JSON. `clipField`
+    leaves it as it is instead of pre-encoding it to `json.RawMessage`, or the
+    console could no longer ask it for its lines. It must not be a Stringer or
+    an error: `zap.Any` would write those as a string.
   - *Cost.* `core.log` checks the level before converting fields, so a call
     below the level allocates nothing; otherwise cost equals raw zap
     (benchmarks in the test file).
@@ -115,12 +120,81 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `server.RegisterShutdownHook`, which fires while requests are still served;
   (3) `shutdown.deregister_wait` is a `*config.Duration` so an explicit `0s`
   differs from "unset" (default 3s).
-- `nacosx.Probe` runs inside `SharedNamingClient` before the SDK client is
-  created: nacos-sdk-go does not fail on an unreachable server, it retries in
-  the background and the first call fails with "client not connected, current
-  status:STARTING". Nacos 2.x needs the main port and main port + 1000 (gRPC);
-  both are dialled, any one reachable server is enough. `kitexx.Options` adds
-  the `registry_disabled: true` hint, because only it knows that setting.
+- `nacosx`: one `Client` per process (`Shared`, reached from services through
+  `kitexx.Nacos`) for registration, discovery and configuration. What it is
+  built around are facts of nacos-sdk-go v2.3.5 that are easy to forget:
+  - *`Probe` runs in `New` before the SDK client is created*: the SDK does not
+    fail on an unreachable server, it retries in the background and the first
+    call fails with "client not connected, current status:STARTING". Nacos 2.x
+    needs the main port and main port + 1000 (gRPC); both are dialled, any one
+    reachable server is enough. `kitexx.Nacos` adds the `registry_disabled:
+    true` hint, because only it knows that setting.
+  - *SDK log* (`sdklog.go`): `logger.SetLogger` before the first SDK client
+    exists is kept, because the SDK's `InitLogger` returns when a logger is
+    there. One logger per process, so the level of the first client counts. Default threshold warn: at
+    info the SDK prints the content of every configuration it receives.
+    `sdkFrames` works like `klogFrames`; `TestSDKLogGoesThroughZlog` guards it.
+  - *Configuration listeners* (`config.go`, type `watch`): the SDK runs a
+    listener as `go listener(...)`, with no recover, no order between two quick
+    changes, and once right after `ListenConfig` when the snapshot file differs.
+    So there is one SDK listener per configuration, ours; it serializes,
+    deduplicates by md5, recovers, and fetches the content from the server
+    instead of trusting the pushed one (of two pushes that overtook each other
+    the older would win). A deleted configuration arrives as "".
+  - *`DisableUseSnapShot(true)`*: otherwise `GetConfig` silently answers from
+    the cache directory when the server does not. Decided with the user: no
+    Nacos at start means no start.
+  - *`Value[T]`* (`value.go`): every change decodes into a new `T` and swaps an
+    `atomic.Pointer`; never decode into the `T` in effect (data race, and a
+    failed decode would leave half of it). Strict decode first, lenient second:
+    unknown keys are a WARN naming them, not a rejection. The record of a
+    change is written before the hooks run. Lock order is `Value.mu` then
+    `watch.mu` in `Watch`, the reverse in a change; that is safe only because
+    the Value is not a subscriber before `follow` returns.
+  - *Diff and masking* (`diff.go`): the two documents are flattened to
+    `a.b.c` and compared as strings, lists as one value. Keys that look like
+    secrets are masked in "config loaded" and in changes (`isSecret`); a list
+    that contains such a key is masked as a whole. `Changes`, `settings` and
+    `InstanceChanges` are `zlog.Blocker`s: lines on the console, values in JSON.
+  - *Naming* (`naming.go`): `Subscribe` of the SDK calls the callback from
+    inside the call, on the same goroutine, hence `service.subMu` apart from
+    `service.mu`. The SDK does not process a pushed empty instance list
+    (`updateCacheWhenEmpty` false, its protection against a Nacos that lost its
+    data), so the last instance of a service never "leaves" for callers;
+    `observe` therefore ignores an empty look-up. Instances are registered in
+    cluster "DEFAULT" because kitex-contrib/registry-nacos did, and services on
+    common <= v0.3 still do; look-ups do not filter by cluster.
+  - *Connection state* can only be polled (`ServerHealthy`): listeners exist
+    on the SDK's internal rpc client only. After a reconnect the SDK redoes
+    registrations and subscriptions itself (seen with a restarted server).
+  - *Outage* (`outage.go`, process-wide like the SDK's logger): measured
+    against a stopped server the SDK wrote 119 warn/error records in 25 s. Now
+    the first record that matches `lostSigns` starts the outage at once (the
+    poll would be up to 2 s late), "nacos connection lost" carries it as
+    `cause`, everything the SDK says at warn or above until the clients report
+    healthy again is counted instead of written (`sdk_records_hidden`), with a
+    reminder every 30 s. `sdk_log_level: debug` switches all of that off.
+    `routine` in `sdklog.go` is the other filter: warn records the SDK writes
+    with every read of a configuration (no failover file, no encrypted-data-key
+    file, "config data not exist"), taken down to debug. Both lists are
+    substrings of SDK messages: check them when the SDK is upgraded, against a
+    real server (`docker stop nacos` while `examples/nacosx` runs).
+  - *One instance per service and client*: Nacos 2.x ties an ephemeral instance
+    to the gRPC connection, a second `Register` for the same service replaces
+    the first (the integration test first got this wrong).
+  - Fields are `name=`, not `service=`: `service` is a key of the record and
+    would come out as `fields.service`.
+  - *Offline client* (`Offline`, what `kitexx.Nacos` returns with
+    `registry_disabled`): configurations are files `<conf dir>/nacos/<data id>`,
+    polled once a second, through the same `watch` as the real thing.
+  - Tests put fakes underneath (`fake_test.go`; `NewFrom` for other packages).
+    `TestAgainstNacos` needs `NACOS_ADDR` and runs in the CI job `nacos`
+    against a real server. Since 2026-09-21 the user's Mac has Docker Desktop
+    and a container `nacos` (nacos-server v2.4.3, standalone, 8848 + 9848):
+    `docker start nacos`, then `NACOS_ADDR=127.0.0.1:8848 go test ./nacosx/`.
+- `kitexx/nacos.go`: registry and resolver of our own on top of `nacosx`
+  (kitex-contrib/registry-nacos is no longer a dependency; it logged nothing).
+  Resolve returns an error for an empty list, or Kitex would cache it.
 - `kitexx/klog.go` routes Kitex's klog through zlog, using the raw zap logger
   with `AddCallerSkip(klogFrames)` so that `caller` is the line of Kitex that
   logged, and so that the panic stack keeps the key `stack` (a zlog field of
@@ -132,17 +206,20 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `ClientOptions` selects the TTHeader transport and `Options` adds the server
   meta handler; verified with two real Kitex services, not only unit tests.
   `log_level_data_id` makes the level follow a Nacos configuration
-  (`loglevel.go`); failing to set that up is a warning, not a start failure.
+  (`loglevel.go`, through `Client.Get` and `Client.OnChange`); failing to set that up is a warning, not a start failure.
 - `kitexx`: the glue a service's `main` uses. `Options(cfg)` returns Kitex
   server options (basic info, listen address, logging middleware, meta
   handler, Nacos registry unless `registry_disabled`) and installs the logger,
+  `Nacos(cfg)` returns the client of the process, `WatchConfig[T](cfg)` the
+  configuration that refreshes itself (data id `config_data_id`, default
+  `<service.name>.yaml`),
   `ClientOptions(cfg)` returns TTHeader transport, caller name and the Nacos
   resolver (no resolver with `registry_disabled`), `Run` starts the server and
   syncs the logger on exit. `kitexx.Config` is meant to be embedded
   inline in the service's own config struct; the `kitex-service` template in
   `../devkit-registry` depends on its field names and YAML keys.
-- `nacosx`, `redisx`, `etcdx`: thin constructors from YAML-loadable config
-  structs; `redisx.New` pings before returning.
+- `redisx`, `etcdx`: thin constructors from YAML-loadable config structs;
+  `redisx.New` pings before returning.
 
 ## Versioning rules
 

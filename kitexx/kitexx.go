@@ -21,8 +21,6 @@ import (
 	"github.com/cloudwego/kitex/pkg/transmeta"
 	"github.com/cloudwego/kitex/server"
 	"github.com/cloudwego/kitex/transport"
-	nacosregistry "github.com/kitex-contrib/registry-nacos/v2/registry"
-	nacosresolver "github.com/kitex-contrib/registry-nacos/v2/resolver"
 
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/nacosx"
@@ -47,7 +45,12 @@ type Config struct {
 	// it, which is how debug logging is switched on in production without a
 	// restart. Empty: the level stays what log.level says.
 	LogLevelDataID string `yaml:"log_level_data_id"`
-	// RegistryDisabled skips Nacos registration (handy for local runs).
+	// ConfigDataID names the Nacos configuration that WatchConfig reads.
+	// Default: "<service.name>.yaml".
+	ConfigDataID string `yaml:"config_data_id"`
+	// RegistryDisabled runs the service without Nacos (handy for local runs):
+	// it is not registered, the services it calls are not looked up, and
+	// configurations are files, see Nacos.
 	RegistryDisabled bool `yaml:"registry_disabled"`
 	// Shutdown tunes the graceful stop. Both values accept "3s"-style durations.
 	Shutdown struct {
@@ -89,7 +92,11 @@ func Options(cfg Config) ([]server.Option, error) {
 	bridgeKlog(zlog.Init(cfg.Log))
 	if cfg.LogLevelDataID != "" {
 		// The level is a convenience: a service must start without it.
-		if err := watchLogLevelFromNacos(cfg); err != nil {
+		nc, err := Nacos(cfg)
+		if err == nil {
+			err = watchLogLevel(nc, cfg.LogLevelDataID)
+		}
+		if err != nil {
 			zlog.Warn("log level does not follow Nacos", zlog.Str("data_id", cfg.LogLevelDataID), zlog.Err(err))
 		}
 	}
@@ -106,16 +113,16 @@ func Options(cfg Config) ([]server.Option, error) {
 		server.WithExitWaitTime(cfg.Shutdown.DrainTimeout.Or(defaultDrainTimeout)),
 	}
 	if !cfg.RegistryDisabled {
-		cli, err := nacosx.SharedNamingClient(cfg.Nacos)
+		cli, err := Nacos(cfg)
 		if err != nil {
-			return nil, fmt.Errorf("%w. To run without Nacos, for example on your own machine, set registry_disabled: true", err)
+			return nil, err
 		}
 		wait := defaultDeregisterWait
 		if cfg.Shutdown.DeregisterWait != nil {
 			wait = cfg.Shutdown.DeregisterWait.Std()
 		}
 		opts = append(opts, server.WithRegistry(&delayedRegistry{
-			Registry: nacosregistry.NewNacosRegistry(cli, nacosregistry.WithGroup(cfg.Nacos.GroupName())),
+			Registry: newNacosRegistry(cli),
 			wait:     wait,
 		}))
 	}
@@ -139,12 +146,11 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 	if cfg.RegistryDisabled {
 		return opts, nil
 	}
-	cli, err := nacosx.SharedNamingClient(cfg.Nacos)
+	cli, err := Nacos(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return append(opts, client.WithResolver(nacosresolver.NewNacosResolver(cli,
-		nacosresolver.WithGroup(cfg.Nacos.GroupName())))), nil
+	return append(opts, client.WithResolver(newNacosResolver(cli, cfg.Nacos))), nil
 }
 
 // Run starts the server and blocks until it has stopped completely.
@@ -158,6 +164,7 @@ func Run(svr server.Server, cfg Config) error {
 	zlog.Info("server starting", zlog.Str("addr", normalizeAddr(cfg.Service.Addr)), zlog.Bool("registry", !cfg.RegistryDisabled))
 	err := svr.Run()
 	runShutdownHooks()
+	nacosx.CloseShared()
 	if err != nil {
 		zlog.Error("server stopped with error", zlog.Err(err))
 		return err

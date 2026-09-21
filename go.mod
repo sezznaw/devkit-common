@@ -5,7 +5,6 @@ go 1.26.0
 require (
 	github.com/bytedance/gopkg v0.1.4
 	github.com/cloudwego/kitex v0.16.3
-	github.com/kitex-contrib/registry-nacos/v2 v2.0.0
 	github.com/nacos-group/nacos-sdk-go/v2 v2.3.5
 	github.com/redis/go-redis/v9 v9.22.0
 	go.etcd.io/etcd/client/v3 v3.7.1

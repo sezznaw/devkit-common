@@ -8,10 +8,14 @@ import (
 	"testing"
 
 	"github.com/bytedance/gopkg/cloud/metainfo"
-	"github.com/nacos-group/nacos-sdk-go/v2/clients/config_client"
+	"github.com/cloudwego/kitex/pkg/registry"
+	"github.com/cloudwego/kitex/pkg/utils"
+	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
+	"github.com/nacos-group/nacos-sdk-go/v2/model"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
 	"gopkg.in/yaml.v3"
 
+	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/zlog"
 	"github.com/sezznaw/devkit-common/zlog/zlogtest"
 )
@@ -145,16 +149,15 @@ func TestClientOptions(t *testing.T) {
 	}
 }
 
-type fakeConfigClient struct {
-	config_client.IConfigClient
+type fakeLevelSource struct {
 	content  string
 	err      error
-	onChange func(namespace, group, dataId, data string)
+	onChange func(content string)
 }
 
-func (f *fakeConfigClient) GetConfig(p vo.ConfigParam) (string, error) { return f.content, f.err }
-func (f *fakeConfigClient) ListenConfig(p vo.ConfigParam) error {
-	f.onChange = p.OnChange
+func (f *fakeLevelSource) Get(string, ...nacosx.Option) (string, error) { return f.content, f.err }
+func (f *fakeLevelSource) OnChange(_ string, fn func(string), _ ...nacosx.Option) error {
+	f.onChange = fn
 	return nil
 }
 
@@ -162,26 +165,84 @@ func TestLogLevelFollowsNacos(t *testing.T) {
 	zlogtest.Capture(t) // level debug
 	zlog.SetLevel("info")
 
-	cc := &fakeConfigClient{content: " Debug\n"}
-	if err := watchLogLevel(cc, "ser-auth.log-level", "DEFAULT_GROUP"); err != nil {
+	src := &fakeLevelSource{content: " Debug\n"}
+	if err := watchLogLevel(src, "ser-auth.log-level"); err != nil {
 		t.Fatal(err)
 	}
 	if !zlog.Enabled(zlog.LevelDebug) {
 		t.Error("the level in Nacos at start must be applied")
 	}
-	cc.onChange("", "DEFAULT_GROUP", "ser-auth.log-level", "error")
+	src.onChange("error")
 	if zlog.Enabled(zlog.LevelWarn) || !zlog.Enabled(zlog.LevelError) {
 		t.Error("a change in Nacos must be applied")
 	}
 	// Neither an empty configuration nor nonsense changes the level.
-	cc.onChange("", "", "", "")
-	cc.onChange("", "", "", "verbose")
+	src.onChange("")
+	src.onChange("verbose")
 	if zlog.Enabled(zlog.LevelWarn) || !zlog.Enabled(zlog.LevelError) {
 		t.Error("an empty or unknown level must leave the level alone")
 	}
 
-	if err := watchLogLevel(&fakeConfigClient{err: errors.New("nacos down")}, "x", "g"); err == nil {
+	if err := watchLogLevel(&fakeLevelSource{err: errors.New("nacos down")}, "x"); err == nil {
 		t.Error("a failure to read must be reported")
+	}
+}
+
+type fakeNaming struct {
+	naming_client.INamingClient
+	registered   []vo.RegisterInstanceParam
+	deregistered []vo.DeregisterInstanceParam
+	instances    []model.Instance
+}
+
+func (f *fakeNaming) RegisterInstance(p vo.RegisterInstanceParam) (bool, error) {
+	f.registered = append(f.registered, p)
+	return true, nil
+}
+func (f *fakeNaming) DeregisterInstance(p vo.DeregisterInstanceParam) (bool, error) {
+	f.deregistered = append(f.deregistered, p)
+	return true, nil
+}
+func (f *fakeNaming) SelectAllInstances(vo.SelectAllInstancesParam) ([]model.Instance, error) {
+	return f.instances, nil
+}
+func (f *fakeNaming) Subscribe(*vo.SubscribeParam) error { return nil }
+
+func TestRegistryAndResolverGoThroughNacosx(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	naming := &fakeNaming{}
+	cli := nacosx.NewFrom(nacosx.Config{Addrs: []string{"n1:8848"}}, naming, nil)
+
+	reg := newNacosRegistry(cli)
+	info := &registry.Info{ServiceName: "order", Addr: utils.NewNetAddr("tcp", "10.0.0.5:8888"), Weight: 20, Tags: map[string]string{"zone": "a"}}
+	if err := reg.Register(info); err != nil {
+		t.Fatal(err)
+	}
+	if p := naming.registered[0]; p.ServiceName != "order" || p.Ip != "10.0.0.5" || p.Port != 8888 || p.Weight != 20 || p.Metadata["zone"] != "a" {
+		t.Errorf("registered as %+v", p)
+	}
+	if err := reg.Deregister(info); err != nil || len(naming.deregistered) != 1 {
+		t.Fatalf("deregister: %v %d", err, len(naming.deregistered))
+	}
+	if !logs.Has("INFO", "registered in Nacos") || !logs.Has("INFO", "deregistered from Nacos") {
+		t.Errorf("records: %s", logs)
+	}
+
+	res := newNacosResolver(cli, nacosx.Config{})
+	if _, err := res.Resolve(context.Background(), "pay"); err == nil {
+		t.Error("no instance must be an error, or Kitex caches an empty list")
+	}
+	naming.instances = []model.Instance{
+		{Ip: "10.0.0.7", Port: 8888, Weight: 10, Healthy: true, Enable: true, Metadata: map[string]string{"zone": "b"}},
+		{Ip: "10.0.0.8", Port: 8888, Weight: 10, Healthy: false, Enable: true},
+	}
+	got, err := res.Resolve(context.Background(), "pay")
+	if err != nil || len(got.Instances) != 1 || !got.Cacheable || got.CacheKey != "pay" {
+		t.Fatalf("resolve: %+v %v", got, err)
+	}
+	in := got.Instances[0]
+	if zone, _ := in.Tag("zone"); in.Address().String() != "10.0.0.7:8888" || in.Weight() != 10 || zone != "b" {
+		t.Errorf("instance: %v", in)
 	}
 }
 

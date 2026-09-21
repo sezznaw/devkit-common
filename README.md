@@ -14,7 +14,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `zlog`    | Company logger on zap: typed fields checked by the compiler, a console format for people (colors, clickable `file:line`) and JSON for log collectors, request-scoped loggers with a `trace_id`; see below |
 | `config`  | Load `conf/<APP_ENV>.yaml` with `${VAR}` expansion; `Dir`/`LoadDefault` find the conf directory; `Duration` for `3s`-style values |
 | `kitexx`  | Kitex server/client options: Nacos registration and discovery, graceful stop, unified logging with a `trace_id` across services, `OnShutdown`, `Run` |
-| `nacosx`  | Nacos naming / config clients from a YAML config block |
+| `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `redisx`  | go-redis client with connection check |
 | `etcdx`   | etcd v3 client |
 
@@ -56,8 +56,10 @@ kitexx.Run(svr, cfg.Config)
   client needs (the main port and main port + 1000 for gRPC) and stops with
   the address, the reason and the setting to look at, instead of the SDK's
   `client not connected, current status:STARTING`.
-- **One Nacos connection per process**, shared by registration and every
-  downstream client (`nacosx.SharedNamingClient`).
+- **One Nacos client per process**, shared by registration, every downstream
+  client and the configuration (`kitexx.Nacos(cfg)`, `nacosx.Shared`).
+- **Configuration that refreshes itself**: `kitexx.WatchConfig[T](cfg)`, see
+  `nacosx` below.
 - Request logging middleware (method, caller, latency, error), and handler
   panics turned into errors (the latter by Kitex itself).
 
@@ -65,6 +67,83 @@ kitexx.Run(svr, cfg.Config)
 shutdown:
   deregister_wait: 3s     # 0s disables the wait
   drain_timeout: 15s
+```
+
+### Nacos with `nacosx`
+
+```go
+type Dynamic struct {                       // only what may change while the service runs
+    Battle struct {
+        MaxLevel int `yaml:"max_level"`
+    } `yaml:"battle"`
+}
+
+dyn, err := kitexx.WatchConfig[Dynamic](cfg.Config)  // data id: config_data_id, default "<service.name>.yaml"
+...
+if level > dyn.Get().Battle.MaxLevel {               // always the version in effect; one atomic load
+```
+
+Outside Kitex the same is `nc, err := nacosx.New(cfg.Nacos)` and
+`nacosx.Watch[Dynamic](nc, "gateway.yaml")`.
+
+- **A change in the Nacos console is in effect a moment later**, without a
+  restart. Every change is a new `T`; what `Get` returned before is never
+  written to, so there is nothing to lock. `dyn.OnChange(func(old, cur *Dynamic))`
+  is for what has to be rebuilt rather than read (a rate limiter, a pool).
+- **A bad change cannot take the service down.** Content that does not parse,
+  or that `Validate() error` (optional, on `*T`) refuses, is rejected with an
+  ERROR record and the version before it stays in effect; so does the last
+  version when the configuration is deleted. At start the same problems stop
+  the service instead: it should not start on half a configuration, nor on a
+  snapshot of unknown age when Nacos does not answer.
+- **The log says what changed**, key by key, with the values of keys that look
+  like secrets (`password`, `secret`, `token`, `*_key`, ...) hidden, and points
+  out keys the program has no field for, which is what a typo looks like:
+
+  ```
+  INFO  config changed data_id=order.yaml group=DEFAULT_GROUP md5=c50a4f9a→542f35bb
+      changes:
+        + battle.double_exp  true
+        ~ battle.max_level   60 → 80
+        - legacy_flag        false
+        ~ pay.secret         *** → ***
+  WARN  config has keys the program does not know; a typo? data_id=order.yaml keys="max_levle (line 2)"
+  ERROR config change rejected; the previous one stays in effect data_id=order.yaml err="not valid: battle.max_level must be positive"
+  ```
+
+  In JSON `changes` is an array of `{op, key, from, to}`.
+- **Registration and discovery** for programs that are not Kitex services:
+  `deregister, err := nc.Register(nacosx.Registration{Service: "gateway", Addr: ":8080"})`,
+  `nc.Instances("order")`, `nc.Pick("order")` (weighted random),
+  `nc.Subscribe("order", fn)`. Kitex services get both from `kitexx.Options`
+  and `kitexx.ClientOptions`. Either way the log shows `registered in Nacos`,
+  `service discovered` and `instances changed` with a line per instance
+  (`+ 10.0.0.7:8888  weight=10`, `- 10.0.0.6:8888`).
+- **An outage of Nacos is three records, not three hundred.** `nacos
+  connection lost` with the SDK's first complaint as `cause`, `nacos is still
+  unreachable` every 30 s, and `nacos connection restored down_for=48.7s
+  sdk_records_hidden=194`. Meanwhile the service keeps the instance lists and
+  configurations it has, and afterwards the SDK registers and subscribes again
+  by itself.
+- **The Nacos SDK logs through zlog** (`logger=nacos-sdk`) instead of into
+  `nacos-sdk.log`, from `nacos.sdk_log_level` up (default `warn`; at `info`
+  the SDK prints the content of every configuration, passwords included).
+- **Without Nacos** (`registry_disabled: true`, the usual setting on a
+  developer's machine) configurations are files, `conf/nacos/<data id>`, and
+  saving the file is a change like one in the console. Nothing is registered
+  and no service is looked up: `client.WithHostPorts` says where one is.
+- Lower level: `nc.Get(dataID)`, `nc.OnChange(dataID, func(content string))`,
+  `nacosx.Group("other")` for a configuration in another group,
+  `nacosx.Static(&Dynamic{...})` for tests, `nacosx.NewFrom` to put fake SDK
+  clients underneath. `go run ./examples/nacosx` shows all of the above.
+
+```yaml
+nacos:
+  addrs: ["nacos:8848"]
+  namespace: ""            # namespace id; one per environment
+  group: DEFAULT_GROUP     # of services and of configurations
+  sdk_log_level: warn      # debug | info | warn | error
+config_data_id: order.yaml # kitexx.WatchConfig; default "<service.name>.yaml"
 ```
 
 ### Logging with `zlog`
@@ -119,6 +198,9 @@ var log = zlog.With(zlog.Str("component", "repo"))           // fine at package 
 - `zlog.Enabled(zlog.LevelDebug)` guards records that are expensive to build;
   `zlog.SetLevel("debug")` changes the level at run time; `zlog.Sync()` before
   exit; package `zlog/zlogtest` captures or silences logs in tests.
+- A value that implements `zlog.Blocker` (`LogBlock(colored bool) string`) and
+  is passed to `zlog.Any` is lines below the record on the console and the
+  value itself in JSON; `nacosx` uses it for `changes` and `instances`.
 
 ```yaml
 log:

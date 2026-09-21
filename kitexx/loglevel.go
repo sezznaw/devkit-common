@@ -4,25 +4,20 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/nacos-group/nacos-sdk-go/v2/clients/config_client"
-	"github.com/nacos-group/nacos-sdk-go/v2/vo"
-
 	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
-func watchLogLevelFromNacos(cfg Config) error {
-	cc, err := nacosx.NewConfigClient(cfg.Nacos)
-	if err != nil {
-		return err
-	}
-	return watchLogLevel(cc, cfg.LogLevelDataID, cfg.Nacos.GroupName())
+// levelSource is the part of *nacosx.Client that following the level needs.
+type levelSource interface {
+	Get(dataID string, opts ...nacosx.Option) (string, error)
+	OnChange(dataID string, fn func(content string), opts ...nacosx.Option) error
 }
 
 // watchLogLevel applies the level stored in a Nacos configuration now and
 // whenever it changes. An empty configuration leaves the level alone, so the
-// data id can exist before anybody needs it.
-func watchLogLevel(cc config_client.IConfigClient, dataID, group string) error {
+// data id can exist before anybody needs it, or not exist at all.
+func watchLogLevel(src levelSource, dataID string) error {
 	apply := func(content string) {
 		level := strings.ToLower(strings.TrimSpace(content))
 		if level == "" {
@@ -31,22 +26,15 @@ func watchLogLevel(cc config_client.IConfigClient, dataID, group string) error {
 		zlog.SetLevel(level)
 		zlog.Warn("log level set from Nacos", zlog.Str("data_id", dataID), zlog.Str("to", level))
 	}
-	content, err := cc.GetConfig(vo.ConfigParam{DataId: dataID, Group: group})
+	content, err := src.Get(dataID)
 	if err != nil {
-		return fmt.Errorf("kitexx: read %s from Nacos: %w", dataID, err)
+		return fmt.Errorf("kitexx: read the log level: %w", err)
 	}
 	apply(content)
-	err = cc.ListenConfig(vo.ConfigParam{
-		DataId: dataID,
-		Group:  group,
-		OnChange: func(_, _, _, data string) {
-			apply(data)
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("kitexx: listen to %s in Nacos: %w", dataID, err)
+	if err := src.OnChange(dataID, apply); err != nil {
+		return fmt.Errorf("kitexx: follow the log level: %w", err)
 	}
 	// Part of how the service logs, next to the "logger configured" of zlog.
-	zlog.Info("log level follows a Nacos configuration", zlog.Str("data_id", dataID), zlog.Str("group", group))
+	zlog.Info("log level follows a Nacos configuration", zlog.Str("data_id", dataID))
 	return nil
 }
