@@ -10,6 +10,8 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"time"
 
 	"github.com/bytedance/gopkg/cloud/metainfo"
@@ -33,7 +35,9 @@ type Config struct {
 	Service struct {
 		// Name is the registered service name, e.g. "order".
 		Name string `yaml:"name"`
-		// Addr is the listen address, e.g. ":8888".
+		// Addr is where the server listens: a port (8888), or "host:port"
+		// to listen on one interface only ("127.0.0.1:8888"). ":8888" is
+		// the same as 8888. Empty: 8888.
 		Addr string `yaml:"addr"`
 	} `yaml:"service"`
 	Nacos nacosx.Config `yaml:"nacos"`
@@ -90,9 +94,9 @@ func Options(cfg Config) ([]server.Option, error) {
 		}
 	}
 
-	addr, err := net.ResolveTCPAddr("tcp", orDefault(cfg.Service.Addr, ":8888"))
+	addr, err := listenAddr(cfg.Service.Addr)
 	if err != nil {
-		return nil, fmt.Errorf("kitexx: bad service.addr: %w", err)
+		return nil, err
 	}
 	opts := []server.Option{
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
@@ -151,7 +155,7 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 // svr.Run return, which is when the OnShutdown hooks run.
 func Run(svr server.Server, cfg Config) error {
 	defer zlog.Sync()
-	zlog.Info("server starting", zlog.Str("addr", orDefault(cfg.Service.Addr, ":8888")), zlog.Bool("registry", !cfg.RegistryDisabled))
+	zlog.Info("server starting", zlog.Str("addr", normalizeAddr(cfg.Service.Addr)), zlog.Bool("registry", !cfg.RegistryDisabled))
 	err := svr.Run()
 	runShutdownHooks()
 	if err != nil {
@@ -225,9 +229,38 @@ func newTraceID() string {
 	return hex.EncodeToString(b[:])
 }
 
-func orDefault(v, d string) string {
+// defaultPort is where a service listens when service.addr is empty.
+const defaultPort = "8888"
+
+// normalizeAddr turns what service.addr may hold into "host:port": a bare
+// port ("8888", which is what `addr: 8888` in YAML arrives as) listens on
+// every interface.
+func normalizeAddr(v string) string {
+	v = strings.TrimSpace(v)
 	if v == "" {
-		return d
+		v = defaultPort
+	}
+	if !strings.Contains(v, ":") {
+		return ":" + v
 	}
 	return v
+}
+
+// listenAddr resolves service.addr. The errors name the setting and what it
+// accepts, because the net package's own ("missing port in address") do not.
+func listenAddr(v string) (*net.TCPAddr, error) {
+	const accepts = `a port such as 8888, or "host:port" such as "127.0.0.1:8888"`
+	norm := normalizeAddr(v)
+	_, port, err := net.SplitHostPort(norm)
+	if err != nil {
+		return nil, fmt.Errorf("kitexx: service.addr is %q; it must be %s", v, accepts)
+	}
+	if n, err := strconv.Atoi(port); err != nil || n < 1 || n > 65535 {
+		return nil, fmt.Errorf("kitexx: service.addr is %q: %q is not a port between 1 and 65535; it must be %s", v, port, accepts)
+	}
+	addr, err := net.ResolveTCPAddr("tcp", norm)
+	if err != nil {
+		return nil, fmt.Errorf("kitexx: service.addr is %q: %v; it must be %s", v, err, accepts)
+	}
+	return addr, nil
 }

@@ -10,6 +10,7 @@ import (
 	"github.com/bytedance/gopkg/cloud/metainfo"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients/config_client"
 	"github.com/nacos-group/nacos-sdk-go/v2/vo"
+	"gopkg.in/yaml.v3"
 
 	"github.com/sezznaw/devkit-common/zlog"
 	"github.com/sezznaw/devkit-common/zlog/zlogtest"
@@ -34,6 +35,52 @@ func TestOptionsWithoutRegistry(t *testing.T) {
 	// timeout; no registry.
 	if len(opts) != 5 {
 		t.Fatalf("expected 5 options without a registry, got %d", len(opts))
+	}
+}
+
+// service.addr is written as a port in conf/*.yaml (`addr: 8888`); the older
+// ":8888" and a full "host:port" keep working.
+func TestListenAddr(t *testing.T) {
+	for in, want := range map[string]string{
+		"":               ":8888",
+		"8888":           ":8888",
+		" 9001 ":         ":9001",
+		":8888":          ":8888",
+		"127.0.0.1:9001": "127.0.0.1:9001",
+		"[::1]:9001":     "[::1]:9001",
+	} {
+		got, err := listenAddr(in)
+		if err != nil {
+			t.Errorf("listenAddr(%q): %v", in, err)
+			continue
+		}
+		if got.String() != want {
+			t.Errorf("listenAddr(%q) = %s, want %s", in, got, want)
+		}
+	}
+	for _, in := range []string{"0", "70000", "abc", "8888:", "localhost", "-1"} {
+		_, err := listenAddr(in)
+		if err == nil {
+			t.Errorf("listenAddr(%q) must fail", in)
+			continue
+		}
+		if !strings.Contains(err.Error(), "service.addr") || !strings.Contains(err.Error(), "a port such as 8888") {
+			t.Errorf("listenAddr(%q): the error must name the setting and what it accepts: %v", in, err)
+		}
+	}
+}
+
+// What matters to the developer: `addr: 8888` without quotes loads.
+func TestAddrFromYAML(t *testing.T) {
+	for _, doc := range []string{"service:\n  addr: 8888\n", "service:\n  addr: \":8888\"\n", "service:\n  addr: \"8888\"\n"} {
+		var cfg Config
+		if err := yaml.Unmarshal([]byte(doc), &cfg); err != nil {
+			t.Fatalf("%q: %v", doc, err)
+		}
+		got, err := listenAddr(cfg.Service.Addr)
+		if err != nil || got.String() != ":8888" {
+			t.Errorf("%q: got %v, %v", doc, got, err)
+		}
 	}
 }
 
