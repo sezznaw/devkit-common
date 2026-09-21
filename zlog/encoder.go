@@ -68,23 +68,53 @@ func levelText(l zapcore.Level, color bool) string {
 	return levelColor(l) + name + ansiReset + pad
 }
 
-// clickablePath returns file in the form that GoLand's run window, VS Code
-// and terminals turn into a link, and that is never ambiguous: relative to the
-// working directory when the file is inside it (the convention of compiler
-// errors, short for the service's own code), otherwise absolute (the module
-// cache, a sibling checkout). A name such as "handler/handler.go" alone would
-// be a guess as soon as two services of one project have that file.
+// callerPath is where a record comes from, as the console prints it: short
+// enough to leave the line to the message, and still saying which file it is.
 //
-// A file that is not absolute comes from a -trimpath build and is kept as is.
-func clickablePath(cwd, file string) string {
-	if cwd == "" || !filepath.IsAbs(file) {
+//   - Inside the working directory: relative to it, the convention of compiler
+//     errors. "handler/handler.go" is the service's own code.
+//   - A sibling of the working directory: from the directory both are in, which
+//     for a service is the project. "common/nacosx/services.go" is the common
+//     library checked out next to the service, "ser-user/handler/handler.go"
+//     another service. Relative to the working directory that would start with
+//     "../", which reads worse and is no shorter where it matters.
+//   - The module cache: from the module on, "github.com/cloudwego/kitex@v0.16.3/
+//     pkg/remote/...". Everything before it is the same on every line and says
+//     nothing about the record.
+//   - Anything else stays absolute, and so does every path when the working
+//     directory is unknown.
+//
+// GoLand's run window, VS Code and terminals link the first form; GoLand also
+// finds the others when the project directory is what is open, because it looks
+// a relative path up by its end. A file that is not absolute comes from a
+// -trimpath build and is kept as is.
+func callerPath(cwd, file string) string {
+	if !filepath.IsAbs(file) {
+		return file
+	}
+	slashed := filepath.ToSlash(file)
+	if i := strings.LastIndex(slashed, "/pkg/mod/"); i >= 0 {
+		return slashed[i+len("/pkg/mod/"):]
+	}
+	if cwd == "" {
 		return file
 	}
 	rel, err := filepath.Rel(cwd, file)
-	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+	if err != nil {
 		return file
 	}
-	return filepath.ToSlash(rel)
+	rel = filepath.ToSlash(rel)
+	switch {
+	case rel == "..":
+		return file
+	case !strings.HasPrefix(rel, "../"):
+		return rel
+	}
+	// One step up and down again is a sibling; further away is somewhere else.
+	if sibling := strings.TrimPrefix(rel, "../"); !strings.HasPrefix(sibling, "../") && strings.Contains(sibling, "/") {
+		return sibling
+	}
+	return file
 }
 
 func jsonEncoderConfig() zapcore.EncoderConfig {

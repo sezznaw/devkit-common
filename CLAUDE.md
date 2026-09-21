@@ -39,10 +39,18 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     because it has methods (`.Blue()`).
   - *Caller.* The number of zlog frames between the caller and zap is fixed,
     and `z2` skips them: the logging function plus `core.log`/`core.logf`.
-    `TestCallerOnEveryPath` guards it. The console prints the caller relative
-    to the working directory for files inside it, absolute otherwise
-    (`clickablePath`), which GoLand's run window turns into a link (confirmed
-    by the user) and which is never ambiguous; JSON uses zap's short form.
+    `TestCallerOnEveryPath` guards it. The console prints the caller short
+    (`callerPath`): relative to the working directory for files inside it,
+    which GoLand's run window turns into a link (confirmed by the user); from
+    the project directory for a sibling of the working directory
+    (`common/nacosx/services.go`, `ser-user/handler/handler.go`); from the
+    module on for the module cache (`github.com/cloudwego/kitex@v0.16.3/...`);
+    absolute for the rest. The owner asked for the short forms on 2026-09-21
+    because absolute paths made every framework record a very wide line.
+    Until then everything outside the working directory was absolute, for the
+    sake of the link; whether GoLand links the two new forms (it looks a
+    relative path up by its end when the project directory is open) was NOT
+    confirmed at the time of the change. JSON uses zap's short form.
   - *No key twice in a record.* zap does not deduplicate; parsers keep the
     last duplicate and Elasticsearch rejects the record. So (1) a field named
     like a key of the record becomes `fields.<key>` (`fieldKey`, logrus's

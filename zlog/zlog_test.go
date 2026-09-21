@@ -223,20 +223,25 @@ func TestJSONCallerIsShort(t *testing.T) {
 	}
 }
 
-func TestClickablePath(t *testing.T) {
+func TestCallerPath(t *testing.T) {
 	abs := func(p string) string { return filepath.FromSlash(p) }
 	for _, c := range []struct{ name, cwd, file, want string }{
 		{"own code is relative to the working directory", abs("/w/game/ser-auth"), abs("/w/game/ser-auth/handler/handler.go"), "handler/handler.go"},
 		{"file in the working directory itself", abs("/w/game/ser-auth"), abs("/w/game/ser-auth/main.go"), "main.go"},
-		{"a sibling service stays absolute", abs("/w/game/ser-auth"), abs("/w/game/ser-user/handler/handler.go"), abs("/w/game/ser-user/handler/handler.go")},
-		{"a directory that only shares the prefix", abs("/w/game/ser"), abs("/w/game/ser-auth/main.go"), abs("/w/game/ser-auth/main.go")},
-		{"the module cache stays absolute", abs("/w/game/ser-auth"), abs("/go/pkg/mod/x@v1.0.0/x.go"), abs("/go/pkg/mod/x@v1.0.0/x.go")},
+		{"the common library next to the service", abs("/w/game/ser-auth"), abs("/w/game/common/nacosx/services.go"), "common/nacosx/services.go"},
+		{"a sibling service", abs("/w/game/ser-auth"), abs("/w/game/ser-user/handler/handler.go"), "ser-user/handler/handler.go"},
+		{"a directory that only shares the prefix is a sibling", abs("/w/game/ser"), abs("/w/game/ser-auth/main.go"), "ser-auth/main.go"},
+		{"the module cache starts at the module", abs("/w/game/ser-auth"), abs("/Users/me/go/pkg/mod/github.com/cloudwego/kitex@v0.16.3/pkg/remote/server.go"), "github.com/cloudwego/kitex@v0.16.3/pkg/remote/server.go"},
+		{"the module cache, whatever the working directory", "", abs("/go/pkg/mod/x@v1.0.0/x.go"), "x@v1.0.0/x.go"},
+		{"a file right next to the working directory is no sibling directory", abs("/w/game/ser-auth"), abs("/w/game/notes.go"), abs("/w/game/notes.go")},
+		{"two steps up is somewhere else", abs("/w/game/ser-auth"), abs("/w/other/x/y.go"), abs("/w/other/x/y.go")},
+		{"the Go installation stays absolute", abs("/w/game/ser-auth"), abs("/opt/go/src/runtime/proc.go"), abs("/opt/go/src/runtime/proc.go")},
 		{"a name starting with two dots is not a parent", abs("/w"), abs("/w/..hidden/x.go"), "..hidden/x.go"},
 		{"-trimpath build", abs("/w/game/ser-auth"), "game/ser-auth/main.go", "game/ser-auth/main.go"},
 		{"unknown working directory", "", abs("/w/game/ser-auth/main.go"), abs("/w/game/ser-auth/main.go")},
 	} {
-		if got := clickablePath(c.cwd, c.file); got != c.want {
-			t.Errorf("%s: clickablePath(%q, %q) = %q, want %q", c.name, c.cwd, c.file, got, c.want)
+		if got := callerPath(c.cwd, c.file); got != c.want {
+			t.Errorf("%s: callerPath(%q, %q) = %q, want %q", c.name, c.cwd, c.file, got, c.want)
 		}
 	}
 }

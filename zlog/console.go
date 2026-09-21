@@ -84,7 +84,7 @@ func (e *consoleEncoder) EncodeEntry(ent zapcore.Entry, fields []zapcore.Field) 
 		// it are gone by the time a console looks for links.
 		line.AppendByte(' ')
 		e.dim(line, true)
-		line.AppendString(clickablePath(e.cwd, ent.Caller.File))
+		line.AppendString(callerPath(e.cwd, ent.Caller.File))
 		line.AppendByte(':')
 		line.AppendInt(int64(ent.Caller.Line))
 		e.dim(line, false)
