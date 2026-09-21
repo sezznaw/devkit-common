@@ -40,7 +40,9 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"runtime"
 	"runtime/debug"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -156,7 +158,8 @@ type core struct {
 	level    zap.AtomicLevel
 	colored  bool // a console that renders colors
 	maxField int
-	stop     func() // flushes and stops the buffer, if there is one
+	stop     func()      // flushes and stops the buffer, if there is one
+	config   []zap.Field // what Init announces: the settings in effect
 
 	added     []zap.Field // the fields of With, ready to be written
 	addedKeys []string    // the keys they were given, added[i] under addedKeys[i]
@@ -243,19 +246,29 @@ func New(o Options) *Logger {
 		colored:  colored,
 		maxField: o.MaxFieldBytes,
 		stop:     stop,
+		config:   describe(o, format, lv, colored, stackLevel, o.Stacktrace != "" && stackOK),
 	}}
 
-	// A typo in the config must not pass silently as a default.
+	// A typo in the config must not pass silently as a default. These go past
+	// the level too: with "level: error" a warning would hide itself.
 	if !levelOK {
-		l.Warn("zlog: unknown level, using info", Str("given", o.Level))
+		l.own.write(zapcore.WarnLevel, "zlog: unknown level, using info", zap.String("given", o.Level))
 	}
 	if format != "" && format != FormatJSON && format != FormatConsole {
-		l.Warn("zlog: unknown format, using console", Str("given", o.Format))
+		l.own.write(zapcore.WarnLevel, "zlog: unknown format, using console", zap.String("given", o.Format))
 	}
 	if !stackOK {
-		l.Warn("zlog: unknown stacktrace level, no stack traces", Str("given", o.Stacktrace))
+		l.own.write(zapcore.WarnLevel, "zlog: unknown stacktrace level, no stack traces", zap.String("given", o.Stacktrace))
 	}
 	return l
+}
+
+// write hands a record to the core directly, past the level, for what has to
+// be seen whatever the level is: how the logger is configured, and that its
+// configuration has a typo. There is no caller: the line would be one of this
+// package.
+func (c *core) write(lv zapcore.Level, msg string, fields ...zap.Field) {
+	_ = c.z0.Core().Write(zapcore.Entry{Level: lv, Time: time.Now(), Message: msg}, fields)
 }
 
 // identityFields say which process wrote a record. They are the one and only
@@ -300,13 +313,111 @@ func vcsRevision() string {
 // Init builds a Logger and installs it as the one used by the package-level
 // functions, and by the standard library's log and log/slog. Call it once at
 // the start of main, and zlog.Sync before the process exits.
+//
+// Its first record, "logger configured", lists the settings in effect, so that
+// the start of a service shows how it logs without anybody having to work out
+// which file, default or environment variable applied.
 func Init(o Options) *Logger {
 	l := New(o)
 	if old := std.Swap(l.own); old != nil && old.stop != nil {
 		old.stop()
 	}
 	redirectStdLoggers()
+	l.own.announce()
 	return l
+}
+
+// announce writes the settings in effect, past the level like write: a service
+// set to "error" is the one whose settings somebody will want to see. The
+// caller is whoever called Init.
+func (c *core) announce() {
+	ent := zapcore.Entry{Level: zapcore.InfoLevel, Time: time.Now(), Message: "logger configured"}
+	if _, file, line, ok := runtime.Caller(2); ok {
+		ent.Caller = zapcore.NewEntryCaller(0, file, line, true)
+	}
+	_ = c.z0.Core().Write(ent, c.config)
+}
+
+// describe lists the settings in effect under the names they have in the
+// configuration file: not what was written there, but what came of it, a
+// default where nothing was written and the fallback where it was a typo.
+//
+// JSON gets an object, "config": {...}, whose keys cannot clash with those of
+// the record. The console gets the same as lines below the record, with
+// "(default)" behind what was not set.
+func describe(o Options, format string, lv zapcore.Level, colored bool, stackLevel zapcore.Level, stack bool) []zap.Field {
+	host, _ := os.Hostname()
+	version := o.Version
+	if version == "" {
+		version = vcsRevision()
+	}
+	if format != FormatJSON {
+		format = FormatConsole
+	}
+	stacktrace, sampling, buffer, output, maxField := "off", "off", "off", "custom writer", "no limit"
+	if o.MaxFieldBytes > 0 {
+		maxField = strconv.Itoa(o.MaxFieldBytes)
+	}
+	if stack {
+		stacktrace = stackLevel.String()
+	}
+	if o.Sampling.First > 0 {
+		sampling = fmt.Sprintf("first %d per second and message, then every %d", o.Sampling.First, o.Sampling.Thereafter)
+	}
+	if o.Buffer.Size > 0 {
+		flush := o.Buffer.FlushInterval
+		if flush <= 0 {
+			flush = time.Second
+		}
+		buffer = fmt.Sprintf("%d bytes, flushed every %s", o.Buffer.Size, flush)
+	}
+	switch o.Output {
+	case os.Stdout:
+		output = "stdout"
+	case os.Stderr:
+		output = "stderr"
+	}
+
+	type setting struct {
+		key, value string
+		isDefault  bool
+	}
+	settings := []setting{
+		{"level", lv.String(), o.Level == ""},
+		{"format", format, o.Format == "" && !o.JSON},
+		{"stacktrace", stacktrace, o.Stacktrace == ""},
+		{"sampling", sampling, o.Sampling.First <= 0},
+		{"buffer", buffer, o.Buffer.Size <= 0},
+		{"max_field_bytes", maxField, o.MaxFieldBytes <= 0},
+		{"service", o.Service, false},
+		{"env", o.Env, false},
+		{"version", version, o.Version == ""},
+		{"host", host, false},
+		{"output", output, false},
+	}
+	if format == FormatConsole {
+		settings = append(settings, setting{"color", strconv.FormatBool(colored), false})
+	}
+
+	if format == FormatJSON {
+		fields := []zap.Field{zap.Namespace("config")}
+		for _, s := range settings {
+			fields = append(fields, zap.String(s.key, s.value))
+		}
+		return fields
+	}
+	var b strings.Builder
+	for _, s := range settings {
+		switch {
+		case s.value == "":
+			fmt.Fprintf(&b, "%s: (not set)\n", s.key)
+		case s.isDefault:
+			fmt.Fprintf(&b, "%s: %s (default)\n", s.key, s.value)
+		default:
+			fmt.Fprintf(&b, "%s: %s\n", s.key, s.value)
+		}
+	}
+	return []zap.Field{zap.String("config", b.String())}
 }
 
 // SetDefault installs l as the default, as Init does with the logger it

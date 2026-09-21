@@ -72,6 +72,14 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     `testing/slogtest`. Before `Init` the logger is configured by `ZLOG_*`
     environment variables (`envOptions`): a service that cannot read its
     config logs before `Init`, and that line must be JSON in production.
+  - `Init` (not `New`) announces the settings in effect as its first record,
+    "logger configured" (`describe`, `core.announce`): a block below the record
+    on the console with `(default)` behind what was not set, an object
+    `"config": {...}` in JSON so that its keys cannot clash with the record's.
+    It and the typo warnings of `New` go to the zap core directly
+    (`core.write`), past the level: at `level: error` a warning about a typo
+    would otherwise hide itself. Tests that count records after `Init` reset
+    their buffer first.
   - `Sync` drops EINVAL/ENOTTY/EBADF: stdout as a terminal or pipe cannot be
     synced. `Options.JSON` is the deprecated key of the old `log` package,
     still read so that an upgraded service does not silently turn to console

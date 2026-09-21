@@ -46,5 +46,7 @@ func watchLogLevel(cc config_client.IConfigClient, dataID, group string) error {
 	if err != nil {
 		return fmt.Errorf("kitexx: listen to %s in Nacos: %w", dataID, err)
 	}
+	// Part of how the service logs, next to the "logger configured" of zlog.
+	zlog.Info("log level follows a Nacos configuration", zlog.Str("data_id", dataID), zlog.Str("group", group))
 	return nil
 }

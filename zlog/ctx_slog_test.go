@@ -74,6 +74,7 @@ func TestStandardLoggersAreRedirected(t *testing.T) {
 
 	var buf bytes.Buffer
 	Init(Options{Format: "json", Level: "info", Service: "svc", Output: &buf})
+	buf.Reset() // the "logger configured" record of Init has a test of its own
 
 	at := here(1)
 	slog.Warn("from slog", "uid", 1001, "level", "mine", slog.Group("req", slog.String("id", "r1")))

@@ -99,6 +99,12 @@ var log = zlog.With(zlog.Str("component", "repo"))           // fine at package 
 - **One stream.** `Init` also routes the standard library's `log` and
   `log/slog` through zlog, and `kitexx` does the same for Kitex's klog, so what
   dependencies print is in the same format.
+- **The start of a service shows how it logs.** The first record of `Init`,
+  `logger configured`, lists the settings in effect under the names they have
+  in the configuration file: a default where nothing was written (marked
+  `(default)` on the console), the fallback where it was a typo. It is written
+  whatever the level, and so are the warnings about such typos; in JSON the
+  settings are an object, `"config": {...}`.
 - **Before `Init`** (a service that cannot read its configuration) the logger
   is configured by `ZLOG_FORMAT`, `ZLOG_LEVEL`, `ZLOG_SERVICE`, `ZLOG_ENV`;
   deployments set `ZLOG_FORMAT=json`.

@@ -146,6 +146,7 @@ func TestPackageLevelFunctionsUseInit(t *testing.T) {
 
 	var buf bytes.Buffer
 	Init(Options{Format: "json", Output: &buf, Service: "svc"})
+	buf.Reset() // the "logger configured" record of Init has a test of its own
 	Info("via package", Str("k", "v"))
 	With(Str("component", "repo")).Errorf("failed %d", 1)
 	L().Info("raw zap", zap.Int64("uid", 9))
@@ -180,6 +181,7 @@ func TestCallerOnEveryPath(t *testing.T) {
 
 	var buf bytes.Buffer
 	l := Init(Options{Output: &buf})
+	buf.Reset() // the "logger configured" record of Init has a test of its own
 
 	var want []string
 	want = append(want, here(1))
@@ -253,6 +255,7 @@ func TestLoggersCreatedBeforeInitFollowIt(t *testing.T) {
 
 	var buf bytes.Buffer
 	Init(Options{Level: "debug", Format: "json", Service: "svc", Output: &buf})
+	buf.Reset() // the "logger configured" record of Init has a test of its own
 	at := here(1)
 	early.Debug("from early")
 	grandchild.Debug("from grandchild")
@@ -280,6 +283,7 @@ func TestLoggersCreatedBeforeInitFollowIt(t *testing.T) {
 	// A second Init, as tests do, is followed as well.
 	var buf2 bytes.Buffer
 	Init(Options{Format: "json", Output: &buf2})
+	buf2.Reset()
 	buf.Reset()
 	early.Info("after second init")
 	if buf.Len() != 0 || !strings.Contains(buf2.String(), `"component":"repo"`) || strings.Contains(buf2.String(), "svc") {
@@ -295,6 +299,7 @@ func TestOwnLoggersIgnoreInit(t *testing.T) {
 	l := New(Options{Format: "json", Output: &own})
 	child := l.With(Str("component", "repo"))
 	Init(Options{Format: "json", Output: &def})
+	def.Reset()
 
 	l.Info("parent")
 	child.Info("child")

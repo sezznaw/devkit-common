@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"strings"
@@ -460,5 +461,85 @@ func TestDeprecatedJSONOption(t *testing.T) {
 	New(Options{JSON: true, Format: "console", Output: &buf}).Info("hello")
 	if strings.HasPrefix(buf.String(), "{") {
 		t.Errorf("format must win over the deprecated json: %q", buf.String())
+	}
+}
+
+// Init says how the service logs: the settings in effect, not the ones written
+// down, and whatever the level.
+func TestInitAnnouncesTheSettingsInEffect(t *testing.T) {
+	prev := std.Load()
+	defer std.Store(prev)
+	t.Setenv("NO_COLOR", "1")
+	host, _ := os.Hostname()
+
+	// Console: a block below the record, defaults marked, a typo shown as what
+	// came of it. The level is "error", and the record is there all the same.
+	var console bytes.Buffer
+	at := here(1)
+	Init(Options{Level: "error", Format: "consol", Service: "ser-auth", Env: "dev", Stacktrace: "error", Output: &console})
+	got := console.String()
+	want := " " + at + " logger configured\n" +
+		"    config:\n" +
+		"      level: error\n" +
+		"      format: console\n" +
+		"      stacktrace: error\n" +
+		"      sampling: off (default)\n" +
+		"      buffer: off (default)\n" +
+		"      max_field_bytes: no limit (default)\n" +
+		"      service: ser-auth\n" +
+		"      env: dev\n" +
+		"      version: (not set)\n" +
+		"      host: " + host + "\n" +
+		"      output: custom writer\n" +
+		"      color: false\n"
+	if !strings.Contains(got, want) {
+		t.Errorf("\n got %q\nwant it to contain %q", got, want)
+	}
+	// The warning about the typo is past the level as well: at "error" a
+	// warning would otherwise hide itself.
+	if !strings.Contains(got, ` WARN  zlog: unknown format, using console given=consol`) {
+		t.Errorf("the typo must be reported whatever the level: %q", got)
+	}
+
+	// JSON: an object of its own, so that no key is there twice, with every
+	// setting spelled out.
+	var js bytes.Buffer
+	Init(Options{
+		Format: "json", Service: "ser-auth", Env: "prod", Version: "v1.2.3", MaxFieldBytes: 8192,
+		Sampling: Sampling{First: 100, Thereafter: 50}, Buffer: Buffer{Size: 4096}, Output: &js,
+	})
+	if err := Sync(); err != nil {
+		t.Fatal(err)
+	}
+	line, _, _ := strings.Cut(js.String(), "\n")
+	seen := map[string]bool{}
+	for _, k := range topLevelKeys(t, line) {
+		if seen[k] {
+			t.Errorf("key %q is there twice: %s", k, line)
+		}
+		seen[k] = true
+	}
+	var rec struct {
+		Msg    string            `json:"msg"`
+		Level  string            `json:"level"`
+		Config map[string]string `json:"config"`
+	}
+	if err := json.Unmarshal([]byte(line), &rec); err != nil {
+		t.Fatalf("%v: %s", err, line)
+	}
+	wantConfig := map[string]string{
+		"level": "info", "format": "json", "stacktrace": "off", "max_field_bytes": "8192",
+		"sampling": "first 100 per second and message, then every 50", "buffer": "4096 bytes, flushed every 1s",
+		"service": "ser-auth", "env": "prod", "version": "v1.2.3", "host": host, "output": "custom writer",
+	}
+	if rec.Msg != "logger configured" || rec.Level != "INFO" || !maps.Equal(rec.Config, wantConfig) {
+		t.Errorf("\n got %+v\nwant config %v", rec, wantConfig)
+	}
+
+	// New does not announce anything: it is not the start of a service.
+	var own bytes.Buffer
+	New(Options{Output: &own})
+	if own.Len() != 0 {
+		t.Errorf("New wrote %q", own.String())
 	}
 }
