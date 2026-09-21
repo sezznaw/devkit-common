@@ -266,7 +266,7 @@ func TestLoggerSettingsFilledInByOptionsSayWhereTheyAreFrom(t *testing.T) {
 		name, appEnv, logEnv string
 		want                 []string
 	}{
-		{"APP_ENV not set", "", "", []string{"      service: order (from service.name)\n", "      env: dev (APP_ENV is not set)\n"}},
+		{"APP_ENV not set", "", "", []string{"      service: order (from service.name)\n", "      env: local (APP_ENV is not set)\n"}},
 		{"APP_ENV set", "prod", "", []string{"      env: prod (from APP_ENV)\n"}},
 		{"log.env written", "prod", "prod-cn", []string{"      env: prod-cn\n"}},
 	} {

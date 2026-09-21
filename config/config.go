@@ -1,8 +1,10 @@
 // Package config loads a service's YAML configuration.
 //
 // Files live in a directory (conventionally ./conf) and are named after the
-// environment: dev.yaml, test.yaml, prod.yaml. The environment comes from
-// APP_ENV and defaults to "dev". ${VAR} references inside the file are
+// environment. The team has four: local.yaml is a developer's own machine,
+// dev.yaml the shared development server, uat.yaml and prod.yaml what their
+// names say. The environment comes from APP_ENV; it defaults to "local",
+// because a deployment always says where it is and a laptop never does. ${VAR} references inside the file are
 // expanded from the process environment before parsing, so secrets can stay
 // out of the repository.
 package config
@@ -17,9 +19,14 @@ import (
 )
 
 const (
-	EnvVar     = "APP_ENV"
-	DefaultEnv = "dev"
+	EnvVar = "APP_ENV"
+	// LocalEnv is a developer's own machine, and what APP_ENV defaults to.
+	LocalEnv   = "local"
+	DefaultEnv = LocalEnv
 )
+
+// IsLocal reports whether the process runs on a developer's own machine.
+func IsLocal() bool { return Env() == LocalEnv }
 
 // Env returns the current environment name.
 func Env() string {

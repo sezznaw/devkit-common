@@ -75,3 +75,15 @@ func TestDirResolutionAndMessages(t *testing.T) {
 		t.Fatalf("unhelpful error: %v", err)
 	}
 }
+
+// A laptop does not set APP_ENV, a deployment always does: no APP_ENV is local.
+func TestDefaultEnvIsLocal(t *testing.T) {
+	t.Setenv("APP_ENV", "")
+	if Env() != "local" || !IsLocal() {
+		t.Fatalf("Env() = %q, IsLocal() = %v", Env(), IsLocal())
+	}
+	t.Setenv("APP_ENV", "dev")
+	if Env() != "dev" || IsLocal() {
+		t.Fatalf("APP_ENV=dev: Env() = %q, IsLocal() = %v", Env(), IsLocal())
+	}
+}
