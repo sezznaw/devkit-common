@@ -14,6 +14,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `zlog`    | 公司统一日志，基于 zap：由编译器检查的强类型字段；给人看的控制台格式（颜色、可点击的 `文件:行号`）和给采集系统的 JSON 格式；带 `trace_id` 的请求级 logger；详见下文 |
 | `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
 | `kitexx`  | Kitex 服务端/客户端选项：Nacos 注册与发现、优雅退出、统一日志与跨服务的 `trace_id`、`OnShutdown`、`Run` |
+| `hertzx`  | 基于 Hertz 的 API（HTTP）服务用的同一套东西：与 `kitexx` 共用一份配置，请求日志带 `trace_id` 并继续传给 RPC 服务，panic 恢复，同样的 Nacos 规则和优雅退出；详见下文 |
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `redisx`  | go-redis 客户端，创建时校验连通性 |
 | `etcdx`   | etcd v3 客户端 |
@@ -46,6 +47,24 @@ shutdown:
   deregister_wait: 3s     # 0s 表示不等待
   drain_timeout: 15s
 ```
+
+### `hertzx` 为 API 服务提供了什么
+
+API 服务（`devkit nas`）的启动方式和 RPC 服务一样，`hertzx.Config` **就是** `kitexx.Config`：同样的 `conf/*.yaml`，同样的规则。
+
+```go
+h, err := hertzx.New(cfg.Config)   // 日志、监听、请求日志、panic 恢复、对 Nacos 的检查
+app.Setup(&cfg, h)                 // 服务自己的部分：RPC 客户端、中间件
+router.GeneratedRegister(h)        // hz 根据 IDL 生成的路由
+err = hertzx.Run(h, cfg.Config)    // 提供服务，然后优雅退出
+```
+
+- **每个请求一条记录** `http`，带 `method`、`path`、`status`、`latency`、`client`；5xx 是错误，4xx 是警告。handler 里用 `zlog.Ctx(ctx)` 打的日志带着同一个 `trace_id`、`method` 和 `path`。
+- **从 HTTP 请求到最后一个 RPC 服务是同一个 `trace_id`。** 请求头 `X-Trace-Id` 看起来像一个 id（8 到 64 位的字母、数字、`-`、`_`；其他内容不会进入日志）时沿用它，否则新生成一个。它会写进响应头，并按 `kitexx` 的方式放进 context，所以用 `kitexx.ClientOptions` 创建的客户端会把它继续传下去。
+- **handler 里的 panic** 是一条带堆栈的错误记录，并返回 500。
+- **和 RPC 服务一样的退出顺序**：从 Nacos 注销，继续服务 `shutdown.deregister_wait`，关闭监听，给处理中的请求 `shutdown.drain_timeout`，执行 `OnShutdown` 钩子。Hertz 自带的 `Spin` 会把这些事同时做，而且不管有没有开始监听都在启动 1 秒后注册，所以由 `Run` 取代它，并在端口真正可以连接之后通过 `nacosx` 注册（元数据里带 `protocol=http`）。
+- **端口被占用时是一句话**，说明是哪个端口、该改 `service.addr`；Hertz 自己遇到这种情况会 panic 并打出一大段 goroutine 堆栈。
+- Hertz 自身的日志走 zlog，带 `logger=hertz`。
 
 ### 用 `nacosx` 对接 Nacos
 

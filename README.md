@@ -14,6 +14,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `zlog`    | Company logger on zap: typed fields checked by the compiler, a console format for people (colors, clickable `file:line`) and JSON for log collectors, request-scoped loggers with a `trace_id`; see below |
 | `config`  | Load `conf/<APP_ENV>.yaml` with `${VAR}` expansion; `Dir`/`LoadDefault` find the conf directory; `Duration` for `3s`-style values |
 | `kitexx`  | Kitex server/client options: Nacos registration and discovery, graceful stop, unified logging with a `trace_id` across services, `OnShutdown`, `Run` |
+| `hertzx`  | The same for API (HTTP) services on Hertz: one configuration with `kitexx`, request log with a `trace_id` that travels on to the RPC services, recovery, the same rules for Nacos and the same graceful stop; see below |
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `redisx`  | go-redis client with connection check |
 | `etcdx`   | etcd v3 client |
@@ -68,6 +69,37 @@ shutdown:
   deregister_wait: 3s     # 0s disables the wait
   drain_timeout: 15s
 ```
+
+### What `hertzx` gives an API service
+
+An API service (`devkit nas`) is started like an RPC service, and
+`hertzx.Config` *is* `kitexx.Config`: the same `conf/*.yaml`, the same rules.
+
+```go
+h, err := hertzx.New(cfg.Config)   // logger, listener, request log, recovery, the checks on Nacos
+app.Setup(&cfg, h)                 // the service: RPC clients, middleware
+router.GeneratedRegister(h)        // the routes hz generated from the IDL
+err = hertzx.Run(h, cfg.Config)    // serve, then stop gracefully
+```
+
+- **One record per request**, `http`, with `method`, `path`, `status`, `latency`,
+  `client`; 5xx is an error, 4xx a warning. What a handler logs with
+  `zlog.Ctx(ctx)` carries the same `trace_id`, `method` and `path`.
+- **One `trace_id` from the HTTP request to the last RPC service.** It is the
+  `X-Trace-Id` request header when that looks like an id (8 to 64 letters,
+  digits, `-`, `_`; anything else never reaches the log), otherwise a new one.
+  It is set on the response, and it is in the context the way `kitexx` puts it
+  there, so a client made with `kitexx.ClientOptions` passes it on.
+- **A panic in a handler** is one error record with the stack, and a 500.
+- **The same stop as an RPC service**: leave Nacos, keep serving for
+  `shutdown.deregister_wait`, close the listener, give requests in progress
+  `shutdown.drain_timeout`, run the `OnShutdown` hooks. Hertz's own `Spin` does
+  these at the same time and registers a second after the start whether or not
+  it listens, which is why `Run` replaces it and registers through `nacosx`
+  (with `protocol=http` in the metadata) once the port really accepts.
+- **A port that is taken is a sentence**, naming the port and `service.addr`;
+  Hertz itself panics with a goroutine dump.
+- Hertz's own records go through zlog, `logger=hertz`.
 
 ### Nacos with `nacosx`
 

@@ -222,6 +222,18 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   meta handler; verified with two real Kitex services, not only unit tests.
   `log_level_data_id` makes the level follow a Nacos configuration
   (`loglevel.go`, through `Client.Get` and `Client.OnChange`); failing to set that up is a warning, not a start failure.
+- `hertzx`: kitexx for API services on Hertz (`devkit nas`, template `hertz-service`).
+  `hertzx.Config` is an alias of `kitexx.Config` on purpose (one set of conf files and docs, and
+  `kitexx.ClientOptions(cfg)` for the RPC services behind the API). It reuses, not copies,
+  `kitexx.Bootstrap`, `ListenAddr`, `Registration`, `DeregisterWait`, `DrainTimeout`,
+  `RunShutdownHooks`, `NewTraceID`, `TraceIDKey`. `Run` replaces Hertz's `Spin` because Spin runs
+  the shutdown hooks, the deregistration and the transport shutdown concurrently and its registry
+  registers one second after start regardless of the listener (read in Hertz v0.10.6); Hertz also
+  panics when the port is taken, so `run` probes the port first and recovers. The trace_id enters
+  as `X-Trace-Id` (validated by `looksLikeID`) and is stored as the same metainfo persistent value
+  kitexx reads, which is what makes it reach the RPC services. `hlog.go` is `kitexx/klog.go` for
+  the other logging package. Verified on a real Nacos: HTTP -> API -> RPC with one trace_id, the
+  stop order, registration with `protocol=http`.
 - `kitexx`: the glue a service's `main` uses. `Options(cfg)` returns Kitex
   server options (basic info, listen address, logging middleware, meta
   handler, Nacos registry unless `registry_disabled`) and installs the logger.
