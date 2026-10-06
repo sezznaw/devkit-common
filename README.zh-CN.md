@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
+| `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
 | `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
 | `etcdx`   | etcd v3 客户端 |
 | `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
@@ -231,6 +232,36 @@ mysql:
 - `rt.Centrifugo.ConnectionToken("42")`：给登录后的客户端签连接 JWT（HS256，`token_ttl` 默认 24h），
   网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推
 - `History(ctx, channel, n)`：取频道最近的消息（命名空间开了 history 时），测试和断线重连用
+
+### 用 `jobx` 写定时任务
+
+一个任务就是一个带名字和 cron 时间表的函数，列在服务的 `app/jobs.go` 里（同事只碰这一个文件，时间表和代码放在一起）：
+
+```go
+func Jobs(rt *kitexx.Runtime) []jobx.Job {
+	r := repo.New(rt)
+	return []jobx.Job{{
+		Name:     "reconcile-bets",
+		Schedule: "*/5 * * * *",          // 五段式，UTC
+		Timeout:  10 * time.Minute,
+		Run:      func(ctx context.Context) error { return reconcile.Run(ctx, r) },
+	}}
+}
+```
+
+剩下的由生成的 `main.go` 负责：`<二进制> --list-jobs` 不读任何配置，直接把清单打成 JSON
+（`{"jobs":[{name, schedule, timeout_seconds}]}`），CI 把它和镜像 tag 放在一起，部署为每个任务生成一个
+Kubernetes CronJob；`<二进制> --job=<名>` 就是 CronJob 跑的命令：框架打开配置里启用的东西（数据库、Redis……），
+跑完这个任务就退出，不起服务器、不注册 Nacos、不拉消费者。失败退出码为 1，Kubernetes 据此记一次失败。
+
+一次运行得到：根 span `job <名>`（慢任务在 Grafana 里是一张瀑布图，里面的 SQL 和调用都是它的子 span）、每条日志都带
+`job`、`run_id`、`trace_id` 的 logger（`zlog.Ctx(ctx)`）、结束时一条带结果和耗时的记录、Redis 里的锁 `job:<服务>:<名>`
+保证同一任务不重叠（没开 Redis 则告警后照跑，CronJob 的 `concurrencyPolicy: Forbid` 仍挡住按时间表的重叠）、到超时即取消的
+context、panic 变成一次失败。每次启动都校验清单（名字符合 Kubernetes 命名、不重复、时间表能解析），写错是启动失败，
+不是凌晨三点的惊吓。
+
+函数的规矩：幂等且可续跑（一次运行可能被重试），分块处理、每块提交，块之间看 `ctx.Err()`，不要相信"上次运行时间"，
+水位从数据里读。
 
 ### 用 `zlog` 打日志
 

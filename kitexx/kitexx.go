@@ -291,7 +291,7 @@ func Run(svr server.Server, cfg Config) error {
 	zlog.Info("server starting", zlog.Str("addr", normalizeAddr(cfg.Service.Addr)), zlog.Bool("registry", !cfg.RegistryDisabled))
 	err := svr.Run()
 	RunShutdownHooks()
-	nacosx.CloseShared()
+	nacosCloseShared()
 	if err != nil {
 		zlog.Error("server stopped with error", zlog.Err(err))
 		return err
@@ -438,3 +438,5 @@ func ListenAddr(v string) (*net.TCPAddr, error) {
 	}
 	return addr, nil
 }
+
+func nacosCloseShared() { nacosx.CloseShared() }

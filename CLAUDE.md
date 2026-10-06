@@ -348,6 +348,24 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   order in `NewRuntime`; `rt.Run(svr)` starts the Kafka consumers after the
   server is up and `Run(svr, cfg)` is the no-consumer form the old template
   used. The kitex-service template calls `rt.Run`.
+- `jobx` and `kitexx/jobs.go`: scheduled work, the owner's rule applied
+  again (one framework, colleagues write only the function; the schedule is
+  code, not infra). `Job{Name, Schedule, Timeout, Description, Run}`;
+  `Validate` (DNS-1123 name, unique, five-field cron via robfig/cron's
+  parser, has Run) runs at every start (`rt.SetJobs`) and before the list.
+  `Execute` makes a root span (`trace.WithNewRoot`: a CronJob has no caller),
+  a logger with job/run_id/trace_id, takes the lock `job:<service>:<name>`
+  with SETNX (TTL = timeout + 1 min; `Locker` is the two methods of
+  `*redis.Client` so tests use miniredis and nil means "no Redis", a warn and
+  run), `context.WithTimeout`, recovers a panic, returns the error = exit 1.
+  `kitexx.JobFlags` reads `--list-jobs` / `--job=<name>` from os.Args before
+  the configuration is loaded, so the CI can list the jobs of a freshly built
+  binary with no Nacos; `ListJobs` prints `{"jobs":[...]}` (JSON is YAML, the
+  deployment reads it as a values file); `rt.RunJob` runs one and then the
+  shutdown hooks and `nacosx.CloseShared`, never `Options`/`Run` (no
+  registration, no consumers). The templates' `app/jobs.go` is the once file
+  with `Jobs(rt)`, called with an empty Runtime for the list, so it must only
+  register, never connect.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules

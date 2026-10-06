@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
 | `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
+| `jobx`    | scheduled jobs: a service lists them in `app/jobs.go` (name, cron schedule, timeout, function), the framework runs one per `--job=<name>` with a root span, a run id in the log, a lock, a timeout and an exit code, and `--list-jobs` is what the deployment turns into CronJobs; see below |
 | `redisx`  | Redis / Valkey from the `redis:` section, the rules of `mysqlx` (enabled, source static or platform), every command a span; the idempotency middleware uses it |
 | `etcdx`   | etcd v3 client |
 | `mysqlx`  | MySQL (GORM) from the `mysql:` section: pool, every query a span and a record with the trace_id, slow-query warnings; the address from the configuration or from the platform's datasource table; see below |
@@ -365,6 +366,46 @@ names. The client is `rt.Centrifugo`.
   to `user:<id>`
 - `History(ctx, channel, n)`: the last messages of a channel (when the
   namespace keeps history), for tests and reconnecting clients
+
+### Scheduled jobs with `jobx`
+
+A job is a function with a name and a cron schedule, listed in the service's
+`app/jobs.go` (the only file to touch; the schedule lives next to the code):
+
+```go
+func Jobs(rt *kitexx.Runtime) []jobx.Job {
+	r := repo.New(rt)
+	return []jobx.Job{{
+		Name:     "reconcile-bets",
+		Schedule: "*/5 * * * *",          // five fields, UTC
+		Timeout:  10 * time.Minute,
+		Run:      func(ctx context.Context) error { return reconcile.Run(ctx, r) },
+	}}
+}
+```
+
+The generated `main.go` does the rest: `<binary> --list-jobs` prints the list
+as JSON (`{"jobs":[{name, schedule, timeout_seconds}]}`) without reading any
+configuration, which is what the CI stores next to the image tag and the
+deployment turns into one Kubernetes CronJob per job; `<binary> --job=<name>`
+is what that CronJob runs: the framework opens what the configuration enables
+(the database, Redis, ...), runs the job and exits, without starting the
+server, registering in Nacos or starting consumers. The exit code is 1 on
+failure, which is how Kubernetes counts a failed run.
+
+What a run gets: a root span `job <name>` (so a slow job is a waterfall in
+Grafana, and the queries and calls inside are its children), a logger with
+`job`, `run_id` and `trace_id` on every record (`zlog.Ctx(ctx)`), one record
+at the end with the result and the duration, a lock `job:<service>:<name>` in
+Redis so two runs of one job never overlap (without Redis the run proceeds with
+a warning; the CronJob's `concurrencyPolicy: Forbid` still covers the scheduled
+runs), a context cancelled at the timeout, and a panic turned into a failure.
+Every start validates the list (name as a Kubernetes name, unique, schedule
+parseable), so a typo is a start failure, not a surprise at 3 am.
+
+Rules for the function: idempotent and resumable (a run can be retried), work
+in chunks and commit each, check `ctx.Err()` between chunks, and never trust
+"last run time": read the watermark from the data.
 
 ### Logging with `zlog`
 

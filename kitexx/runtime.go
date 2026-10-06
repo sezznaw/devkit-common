@@ -14,6 +14,7 @@ import (
 
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/jobx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/redisx"
@@ -42,6 +43,8 @@ type Runtime struct {
 	// Centrifugo is the push server, nil when centrifugo.enabled is false:
 	// Publish to a channel, ConnectionToken for a client.
 	Centrifugo *centrifugox.Client
+
+	jobs []jobx.Job
 }
 
 // TenantEnv names the environment variable a deployment sets to say which
