@@ -8,11 +8,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/redis/go-redis/v9"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/mysqlx"
+	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -28,6 +30,9 @@ type Runtime struct {
 	// the request's context (db.WithContext(ctx)) so they are spans of its
 	// trace and records of its log.
 	DB *gorm.DB
+	// Redis is the Redis / Valkey client, nil when redis.enabled is false.
+	// Commands take the request's context for the same reason.
+	Redis *redis.Client
 }
 
 // TenantEnv names the environment variable a deployment sets to say which
@@ -51,7 +56,57 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	if err := rt.openMySQL(); err != nil {
 		return nil, err
 	}
+	if err := rt.openRedis(); err != nil {
+		return nil, err
+	}
 	return rt, nil
+}
+
+func (rt *Runtime) openRedis() error {
+	cfg := rt.Config
+	if !cfg.Redis.Enabled {
+		zlog.Info("redis off", zlog.Str("hint", "set redis.enabled: true in conf/<env>.yaml for a service that uses Redis (idempotent requests need it)"))
+		return nil
+	}
+	if err := cfg.Redis.Validate(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	target, err := redisTarget(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	if config.IsLocal() && !isLoopback(target.Addr) {
+		zlog.Warn("redis: this machine is using a server that is not on it; everybody who shares it sees what you write",
+			zlog.Str("addr", target.Addr), zlog.Int("db", target.DB))
+	}
+	cli, err := redisx.Open(ctx, target, cfg.Redis)
+	if err != nil {
+		return err
+	}
+	rt.Redis = cli
+	zlog.Info("redis connected", zlog.Str("addr", target.Addr), zlog.Int("db", target.DB),
+		zlog.Str("source", cfg.Redis.SourceName()), zlog.Str("role", cfg.Redis.RoleName()))
+	OnShutdown("redis close", cli.Close)
+	return nil
+}
+
+// redisTarget is mysqlTarget for Redis: the configuration with source
+// static, the tenant's valkey row of the datasource table with source platform.
+func redisTarget(ctx context.Context, cfg Config) (redisx.Target, error) {
+	if cfg.Redis.SourceName() == redisx.SourceStatic {
+		return cfg.Redis.Static(), nil
+	}
+	platform, err := platformDatabase(cfg, "redis.source platform")
+	if err != nil {
+		return redisx.Target{}, err
+	}
+	row, err := mysqlx.ResolveKind(ctx, platform, strings.TrimSpace(os.Getenv(TenantEnv)), cfg.Redis.RoleName(), "valkey", os.Getenv)
+	if err != nil {
+		return redisx.Target{}, err
+	}
+	return redisx.TargetFromRow(row.Addr, row.DB, row.Password)
 }
 
 func (rt *Runtime) openMySQL() error {
@@ -97,35 +152,45 @@ type infraDoc struct {
 }
 
 // mysqlTarget resolves where the database is: the configuration itself with
-// source static; with source platform, the platform database (its address
-// from infra.yaml in Nacos, its password from the environment variable that
-// document names) is asked for the database of the tenant in TENANT_CODE.
+// source static; with source platform, the platform database is asked for
+// the database of the tenant in TENANT_CODE.
 func mysqlTarget(ctx context.Context, cfg Config) (mysqlx.Target, error) {
 	if cfg.MySQL.SourceName() == mysqlx.SourceStatic {
 		return cfg.MySQL.Static(), nil
 	}
+	platform, err := platformDatabase(cfg, "mysql.source platform")
+	if err != nil {
+		return mysqlx.Target{}, err
+	}
+	return mysqlx.Resolve(ctx, platform, strings.TrimSpace(os.Getenv(TenantEnv)), cfg.MySQL.RoleName(), os.Getenv)
+}
+
+// platformDatabase is the platform database every source-platform lookup
+// starts from: its address from infra.yaml in Nacos (mysql.platform), its
+// password from the environment variable that document names. what says
+// which setting needs it, for the error.
+func platformDatabase(cfg Config, what string) (mysqlx.Target, error) {
 	nc, err := Nacos(cfg)
 	if err != nil {
-		return mysqlx.Target{}, fmt.Errorf("mysql.source platform needs Nacos for %s: %w", infraDataID, err)
+		return mysqlx.Target{}, fmt.Errorf("%s needs Nacos for %s: %w", what, infraDataID, err)
 	}
 	content, err := nc.Get(infraDataID)
 	if err != nil {
-		return mysqlx.Target{}, fmt.Errorf("mysql.source platform: read %s from Nacos: %w", infraDataID, err)
+		return mysqlx.Target{}, fmt.Errorf("%s: read %s from Nacos: %w", what, infraDataID, err)
 	}
 	var doc infraDoc
 	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
-		return mysqlx.Target{}, fmt.Errorf("mysql.source platform: %s in Nacos: %w", infraDataID, err)
+		return mysqlx.Target{}, fmt.Errorf("%s: %s in Nacos: %w", what, infraDataID, err)
 	}
 	p := doc.MySQL.Platform
 	if p.Addr == "" || p.DB == "" || p.User == "" || p.PasswordEnv == "" {
-		return mysqlx.Target{}, fmt.Errorf("mysql.source platform: %s in Nacos must have mysql.platform.{addr, db, user, password_env}; got addr=%q db=%q user=%q password_env=%q", infraDataID, p.Addr, p.DB, p.User, p.PasswordEnv)
+		return mysqlx.Target{}, fmt.Errorf("%s: %s in Nacos must have mysql.platform.{addr, db, user, password_env}; got addr=%q db=%q user=%q password_env=%q", what, infraDataID, p.Addr, p.DB, p.User, p.PasswordEnv)
 	}
 	password := os.Getenv(p.PasswordEnv)
 	if password == "" {
-		return mysqlx.Target{}, fmt.Errorf("mysql.source platform: the platform database's password is to come from the environment variable %q (infra.yaml mysql.platform.password_env), which is not set", p.PasswordEnv)
+		return mysqlx.Target{}, fmt.Errorf("%s: the platform database's password is to come from the environment variable %q (infra.yaml mysql.platform.password_env), which is not set", what, p.PasswordEnv)
 	}
-	platform := mysqlx.Target{Addr: p.Addr, DB: p.DB, User: p.User, Password: password}
-	return mysqlx.Resolve(ctx, platform, strings.TrimSpace(os.Getenv(TenantEnv)), cfg.MySQL.RoleName(), os.Getenv)
+	return mysqlx.Target{Addr: p.Addr, DB: p.DB, User: p.User, Password: password}, nil
 }
 
 func isLoopback(addr string) bool {

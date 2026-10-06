@@ -213,6 +213,13 @@ func Close(db *gorm.DB) error {
 // names (password_env): the table knows where, the deployment knows the
 // secret. An unknown tenant or an unset variable is an error that names it.
 func Resolve(ctx context.Context, platform Target, tenant, role string, getenv func(string) string) (Target, error) {
+	return ResolveKind(ctx, platform, tenant, role, "mysql", getenv)
+}
+
+// ResolveKind is Resolve for any kind of datasource the table knows (mysql,
+// valkey, s3): the same row shape, the same rules. DB is the row's db_name:
+// a database name for MySQL, a database index for Valkey, a bucket for S3.
+func ResolveKind(ctx context.Context, platform Target, tenant, role, kind string, getenv func(string) string) (Target, error) {
 	code := tenant
 	if role == RolePlatform {
 		code = "platform"
@@ -231,17 +238,17 @@ func Resolve(ctx context.Context, platform Target, tenant, role string, getenv f
 	var host, dbName, user, passwordEnv, params string
 	var port int
 	err = sqlDB.QueryRowContext(ctx,
-		"SELECT host, port, db_name, username, password_env, params FROM datasource WHERE tenant_code = ? AND role = ? AND kind = 'mysql'",
-		code, role).Scan(&host, &port, &dbName, &user, &passwordEnv, &params)
+		"SELECT host, port, db_name, username, password_env, params FROM datasource WHERE tenant_code = ? AND role = ? AND kind = ?",
+		code, role, kind).Scan(&host, &port, &dbName, &user, &passwordEnv, &params)
 	if errors.Is(err, sql.ErrNoRows) {
-		return Target{}, fmt.Errorf("mysqlx: no mysql datasource for tenant %q with role %s in %s/%s.datasource", code, role, platform.Addr, platform.DB)
+		return Target{}, fmt.Errorf("mysqlx: no %s datasource for tenant %q with role %s in %s/%s.datasource", kind, code, role, platform.Addr, platform.DB)
 	}
 	if err != nil {
-		return Target{}, fmt.Errorf("mysqlx: read datasource of tenant %q from %s/%s: %w", code, platform.Addr, platform.DB, err)
+		return Target{}, fmt.Errorf("mysqlx: read %s datasource of tenant %q from %s/%s: %w", kind, code, platform.Addr, platform.DB, err)
 	}
 	password := getenv(passwordEnv)
 	if passwordEnv == "" || password == "" {
-		return Target{}, fmt.Errorf("mysqlx: the password of tenant %q's database is to come from the environment variable %q, which is not set", code, passwordEnv)
+		return Target{}, fmt.Errorf("mysqlx: the password of tenant %q's %s is to come from the environment variable %q, which is not set", code, kind, passwordEnv)
 	}
 	return Target{Addr: fmt.Sprintf("%s:%d", host, port), DB: dbName, User: user, Password: password, Params: params}, nil
 }

@@ -26,6 +26,7 @@ import (
 	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/otelx"
+	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -56,6 +57,9 @@ type Config struct {
 	// registers, and handed to the service as Runtime.DB. Every service has
 	// the section; most leave it disabled.
 	MySQL mysqlx.Config `yaml:"mysql"`
+	// Redis, when enabled, is opened the same way and handed over as
+	// Runtime.Redis. Idempotent requests (a request_id field) need it.
+	Redis redisx.Config `yaml:"redis"`
 	// LogLevelDataID names a Nacos configuration whose content is a log level
 	// (debug, info, warn, error). The level of the running service follows
 	// it, which is how debug logging is switched on in production without a
@@ -114,6 +118,7 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithServiceAddr(addr),
 		server.WithMiddleware(ServerTracing()),
 		server.WithMiddleware(LoggingMiddleware()),
+		server.WithMiddleware(rt.Idempotency()),
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
 		server.WithExitWaitTime(DrainTimeout(cfg)),
 	}

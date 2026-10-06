@@ -16,7 +16,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `kitexx`  | Kitex 服务端/客户端选项：Nacos 注册与发现、优雅退出、统一日志与跨服务的 `trace_id`、`OnShutdown`、`Run` |
 | `hertzx`  | 基于 Hertz 的 API（HTTP）服务用的同一套东西：与 `kitexx` 共用一份配置，请求日志带 `trace_id` 并继续传给 RPC 服务，panic 恢复，同样的 Nacos 规则和优雅退出；详见下文 |
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
-| `redisx`  | go-redis 客户端，创建时校验连通性 |
+| `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
 | `etcdx`   | etcd v3 客户端 |
 | `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
 
@@ -187,6 +187,23 @@ mysql:
   事务显式传递（`repo.WithTx(tx)`），资金路径的多表写在一个明确的事务里；
   `SkipDefaultTransaction` 已开，一条语句就是一条语句。
 - `rt` 属于框架：服务从里面取，不往里加。
+
+### 用 `redisx` 连 Redis，以及幂等请求
+
+`redis:` 段和 `mysql:` 一模一样：`enabled`、`source: static`（`addr`、`password`、`db`）或 `source: platform`
+（datasource 表里 kind 为 valkey 的那一行，`db_name` 是库序号），框架在启动时打开，句柄在 `rt.Redis`。
+
+**幂等请求**：接口规范要求资金和状态变更的请求带 `request_id`。IDL 里给 Req 加一个 `request_id` 字段，
+这个方法就自动是幂等的——`rt.Options()` 装的中间件会：
+
+- 第一次调用正常执行，结果按 `request_id` 保存 24 小时
+- 同一个 `request_id` 再来，直接返回保存的结果，handler 不再执行（日志 `replayed`）
+- 第一次还在执行中又来一次：业务码 1002
+- `request_id` 留空：业务码 1003
+- handler 返回 error：丢掉这个 id，调用方可以重试
+- 没有开 `redis.enabled`：业务码 5002，请求被拒绝——转账执行两次比拒绝更糟
+
+没有 `request_id` 字段的方法不受影响。
 
 ### 用 `zlog` 打日志
 

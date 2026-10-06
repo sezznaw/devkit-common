@@ -22,6 +22,7 @@ func testResolveAndOpen(t *testing.T, rootDSN string) {
 			db_name VARCHAR(64), username VARCHAR(64), password_env VARCHAR(64), params VARCHAR(255))`,
 		"INSERT INTO mysqlx_platform.datasource VALUES ('tenant_a','tenant','mysql','127.0.0.1',13306,'mysqlx_tenant','root','MYSQLX_TEST_PW','')",
 		"INSERT INTO mysqlx_platform.datasource VALUES ('platform','platform','mysql','127.0.0.1',13306,'mysqlx_platform','root','MYSQLX_TEST_PW','')",
+		"INSERT INTO mysqlx_platform.datasource VALUES ('tenant_a','tenant','valkey','valkey',6379,'2','','MYSQLX_TEST_PW','')",
 		"CREATE TABLE mysqlx_tenant.t (id INT PRIMARY KEY)", "INSERT INTO mysqlx_tenant.t VALUES (1)",
 	} {
 		if _, err := admin.ExecContext(ctx, q); err != nil {
@@ -56,6 +57,11 @@ func testResolveAndOpen(t *testing.T, rootDSN string) {
 	ptgt, err := Resolve(ctx, platform, "whatever", RolePlatform, getenv)
 	if err != nil || ptgt.DB != "mysqlx_platform" {
 		t.Errorf("role platform resolves the platform db: %+v %v", ptgt, err)
+	}
+
+	vk, err := ResolveKind(ctx, platform, "tenant_a", RoleTenant, "valkey", getenv)
+	if err != nil || vk.Addr != "valkey:6379" || vk.DB != "2" {
+		t.Errorf("valkey row: %+v %v", vk, err)
 	}
 
 	db, err := Open(ctx, tgt, Config{Enabled: true})

@@ -304,8 +304,25 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `mysql`. `Runtime` must not grow service-specific fields; the next
   infrastructure (Redis, Kafka) gets the same shape: a config section with
   `enabled`, opened in `NewRuntime`, a field on `Runtime`.
-- `redisx`, `etcdx`: thin constructors from YAML-loadable config structs;
-  `redisx.New` pings before returning.
+- `redisx`: the `mysqlx` shape for Redis / Valkey (`Config` with enabled /
+  source / role, `Target`, `Open` with `redisotel` tracing, `New` for programs
+  that are not services). `source platform` reuses `mysqlx.ResolveKind` with
+  kind `valkey` (`db_name` is the database index, `TargetFromRow`); the
+  platform database lookup is `platformDatabase` in `kitexx/runtime.go`, shared
+  with MySQL. Tests run on miniredis (`RunT`, `RequireAuth`).
+- `kitexx/idempotency.go`: the owner's API rule "money and state-changing
+  requests carry a request_id" made automatic. A method is idempotent when its
+  Req has a `request_id` field (Kitex getter `GetRequestId`); the middleware
+  unwraps the `*Args` (`GetFirstArgument`), claims `idem:<service>:<method>:<id>`
+  with SETNX (value `pending`, 24h), keeps the JSON of the `*Result`'s
+  `Success` after a successful call, and on a repeat decodes it into a new
+  value of the Success field's type by reflection (`setSuccess`). Fail closed:
+  no Redis or Redis down is 5002, never a second execution; a handler error
+  deletes the key. Codes 1002 / 1003 / 5002 are in the idl repository's
+  errors.md. It is installed by `rt.Options()` unconditionally (count it in
+  `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
+  structs on miniredis.
+- `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules
 

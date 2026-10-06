@@ -16,7 +16,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `kitexx`  | Kitex server/client options: Nacos registration and discovery, graceful stop, unified logging with a `trace_id` across services, `OnShutdown`, `Run` |
 | `hertzx`  | The same for API (HTTP) services on Hertz: one configuration with `kitexx`, request log with a `trace_id` that travels on to the RPC services, recovery, the same rules for Nacos and the same graceful stop; see below |
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
-| `redisx`  | go-redis client with connection check |
+| `redisx`  | Redis / Valkey from the `redis:` section, the rules of `mysqlx` (enabled, source static or platform), every command a span; the idempotency middleware uses it |
 | `etcdx`   | etcd v3 client |
 | `mysqlx`  | MySQL (GORM) from the `mysql:` section: pool, every query a span and a record with the trace_id, slow-query warnings; the address from the configuration or from the platform's datasource table; see below |
 
@@ -300,6 +300,29 @@ mysql:
   path in one explicit transaction; `SkipDefaultTransaction` is on, one
   statement is one statement.
 - `rt` belongs to the framework: a service takes from it, never adds to it.
+
+### Redis with `redisx`, and idempotent requests
+
+The `redis:` section works like `mysql:`: `enabled`, `source: static`
+(`addr`, `password`, `db`) or `source: platform` (the datasource row of kind
+valkey; `db_name` is the database index), opened by the framework at start-up,
+the client in `rt.Redis`.
+
+**Idempotent requests**: the API conventions ask money and state-changing
+requests to carry a `request_id`. Give the Req struct in the IDL a
+`request_id` field and the method is idempotent, by the middleware
+`rt.Options()` installs:
+
+- the first call runs and its result is kept under the id for 24 hours
+- the same id again gets the kept result back, the handler does not run
+  (log record `replayed`)
+- the same id while the first call is still running: business code 1002
+- an empty `request_id`: 1003
+- an error from the handler drops the id, so the caller can retry
+- `redis.enabled` false: 5002, the request is refused; running a transfer
+  twice is worse than refusing it
+
+Methods without the field are untouched.
 
 ### Logging with `zlog`
 
