@@ -16,6 +16,8 @@ go get github.com/sezznaw/devkit-common@latest
 | `kitexx`  | Kitex server/client options: Nacos registration and discovery, graceful stop, unified logging with a `trace_id` across services, `OnShutdown`, `Run` |
 | `hertzx`  | The same for API (HTTP) services on Hertz: one configuration with `kitexx`, request log with a `trace_id` that travels on to the RPC services, recovery, the same rules for Nacos and the same graceful stop; see below |
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
+| `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
+| `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
 | `redisx`  | Redis / Valkey from the `redis:` section, the rules of `mysqlx` (enabled, source static or platform), every command a span; the idempotency middleware uses it |
 | `etcdx`   | etcd v3 client |
 | `mysqlx`  | MySQL (GORM) from the `mysql:` section: pool, every query a span and a record with the trace_id, slow-query warnings; the address from the configuration or from the platform's datasource table; see below |
@@ -323,6 +325,46 @@ requests to carry a `request_id`. Give the Req struct in the IDL a
   twice is worse than refusing it
 
 Methods without the field are untouched.
+
+### Events with `kafkax`
+
+The `kafka:` section follows the pattern (`enabled`; `source static` with
+`brokers`, or `source platform`, the datasource row of kind kafka); the
+client is `rt.Kafka`.
+
+**Publish**: `rt.Kafka.Publish(ctx, "events.member", "42", "member.updated",
+data)`: topic, key (the entity's id, so its events stay in order), event
+type, data. The framework wraps the standard envelope `{id, type, tenant_id,
+time, data}`, puts the trace of ctx into the headers and returns once the
+cluster has acknowledged.
+
+**Consume**: in `app.Setup`, `rt.Kafka.Subscribe("events.member", func(ctx,
+ev *kafkax.Event) error { ... })`; the consumer group is the service's name.
+The framework starts the consumers once the server is up (`rt.Run`) and
+stops them first on the way out. Every message is a span of the producer's
+trace and a record with its trace_id; a handler error is retried 3 times
+(`kafka.max_retries`) and then the message goes to `<topic>.dlq` (the error
+in a header) and consumption goes on; a panic is treated the same. At least
+once: a handler is to be idempotent (deduplicate by `ev.ID`, or be
+idempotent by nature).
+
+Event and topic naming is in the idl repository's README.
+
+### Push with `centrifugox`
+
+The `centrifugo:` section: `enabled`; `source static` with `api_addr`,
+`api_key`, `token_secret`, or `source platform`, the address from
+`infra.yaml` in Nacos and the secrets from the environment variables it
+names. The client is `rt.Centrifugo`.
+
+- `rt.Centrifugo.Publish(ctx, "user:42", data)`: to the clients subscribed
+  to that channel; a span of the trace
+- `rt.Centrifugo.ConnectionToken("42")`: the JWT a logged-in client connects
+  with (HS256, `token_ttl` default 24h), returned by the gateway with the
+  login; Centrifugo then knows who the connection is, and a service can push
+  to `user:<id>`
+- `History(ctx, channel, n)`: the last messages of a channel (when the
+  namespace keeps history), for tests and reconnecting clients
 
 ### Logging with `zlog`
 

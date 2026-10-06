@@ -22,7 +22,9 @@ import (
 	"github.com/cloudwego/kitex/server"
 	"github.com/cloudwego/kitex/transport"
 
+	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/otelx"
@@ -60,6 +62,11 @@ type Config struct {
 	// Redis, when enabled, is opened the same way and handed over as
 	// Runtime.Redis. Idempotent requests (a request_id field) need it.
 	Redis redisx.Config `yaml:"redis"`
+	// Kafka (Redpanda), when enabled, is Runtime.Kafka: Publish and Subscribe.
+	Kafka kafkax.Config `yaml:"kafka"`
+	// Centrifugo, when enabled, is Runtime.Centrifugo: Publish to channels,
+	// ConnectionToken for clients.
+	Centrifugo centrifugox.Config `yaml:"centrifugo"`
 	// LogLevelDataID names a Nacos configuration whose content is a log level
 	// (debug, info, warn, error). The level of the running service follows
 	// it, which is how debug logging is switched on in production without a
@@ -260,12 +267,25 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 	return append(opts, client.WithResolver(newNacosResolver(cli, cfg.Nacos))), nil
 }
 
-// Run starts the server and blocks until it has stopped completely.
+// Run starts the server and blocks until it has stopped completely. With
+// event subscriptions (rt.Kafka.Subscribe in app.Setup) it starts the
+// consumers once the server is up and stops them with the shutdown hooks.
 //
 // Kitex itself reacts to SIGINT / SIGTERM / SIGHUP: it leaves Nacos, (with the
 // delayed registry) keeps serving for deregister_wait, closes the listener and
 // gives in-flight requests up to drain_timeout. Only after all of that does
 // svr.Run return, which is when the OnShutdown hooks run.
+func (rt *Runtime) Run(svr server.Server) error {
+	if rt.Kafka != nil {
+		if err := rt.Kafka.Start(context.Background()); err != nil {
+			zlog.Error("cannot start consumers", zlog.Err(err))
+			return err
+		}
+	}
+	return Run(svr, rt.Config)
+}
+
+// Run is Runtime.Run for a service without event subscriptions.
 func Run(svr server.Server, cfg Config) error {
 	defer zlog.Sync()
 	zlog.Info("server starting", zlog.Str("addr", normalizeAddr(cfg.Service.Addr)), zlog.Bool("registry", !cfg.RegistryDisabled))

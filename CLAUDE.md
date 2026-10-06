@@ -322,6 +322,32 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `kafkax`: franz-go (Redpanda's recommendation), tracing through
+  `kotel` (`kgo.WithHooks`; the produce span's parent is `Record.Context`, the
+  consumer side `tracer.WithProcessSpan(r)` extracts the parent from the
+  headers, which is what keeps producer and consumer in one trace). One
+  producer client, one consumer client per subscribed topic, group = service
+  name, `DisableAutoCommit` + `CommitUncommittedOffsets` after each poll's
+  records are handled, `BlockRebalanceOnPoll` and therefore `defer
+  cl.AllowRebalance()` in the poll loop, or `Close` hangs (found the hard
+  way). The envelope is `Event`; a handler error is retried `max_retries`
+  times (backoff attempt*200ms) and the record then copied to `<topic>.dlq`
+  with `error` / `source-topic` / `consumer` headers; a panic is an error. The
+  datasource row for kind kafka: host (comma-separated hosts allowed), port,
+  username, password_env; `mysqlx.ResolveKind` now treats an empty
+  password_env as "no password" (dev Redpanda has no SASL). Tests run on
+  `kfake` (in-process cluster, `SeedTopics`).
+- `centrifugox`: Centrifugo's HTTP API (`POST /api/<method>`, `X-API-Key`),
+  three methods used (`info` as the Open check, `publish`, `history`),
+  errors in the `error` object of the response; `ConnectionToken` is an HS256
+  JWT with `sub` = user id (golang-jwt v5). `source platform` reads
+  `centrifugo.{api_addr, api_key_env, token_hmac_env}` from infra.yaml
+  (`infraDocument` in `kitexx/runtime.go`, shared with the platform
+  database). Tests use an httptest fake of the API.
+- `Runtime` now: `Config, DB, Redis, Kafka, Centrifugo`, opened in that
+  order in `NewRuntime`; `rt.Run(svr)` starts the Kafka consumers after the
+  server is up and `Run(svr, cfg)` is the no-consumer form the old template
+  used. The kitex-service template calls `rt.Run`.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules

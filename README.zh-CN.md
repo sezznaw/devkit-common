@@ -16,6 +16,8 @@ go get github.com/sezznaw/devkit-common@latest
 | `kitexx`  | Kitex 服务端/客户端选项：Nacos 注册与发现、优雅退出、统一日志与跨服务的 `trace_id`、`OnShutdown`、`Run` |
 | `hertzx`  | 基于 Hertz 的 API（HTTP）服务用的同一套东西：与 `kitexx` 共用一份配置，请求日志带 `trace_id` 并继续传给 RPC 服务，panic 恢复，同样的 Nacos 规则和优雅退出；详见下文 |
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
+| `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
+| `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
 | `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
 | `etcdx`   | etcd v3 客户端 |
 | `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
@@ -204,6 +206,31 @@ mysql:
 - 没有开 `redis.enabled`：业务码 5002，请求被拒绝——转账执行两次比拒绝更糟
 
 没有 `request_id` 字段的方法不受影响。
+
+### 用 `kafkax` 发事件和消费事件
+
+`kafka:` 段和前面一样（`enabled`、`source static` 的 `brokers` 或 `source platform` 的 datasource 表 kind 为 kafka 的行），
+句柄在 `rt.Kafka`。
+
+**发**：`rt.Kafka.Publish(ctx, "events.member", "42", "member.updated", data)`——主题、分区键（实体 id，同一实体有序）、
+事件名、数据。框架包上标准信封 `{id, type, tenant_id, time, data}`，把 ctx 的 trace 放进消息头，等集群确认后返回。
+
+**收**：`app.Setup` 里 `rt.Kafka.Subscribe("events.member", func(ctx, ev *kafkax.Event) error { ... })`，
+消费组是服务名。框架在服务启动后拉起消费者（`rt.Run`），退出时先停消费者。每条消息是生产者那条 trace 里的一个 span、
+一条带 trace_id 的日志；handler 返回 error 重试 3 次（`kafka.max_retries`）后发到 `<主题>.dlq`（消息头带 error）
+并继续，不堵分区；handler panic 同样处理。至少一次语义，handler 要幂等（按 `ev.ID` 去重或操作本身幂等）。
+
+事件命名、主题命名在 idl 仓库的 README。
+
+### 用 `centrifugox` 推送
+
+`centrifugo:` 段：`enabled`，`source static` 的 `api_addr`、`api_key`、`token_secret`，或 `source platform` 从 Nacos 的
+`infra.yaml` 取地址、从它指名的环境变量取密钥。句柄在 `rt.Centrifugo`。
+
+- `rt.Centrifugo.Publish(ctx, "user:42", data)`：推给订阅了这个频道的客户端，是 trace 里的一个 span
+- `rt.Centrifugo.ConnectionToken("42")`：给登录后的客户端签连接 JWT（HS256，`token_ttl` 默认 24h），
+  网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推
+- `History(ctx, channel, n)`：取频道最近的消息（命名空间开了 history 时），测试和断线重连用
 
 ### 用 `zlog` 打日志
 

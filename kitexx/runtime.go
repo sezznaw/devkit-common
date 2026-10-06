@@ -12,7 +12,9 @@ import (
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
 
+	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/zlog"
@@ -33,6 +35,13 @@ type Runtime struct {
 	// Redis is the Redis / Valkey client, nil when redis.enabled is false.
 	// Commands take the request's context for the same reason.
 	Redis *redis.Client
+	// Kafka is the event bus (Redpanda), nil when kafka.enabled is false:
+	// Publish from a handler, Subscribe in app.Setup; the consumers run once
+	// the server is up (Run) and stop before it.
+	Kafka *kafkax.Client
+	// Centrifugo is the push server, nil when centrifugo.enabled is false:
+	// Publish to a channel, ConnectionToken for a client.
+	Centrifugo *centrifugox.Client
 }
 
 // TenantEnv names the environment variable a deployment sets to say which
@@ -59,7 +68,115 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	if err := rt.openRedis(); err != nil {
 		return nil, err
 	}
+	if err := rt.openKafka(); err != nil {
+		return nil, err
+	}
+	if err := rt.openCentrifugo(); err != nil {
+		return nil, err
+	}
 	return rt, nil
+}
+
+func (rt *Runtime) openCentrifugo() error {
+	cfg := rt.Config
+	if !cfg.Centrifugo.Enabled {
+		zlog.Info("centrifugo off", zlog.Str("hint", "set centrifugo.enabled: true in conf/<env>.yaml for a service that pushes to clients"))
+		return nil
+	}
+	if err := cfg.Centrifugo.Validate(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	target, err := centrifugoTarget(cfg)
+	if err != nil {
+		return err
+	}
+	cli, err := centrifugox.Open(ctx, target, cfg.Centrifugo)
+	if err != nil {
+		return err
+	}
+	rt.Centrifugo = cli
+	zlog.Info("centrifugo connected", zlog.Str("api", target.APIAddr), zlog.Bool("token_secret", target.TokenSecret != ""), zlog.Str("source", cfg.Centrifugo.SourceName()))
+	return nil
+}
+
+// centrifugoTarget: the configuration with source static; with source
+// platform the centrifugo section of infra.yaml in Nacos (api_addr, and the
+// names of the environment variables that hold the API key and the token
+// secret).
+func centrifugoTarget(cfg Config) (centrifugox.Target, error) {
+	if cfg.Centrifugo.SourceName() == centrifugox.SourceStatic {
+		return cfg.Centrifugo.Static(), nil
+	}
+	doc, err := infraDocument(cfg, "centrifugo.source platform")
+	if err != nil {
+		return centrifugox.Target{}, err
+	}
+	c := doc.Centrifugo
+	if c.APIAddr == "" || c.APIKeyEnv == "" {
+		return centrifugox.Target{}, fmt.Errorf("centrifugo.source platform: %s in Nacos must have centrifugo.{api_addr, api_key_env}; got api_addr=%q api_key_env=%q", infraDataID, c.APIAddr, c.APIKeyEnv)
+	}
+	key := os.Getenv(c.APIKeyEnv)
+	if key == "" {
+		return centrifugox.Target{}, fmt.Errorf("centrifugo.source platform: the API key is to come from the environment variable %q (infra.yaml centrifugo.api_key_env), which is not set", c.APIKeyEnv)
+	}
+	secret := ""
+	if c.TokenHMACEnv != "" {
+		secret = os.Getenv(c.TokenHMACEnv)
+	}
+	return centrifugox.Target{APIAddr: c.APIAddr, APIKey: key, TokenSecret: secret}, nil
+}
+
+func (rt *Runtime) openKafka() error {
+	cfg := rt.Config
+	if !cfg.Kafka.Enabled {
+		zlog.Info("kafka off", zlog.Str("hint", "set kafka.enabled: true in conf/<env>.yaml for a service that publishes or consumes events"))
+		return nil
+	}
+	if err := cfg.Kafka.Validate(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	target, err := kafkaTarget(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	cli, err := kafkax.Open(ctx, target, cfg.Kafka, cfg.Service.Name, strings.TrimSpace(os.Getenv(TenantEnv)))
+	if err != nil {
+		return err
+	}
+	rt.Kafka = cli
+	zlog.Info("kafka connected", zlog.Any("brokers", target.Brokers), zlog.Bool("sasl", target.Username != ""),
+		zlog.Str("source", cfg.Kafka.SourceName()), zlog.Str("role", cfg.Kafka.RoleName()))
+	OnShutdown("kafka close", cli.Close)
+	return nil
+}
+
+func kafkaTarget(ctx context.Context, cfg Config) (kafkax.Target, error) {
+	if cfg.Kafka.SourceName() == kafkax.SourceStatic {
+		return cfg.Kafka.Static(), nil
+	}
+	platform, err := platformDatabase(cfg, "kafka.source platform")
+	if err != nil {
+		return kafkax.Target{}, err
+	}
+	row, err := mysqlx.ResolveKind(ctx, platform, strings.TrimSpace(os.Getenv(TenantEnv)), cfg.Kafka.RoleName(), "kafka", os.Getenv)
+	if err != nil {
+		return kafkax.Target{}, err
+	}
+	// Several brokers: host holds them comma-separated, port the common port.
+	var brokers []string
+	for _, h := range strings.Split(row.Addr, ",") {
+		if h = strings.TrimSpace(h); h != "" {
+			if !strings.Contains(h, ":") {
+				h = h + ":" + row.Addr[strings.LastIndex(row.Addr, ":")+1:]
+			}
+			brokers = append(brokers, h)
+		}
+	}
+	return kafkax.Target{Brokers: brokers, Username: row.User, Password: row.Password}, nil
 }
 
 func (rt *Runtime) openRedis() error {
@@ -139,7 +256,8 @@ func (rt *Runtime) openMySQL() error {
 	return nil
 }
 
-// infraDoc is the part of infra.yaml the platform database is described in.
+// infraDoc is the part of infra.yaml (in Nacos) the framework reads: the
+// platform database, and the push server.
 type infraDoc struct {
 	MySQL struct {
 		Platform struct {
@@ -149,6 +267,29 @@ type infraDoc struct {
 			PasswordEnv string `yaml:"password_env"`
 		} `yaml:"platform"`
 	} `yaml:"mysql"`
+	Centrifugo struct {
+		APIAddr      string `yaml:"api_addr"`
+		APIKeyEnv    string `yaml:"api_key_env"`
+		TokenHMACEnv string `yaml:"token_hmac_env"`
+	} `yaml:"centrifugo"`
+}
+
+// infraDocument reads infra.yaml from Nacos. what says which setting needs
+// it, for the error.
+func infraDocument(cfg Config, what string) (infraDoc, error) {
+	var doc infraDoc
+	nc, err := Nacos(cfg)
+	if err != nil {
+		return doc, fmt.Errorf("%s needs Nacos for %s: %w", what, infraDataID, err)
+	}
+	content, err := nc.Get(infraDataID)
+	if err != nil {
+		return doc, fmt.Errorf("%s: read %s from Nacos: %w", what, infraDataID, err)
+	}
+	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
+		return doc, fmt.Errorf("%s: %s in Nacos: %w", what, infraDataID, err)
+	}
+	return doc, nil
 }
 
 // mysqlTarget resolves where the database is: the configuration itself with
@@ -170,17 +311,9 @@ func mysqlTarget(ctx context.Context, cfg Config) (mysqlx.Target, error) {
 // password from the environment variable that document names. what says
 // which setting needs it, for the error.
 func platformDatabase(cfg Config, what string) (mysqlx.Target, error) {
-	nc, err := Nacos(cfg)
+	doc, err := infraDocument(cfg, what)
 	if err != nil {
-		return mysqlx.Target{}, fmt.Errorf("%s needs Nacos for %s: %w", what, infraDataID, err)
-	}
-	content, err := nc.Get(infraDataID)
-	if err != nil {
-		return mysqlx.Target{}, fmt.Errorf("%s: read %s from Nacos: %w", what, infraDataID, err)
-	}
-	var doc infraDoc
-	if err := yaml.Unmarshal([]byte(content), &doc); err != nil {
-		return mysqlx.Target{}, fmt.Errorf("%s: %s in Nacos: %w", what, infraDataID, err)
+		return mysqlx.Target{}, err
 	}
 	p := doc.MySQL.Platform
 	if p.Addr == "" || p.DB == "" || p.User == "" || p.PasswordEnv == "" {

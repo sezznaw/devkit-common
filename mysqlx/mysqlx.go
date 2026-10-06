@@ -246,9 +246,13 @@ func ResolveKind(ctx context.Context, platform Target, tenant, role, kind string
 	if err != nil {
 		return Target{}, fmt.Errorf("mysqlx: read %s datasource of tenant %q from %s/%s: %w", kind, code, platform.Addr, platform.DB, err)
 	}
-	password := getenv(passwordEnv)
-	if passwordEnv == "" || password == "" {
-		return Target{}, fmt.Errorf("mysqlx: the password of tenant %q's %s is to come from the environment variable %q, which is not set", code, kind, passwordEnv)
+	// An empty password_env says the datasource has no password (a Redpanda
+	// without SASL in dev); a named variable that is not set is an error.
+	password := ""
+	if passwordEnv != "" {
+		if password = getenv(passwordEnv); password == "" {
+			return Target{}, fmt.Errorf("mysqlx: the password of tenant %q's %s is to come from the environment variable %q, which is not set", code, kind, passwordEnv)
+		}
 	}
 	return Target{Addr: fmt.Sprintf("%s:%d", host, port), DB: dbName, User: user, Password: password, Params: params}, nil
 }
