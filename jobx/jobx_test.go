@@ -81,6 +81,9 @@ func TestExecute(t *testing.T) {
 	if err := Execute(context.Background(), "report", jobs, "nope", rdb); err == nil || !strings.Contains(err.Error(), `no job "nope"`) {
 		t.Errorf("unknown: %v", err)
 	}
+	if !logs.Has("ERROR", "job not found; nothing run") {
+		t.Error("an unknown job name is logged, not only an exit code")
+	}
 	// The lock keeps a second run out.
 	rdb.SetNX(context.Background(), "job:report:fine", "other", time.Minute)
 	if err := Execute(context.Background(), "report", jobs, "fine", rdb); !errors.Is(err, ErrLocked) {

@@ -146,10 +146,14 @@ var ErrLocked = errors.New("jobx: another run of this job is in progress")
 // with (non-nil = exit 1), which is how Kubernetes learns the run failed.
 func Execute(ctx context.Context, service string, jobs []Job, name string, lock Locker) (err error) {
 	if err := Validate(jobs); err != nil {
+		zlog.Error("jobs invalid; nothing run", zlog.Err(err))
 		return err
 	}
 	j, err := Find(jobs, name)
 	if err != nil {
+		// The CronJob asked for a job this binary does not have (renamed or
+		// removed in the code while the deployment still lists it).
+		zlog.Error("job not found; nothing run", zlog.Str("job", name), zlog.Err(err))
 		return err
 	}
 	runID := uuid.NewString()
