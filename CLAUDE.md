@@ -252,6 +252,33 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   syncs the logger on exit. `kitexx.Config` is meant to be embedded
   inline in the service's own config struct; the `kitex-service` template in
   `../devkit-registry` depends on its field names and YAML keys.
+- `otelx`: OpenTelemetry for the process, deliberately on the official SDK and
+  not on kitex-contrib/hertz-contrib `obs-opentelemetry` (built against Kitex
+  0.11 / Hertz 0.9, and they drag metrics along). `Init` installs the W3C
+  propagator always and a real provider only when `otel.endpoint` is set
+  (empty = off: no-op provider, nothing recorded, old trace_id behaviour);
+  `kitexx.Bootstrap` calls it and registers the flush as an `OnShutdown` hook.
+  The resource is built `NewSchemaless`: merging a schema'd resource with
+  `resource.Default()` fails on a schema version mismatch, and the semconv
+  package has to be the one of the SDK version (`v1.43.0` for otel 1.47; it
+  no longer has `RPCSystemKey`/`RPCService`, hence the literal `rpc.system`
+  and `rpc.service` keys in `kitexx/tracing.go`). `WithRemoteTraceID` is how
+  a caller that sends only a 32-hex id (X-Trace-Id, TRACE_ID) ends up in the
+  same trace: a remote parent with that trace id, a span id made from its
+  second half, sampled.
+- `kitexx/tracing.go`, `hertzx/tracing.go`: the spans. Server span first in
+  the middleware chain (`Options` adds `ServerTracing` before
+  `LoggingMiddleware`; `hertzx.New` uses `Tracing(), RequestLog(),
+  Recovery()`), so that `ensureTraceID` / `RequestLog` log the span's trace id
+  and the clients a handler calls make child spans. The propagator reads and
+  writes *transient* metainfo values through `metainfoCarrier` (the TTHeader
+  carries them one hop, the life of a traceparent; `Set` must replace the
+  context, hence the pointer), and HTTP headers through `headerCarrier`. The
+  trace_id precedence is: span's trace id, else TRACE_ID / X-Trace-Id, else
+  new; and whatever wins is written back as TRACE_ID so older services still
+  get it. `tracing_test.go` in both packages runs against an in-memory span
+  recorder (`tracetest.SpanRecorder`); `recordSpans` restores the no-op
+  provider, because the provider is process-global.
 - `redisx`, `etcdx`: thin constructors from YAML-loadable config structs;
   `redisx.New` pings before returning.
 

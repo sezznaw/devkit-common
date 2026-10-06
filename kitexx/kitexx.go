@@ -24,6 +24,7 @@ import (
 
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/nacosx"
+	"github.com/sezznaw/devkit-common/otelx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -46,6 +47,10 @@ type Config struct {
 	} `yaml:"service"`
 	Nacos nacosx.Config `yaml:"nacos"`
 	Log   zlog.Options  `yaml:"log"`
+	// Otel switches tracing on (otel.endpoint, the OTLP collector) and tunes
+	// it. Off, the trace_id is still generated and passed on; on, it is the
+	// id of the trace the collector shows.
+	Otel otelx.Config `yaml:"otel"`
 	// LogLevelDataID names a Nacos configuration whose content is a log level
 	// (debug, info, warn, error). The level of the running service follows
 	// it, which is how debug logging is switched on in production without a
@@ -95,6 +100,7 @@ func Options(cfg Config) ([]server.Option, error) {
 	opts := []server.Option{
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
 		server.WithServiceAddr(addr),
+		server.WithMiddleware(ServerTracing()),
 		server.WithMiddleware(LoggingMiddleware()),
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
 		server.WithExitWaitTime(DrainTimeout(cfg)),
@@ -114,9 +120,9 @@ func Options(cfg Config) ([]server.Option, error) {
 
 // Bootstrap is what a service of any kind does first, an RPC service in
 // Options and an API service in hertzx.New: it checks service.name, installs
-// the logger (Kitex's own records go through it too) and lets the level follow
-// Nacos when log_level_data_id says so. What it fills into cfg.Log is for the
-// "logger configured" record.
+// the logger (Kitex's own records go through it too), lets the level follow
+// Nacos when log_level_data_id says so, and sets up tracing (otel). What it
+// fills into cfg.Log is for the "logger configured" record.
 func Bootstrap(cfg *Config) error {
 	if cfg.Service.Name == "" {
 		return fmt.Errorf("kitexx: service.name is required")
@@ -133,6 +139,9 @@ func Bootstrap(cfg *Config) error {
 		}
 	}
 	bridgeKlog(zlog.Init(cfg.Log))
+	if err := initTracing(*cfg); err != nil {
+		return err
+	}
 	if cfg.LogLevelDataID != "" {
 		// The level is a convenience: a service must start without it.
 		nc, err := Nacos(*cfg)
@@ -143,6 +152,36 @@ func Bootstrap(cfg *Config) error {
 			zlog.Warn("log level does not follow Nacos", zlog.Str("data_id", cfg.LogLevelDataID), zlog.Err(err))
 		}
 	}
+	return nil
+}
+
+// initTracing installs the OpenTelemetry provider for the process and makes
+// sure the spans still in the batch are exported when the server has stopped.
+// A collector that cannot be reached is not a start failure (the exporter
+// retries in the background); an endpoint that cannot be parsed is.
+func initTracing(cfg Config) error {
+	shutdown, err := otelx.Init(cfg.Otel, otelx.Identity{
+		Service: cfg.Log.Service,
+		Version: cfg.Log.Version,
+		Env:     cfg.Log.Env,
+	})
+	if err != nil {
+		return err
+	}
+	if !cfg.Otel.Enabled() {
+		zlog.Info("tracing off", zlog.Str("hint", "set otel.endpoint to the OTLP collector to switch it on"))
+		return nil
+	}
+	ratio := 1.0
+	if cfg.Otel.SampleRatio != nil {
+		ratio = *cfg.Otel.SampleRatio
+	}
+	zlog.Info("tracing on", zlog.Str("endpoint", cfg.Otel.Endpoint), zlog.Float("sample_ratio", ratio))
+	OnShutdown("tracing flush", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		return shutdown(ctx)
+	})
 	return nil
 }
 
@@ -188,6 +227,7 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 	opts := []client.Option{
 		client.WithTransportProtocol(transport.TTHeader),
 		client.WithMetaHandler(transmeta.ClientTTHeaderHandler),
+		client.WithMiddleware(ClientTracing()),
 	}
 	if cfg.Service.Name != "" {
 		// Who is calling: the "from" of the request log of the service called.
@@ -234,8 +274,10 @@ const (
 // gives the context the logger of the request: what a handler logs with
 // zlog.Ctx(ctx) carries trace_id and method.
 //
-// The trace_id is the one the caller sent, or a new one for a request that
-// starts here. It is put back into the context as a persistent metainfo value,
+// The trace_id is the id of the trace ServerTracing put into the context,
+// which is the caller's or a new one; with tracing off it is the one the
+// caller sent as TRACE_ID, or a new one for a request that starts here.
+// Either way it is put back into the context as a persistent metainfo value,
 // so the clients this service calls with that context pass it on (see
 // ClientOptions), and a collector shows the whole chain under one id.
 func LoggingMiddleware() endpoint.Middleware {
@@ -251,11 +293,7 @@ func LoggingMiddleware() endpoint.Middleware {
 					from = ri.From().ServiceName()
 				}
 			}
-			traceID, ok := metainfo.GetPersistentValue(ctx, TraceIDKey)
-			if !ok || traceID == "" {
-				traceID = NewTraceID()
-				ctx = metainfo.WithPersistentValue(ctx, TraceIDKey, traceID)
-			}
+			ctx, traceID := ensureTraceID(ctx)
 			ctx = zlog.CtxWith(ctx, zlog.Str(traceIDField, traceID), zlog.Str("method", method))
 
 			err := next(ctx, req, resp)
@@ -272,6 +310,24 @@ func LoggingMiddleware() endpoint.Middleware {
 			return err
 		}
 	}
+}
+
+// ensureTraceID returns the trace_id of the request: the span's when there is
+// one, else the TRACE_ID metainfo value, else a new one. It is stored as the
+// TRACE_ID metainfo value (persistent, so it crosses every hop) when it is not
+// already.
+func ensureTraceID(ctx context.Context) (context.Context, string) {
+	traceID := otelx.TraceID(ctx)
+	if traceID == "" {
+		traceID, _ = metainfo.GetPersistentValue(ctx, TraceIDKey)
+	}
+	if traceID == "" {
+		traceID = NewTraceID()
+	}
+	if cur, _ := metainfo.GetPersistentValue(ctx, TraceIDKey); cur != traceID {
+		ctx = metainfo.WithPersistentValue(ctx, TraceIDKey, traceID)
+	}
+	return ctx, traceID
 }
 
 // TraceID returns the trace_id of the request ctx belongs to, or "".

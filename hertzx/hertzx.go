@@ -28,6 +28,7 @@ import (
 
 	"github.com/sezznaw/devkit-common/kitexx"
 	"github.com/sezznaw/devkit-common/nacosx"
+	"github.com/sezznaw/devkit-common/otelx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -73,7 +74,7 @@ func New(cfg Config, opts ...hconfig.Option) (*server.Hertz, error) {
 		server.WithDisablePrintRoute(true),
 	}, opts...)
 	h := server.New(all...)
-	h.Use(RequestLog(), Recovery())
+	h.Use(Tracing(), RequestLog(), Recovery())
 	return h, nil
 }
 
@@ -205,17 +206,22 @@ func waitListening(addr *net.TCPAddr, failed <-chan error, limit time.Duration) 
 // gives the context the logger of the request: what a handler logs with
 // zlog.Ctx(ctx) carries trace_id, method and path.
 //
-// The trace_id is the one of the X-Trace-Id request header when that looks like
-// an id, otherwise a new one. It is put into the context the way kitexx does,
+// The trace_id is the id of the trace Tracing put into the context: the
+// caller's X-Trace-Id when that is a trace id (32 hex characters), otherwise
+// a new one. With tracing off it is the X-Trace-Id when that looks like an id
+// at all, otherwise a new one. It is put into the context the way kitexx does,
 // so the RPC clients a handler calls with that context pass it on, and it is
 // set on the response, so whoever reports a problem can say which request.
 // 5xx is an error record, 4xx a warning.
 func RequestLog() app.HandlerFunc {
 	return func(ctx context.Context, c *app.RequestContext) {
 		start := time.Now()
-		traceID := string(c.GetHeader(TraceHeader))
-		if !looksLikeID(traceID) {
-			traceID = kitexx.NewTraceID()
+		traceID := otelx.TraceID(ctx)
+		if traceID == "" {
+			traceID = string(c.GetHeader(TraceHeader))
+			if !looksLikeID(traceID) {
+				traceID = kitexx.NewTraceID()
+			}
 		}
 		c.Response.Header.Set(TraceHeader, traceID)
 		ctx = metainfo.WithPersistentValue(ctx, kitexx.TraceIDKey, traceID)

@@ -35,6 +35,7 @@ kitexx.Run(svr, cfg.Config)
 - **优雅退出。** 收到 SIGINT/SIGTERM/SIGHUP 后，服务先从 Nacos 注销，继续服务 `shutdown.deregister_wait`（默认 3 秒）让调用方刷新实例列表，然后关闭监听，给在途请求最多 `shutdown.drain_timeout`（默认 15 秒），最后按注册的相反顺序执行 `OnShutdown` 钩子。这两个值之和要小于平台的强杀超时（Kubernetes 默认 30 秒）。
 - **统一的日志格式。** Kitex 内部日志和你的日志一样走 zlog（带 `logger=kitex`，`caller` 是 Kitex 里打日志的那一行），handler 的 panic 是一条记录，堆栈放在 `stack` 字段里，JSON 日志采集不会被破坏。
 - **跟随请求的 `trace_id`。** 服务端中间件取调用方传来的 `trace_id`，没有就生成一个，写进这次请求的每一条日志（`zlog.Ctx(ctx)`）；`ClientOptions`（TTHeader 传输）会把它继续传给本服务调用的其他服务，采集系统里用一个 id 就能看到整条调用链。请求日志里还会记录调用方是谁（`from`）。
+- **链路追踪（OpenTelemetry）。** 配置里写上 `otel.endpoint`（OTLP gRPC 采集端，比如 Tempo 的 4317 端口），每个 RPC 就自动有一个服务端 span，本服务调用别人时有一个客户端 span，W3C `traceparent` 随 TTHeader 传给被调方，所以 Grafana 里能看到整条调用链的瀑布图。这时日志里的 `trace_id` **就是** span 的 trace id，Loki 和 Tempo 用同一个 id 互跳。只带 `trace_id` 不带 `traceparent` 的老调用方也能续上同一条 trace。`endpoint` 留空（通常是 `"${OTEL_EXPORTER_OTLP_ENDPOINT}"` 没有设置）时一切照旧：不记录 span，`trace_id` 还是原来的生成和传递方式。服务退出时会把没发完的 span 发出去。
 - **运行时调整日志级别。** 设置 `log_level_data_id` 后，日志级别跟随一个 Nacos 配置，内容为 `debug`、`info`、`warn` 或 `error`。
 - **不依赖启动目录的配置加载。** `config.LoadDefault` 依次查找 `$CONF_DIR`、`./conf`、可执行文件旁边，文件缺失时给出明确的文字说明而不是 panic。
 - **连不上 Nacos 时给出明确的提示。** 在创建 Nacos 客户端之前，服务会先检查配置的服务器，Nacos 2.x 客户端需要的两个端口都检查（主端口，以及用于 gRPC 的主端口加 1000）。连不上就直接停下，并说明是哪个地址、什么原因、该看哪个配置项，而不是 SDK 那句 `client not connected, current status:STARTING`。
@@ -46,6 +47,10 @@ kitexx.Run(svr, cfg.Config)
 shutdown:
   deregister_wait: 3s     # 0s 表示不等待
   drain_timeout: 15s
+otel:
+  endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT}"   # OTLP gRPC 采集端，如 tempo.monitoring:4317；空 = 关闭
+  sample_ratio: 1.0       # 新 trace 的采样比例；调用方已决定的沿用其决定
+  insecure: true          # 集群内不走 TLS
 ```
 
 ### `hertzx` 为 API 服务提供了什么
@@ -60,7 +65,7 @@ err = hertzx.Run(h, cfg.Config)    // 提供服务，然后优雅退出
 ```
 
 - **每个请求一条记录** `http`，带 `method`、`path`、`status`、`latency`、`client`；5xx 是错误，4xx 是警告。handler 里用 `zlog.Ctx(ctx)` 打的日志带着同一个 `trace_id`、`method` 和 `path`。
-- **从 HTTP 请求到最后一个 RPC 服务是同一个 `trace_id`。** 请求头 `X-Trace-Id` 看起来像一个 id（8 到 64 位的字母、数字、`-`、`_`；其他内容不会进入日志）时沿用它，否则新生成一个。它会写进响应头，并按 `kitexx` 的方式放进 context，所以用 `kitexx.ClientOptions` 创建的客户端会把它继续传下去。
+- **从 HTTP 请求到最后一个 RPC 服务是同一个 `trace_id`。** 开着链路追踪时，每个请求是一个服务端 span（名字是 `GET /user/:id` 这样的方法加路由），请求头里的 W3C `traceparent` 让它接在调用方的 span 下面；只有 `X-Trace-Id` 且是 32 位十六进制时，它就是这条 trace 的 id。关着时，`X-Trace-Id` 看起来像一个 id（8 到 64 位的字母、数字、`-`、`_`；其他内容不会进入日志）就沿用它，否则新生成一个。无论哪种情况，最终的 `trace_id` 都会写进响应头，并按 `kitexx` 的方式放进 context，所以用 `kitexx.ClientOptions` 创建的客户端会把它继续传下去（开着时还带着 span 的父子关系）。
 - **handler 里的 panic** 是一条带堆栈的错误记录，并返回 500。
 - **和 RPC 服务一样的退出顺序**：从 Nacos 注销，继续服务 `shutdown.deregister_wait`，关闭监听，给处理中的请求 `shutdown.drain_timeout`，执行 `OnShutdown` 钩子。Hertz 自带的 `Spin` 会把这些事同时做，而且不管有没有开始监听都在启动 1 秒后注册，所以由 `Run` 取代它，并在端口真正可以连接之后通过 `nacosx` 注册（元数据里带 `protocol=http`）。
 - **端口被占用时是一句话**，说明是哪个端口、该改 `service.addr`；Hertz 自己遇到这种情况会 panic 并打出一大段 goroutine 堆栈。

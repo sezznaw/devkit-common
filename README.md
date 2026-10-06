@@ -47,6 +47,16 @@ kitexx.Run(svr, cfg.Config)
   request (`zlog.Ctx(ctx)`), and `ClientOptions` (TTHeader transport) passes it
   on to the services this one calls, so a collector shows the whole chain
   under one id. The request log also says who called (`from`).
+- **Tracing (OpenTelemetry).** With `otel.endpoint` set (an OTLP gRPC
+  collector, such as Tempo on port 4317) every RPC is a server span, every
+  call this service makes is a client span, and the W3C `traceparent` travels
+  in the TTHeader to the service called, so Grafana shows the whole chain as a
+  waterfall. The `trace_id` in the log then *is* the trace id of the span: Loki
+  and Tempo link to each other by it. A caller that sends only a `trace_id`
+  and no `traceparent` still lands in the same trace. With `endpoint` empty
+  (usually `"${OTEL_EXPORTER_OTLP_ENDPOINT}"` not set) nothing changes: no span
+  is recorded and the `trace_id` is made and passed on as before. Spans not
+  yet exported are flushed when the server stops.
 - **Log level at run time.** With `log_level_data_id` set, the level follows a
   Nacos configuration whose content is `debug`, `info`, `warn` or `error`.
 - **Config that does not depend on the start directory.** `config.LoadDefault`
@@ -68,6 +78,10 @@ kitexx.Run(svr, cfg.Config)
 shutdown:
   deregister_wait: 3s     # 0s disables the wait
   drain_timeout: 15s
+otel:
+  endpoint: "${OTEL_EXPORTER_OTLP_ENDPOINT}"   # OTLP gRPC collector, e.g. tempo.monitoring:4317; empty = off
+  sample_ratio: 1.0       # share of new traces recorded; a caller's decision is kept
+  insecure: true          # no TLS inside the cluster
 ```
 
 ### What `hertzx` gives an API service
@@ -85,11 +99,16 @@ err = hertzx.Run(h, cfg.Config)    // serve, then stop gracefully
 - **One record per request**, `http`, with `method`, `path`, `status`, `latency`,
   `client`; 5xx is an error, 4xx a warning. What a handler logs with
   `zlog.Ctx(ctx)` carries the same `trace_id`, `method` and `path`.
-- **One `trace_id` from the HTTP request to the last RPC service.** It is the
-  `X-Trace-Id` request header when that looks like an id (8 to 64 letters,
-  digits, `-`, `_`; anything else never reaches the log), otherwise a new one.
-  It is set on the response, and it is in the context the way `kitexx` puts it
-  there, so a client made with `kitexx.ClientOptions` passes it on.
+- **One `trace_id` from the HTTP request to the last RPC service.** With
+  tracing on, every request is a server span (named like `GET /user/:id`,
+  method and route); a W3C `traceparent` header makes it a child of the
+  caller's span, and an `X-Trace-Id` alone that is 32 hex characters is the id
+  of the trace. With tracing off, the `X-Trace-Id` is kept when it looks like
+  an id (8 to 64 letters, digits, `-`, `_`; anything else never reaches the
+  log), otherwise a new one is made. Either way the final `trace_id` is set on
+  the response and is in the context the way `kitexx` puts it there, so a
+  client made with `kitexx.ClientOptions` passes it on (with the parent-child
+  relation of the spans when tracing is on).
 - **A panic in a handler** is one error record with the stack, and a 500.
 - **The same stop as an RPC service**: leave Nacos, keep serving for
   `shutdown.deregister_wait`, close the listener, give requests in progress

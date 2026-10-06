@@ -35,10 +35,10 @@ func TestOptionsWithoutRegistry(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	// basic info, listen address, logging middleware, meta handler, drain
-	// timeout; no registry.
-	if len(opts) != 5 {
-		t.Fatalf("expected 5 options without a registry, got %d", len(opts))
+	// basic info, listen address, tracing middleware, logging middleware,
+	// meta handler, drain timeout; no registry.
+	if len(opts) != 6 {
+		t.Fatalf("expected 6 options without a registry, got %d", len(opts))
 	}
 }
 
@@ -139,13 +139,14 @@ func TestClientOptions(t *testing.T) {
 	if err != nil {
 		t.Fatalf("without a registry no Nacos is needed: %v", err)
 	}
-	// TTHeader and its meta handler, which carry the trace_id; no resolver.
-	if len(opts) != 2 {
-		t.Fatalf("expected 2 options without a registry, got %d", len(opts))
+	// TTHeader and its meta handler, which carry the trace_id, and the client
+	// tracing middleware; no resolver.
+	if len(opts) != 3 {
+		t.Fatalf("expected 3 options without a registry, got %d", len(opts))
 	}
 	cfg.Service.Name = "order"
-	if opts, _ = ClientOptions(cfg); len(opts) != 3 {
-		t.Fatalf("expected the caller's name as a third option, got %d", len(opts))
+	if opts, _ = ClientOptions(cfg); len(opts) != 4 {
+		t.Fatalf("expected the caller's name as a fourth option, got %d", len(opts))
 	}
 }
 
