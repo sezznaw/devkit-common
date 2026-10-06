@@ -18,15 +18,17 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `redisx`  | go-redis 客户端，创建时校验连通性 |
 | `etcdx`   | etcd v3 客户端 |
+| `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
 
 最小的服务入口：
 
 ```go
 var cfg struct{ kitexx.Config `yaml:",inline"` }
 if err := config.LoadDefault(&cfg); err != nil { /* 打印错误并以 1 退出 */ }
-opts, err := kitexx.Options(cfg.Config)
-svr := orderservice.NewServer(handler.New(), opts...)
-kitexx.OnShutdown("db", db.Close)      // 在最后一个请求处理完之后执行
+rt, err := kitexx.NewRuntime(cfg.Config)   // 日志、链路追踪，以及配置里启用的连接（MySQL …）
+opts, err := rt.Options()
+svr := orderservice.NewServer(handler.New(repo.New(rt)), opts...)   // rt.DB 交给 repo
+kitexx.OnShutdown("cache", cache.Close)    // 在最后一个请求处理完之后执行
 kitexx.Run(svr, cfg.Config)
 ```
 
@@ -58,8 +60,9 @@ otel:
 API 服务（`devkit nas`）的启动方式和 RPC 服务一样，`hertzx.Config` **就是** `kitexx.Config`：同样的 `conf/*.yaml`，同样的规则。
 
 ```go
-h, err := hertzx.New(cfg.Config)   // 日志、监听、请求日志、panic 恢复、对 Nacos 的检查
-app.Setup(&cfg, h)                 // 服务自己的部分：RPC 客户端、中间件
+rt, err := kitexx.NewRuntime(cfg.Config)   // 日志、链路追踪，以及配置里启用的连接
+h, err := hertzx.New(rt)           // 监听、请求日志、panic 恢复、对 Nacos 的检查
+app.Setup(&cfg, rt, h)             // 服务自己的部分：RPC 客户端、中间件
 router.GeneratedRegister(h)        // hz 根据 IDL 生成的路由
 err = hertzx.Run(h, cfg.Config)    // 提供服务，然后优雅退出
 ```
@@ -136,6 +139,54 @@ nacos:
   sdk_log_level: warn      # debug | info | warn | error
 config_data_id: order.yaml # kitexx.WatchConfig 使用；默认 "<service.name>.yaml"
 ```
+
+### 用 `mysqlx` 连 MySQL
+
+**框架代码只有一套，用不用 MySQL 由配置决定。** 每个服务的配置都有 `mysql:` 一段，默认 `enabled: false`；
+启用后 `kitexx.NewRuntime` 在服务注册到 Nacos **之前**连库、ping，连不上就不启动并说明原因，
+连上的句柄在 `rt.DB`（`*gorm.DB`）。服务代码不打开连接，只在 repo 里用它：
+
+```go
+// repo/member.go
+func (r *Repo) GetMember(ctx context.Context, uid int64) (*Member, error) {
+	var m Member
+	err := r.db.WithContext(ctx).Where("uid = ?", uid).First(&m).Error   // WithContext：这条 SQL 是请求 trace 里的一个 span
+	return &m, err
+}
+```
+
+数据库在哪，`mysql.source` 说了算：
+
+```yaml
+# conf/dev.yaml、uat、prod：部署只说自己服务哪个租户（环境变量 TENANT_CODE），
+# 地址从平台库的 datasource 表取，平台库的地址在 Nacos 的 infra.yaml，密码都来自环境变量
+mysql:
+  enabled: true
+  source: platform
+  role: tenant            # tenant：本租户的库；platform：平台库本身
+
+# conf/local.yaml：开发者自己的库
+mysql:
+  enabled: true
+  source: static
+  addr: "${MYSQL_ADDR}"   # 不设就是 127.0.0.1:3306
+  db: tenant_a
+  user: tenant_a
+  password: "${MYSQL_PASSWORD}"
+  max_open: 20            # 连接池，默认 20 / 5 / 30m
+  max_idle: 5
+  conn_max_lifetime: 30m
+  slow_query: 200ms       # 超过就记一条 warn "mysql slow query"
+```
+
+- **每条 SQL 一条日志**，带请求的 `trace_id`：正常 debug，慢的 warn，失败的 error（查不到行不算失败）；
+  每条 SQL 也是请求 trace 里的一个 span（语句不带参数值）。
+- **本机连了别人也在用的库会有一条 WARN**（source static、地址不是本机、`APP_ENV` 未设置），
+  和 Nacos 的"笔记本不许注册到共享 Nacos"是同一类提醒。
+- **GORM 的约束**：不用 `AutoMigrate`（表结构只来自迁移文件）；不定义关联、不用 `Preload`（要连表就写明确的 Join）；
+  事务显式传递（`repo.WithTx(tx)`），资金路径的多表写在一个明确的事务里；
+  `SkipDefaultTransaction` 已开，一条语句就是一条语句。
+- `rt` 属于框架：服务从里面取，不往里加。
 
 ### 用 `zlog` 打日志
 

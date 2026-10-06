@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/kitex/transport"
 
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/otelx"
 	"github.com/sezznaw/devkit-common/zlog"
@@ -51,6 +52,10 @@ type Config struct {
 	// it. Off, the trace_id is still generated and passed on; on, it is the
 	// id of the trace the collector shows.
 	Otel otelx.Config `yaml:"otel"`
+	// MySQL, when enabled, is opened by NewRuntime before the service
+	// registers, and handed to the service as Runtime.DB. Every service has
+	// the section; most leave it disabled.
+	MySQL mysqlx.Config `yaml:"mysql"`
 	// LogLevelDataID names a Nacos configuration whose content is a log level
 	// (debug, info, warn, error). The level of the running service follows
 	// it, which is how debug logging is switched on in production without a
@@ -85,14 +90,21 @@ const (
 	defaultDrainTimeout   = 15 * time.Second
 )
 
-// Options builds the server options: basic info, listen address, Nacos
-// registry (unless disabled) and logging middleware. It also installs the
-// default logger.
+// Options is NewRuntime followed by Runtime.Options, for a service that does
+// not need the Runtime (nothing enabled besides Nacos and logging).
 func Options(cfg Config) ([]server.Option, error) {
-	if err := Bootstrap(&cfg); err != nil {
+	rt, err := NewRuntime(cfg)
+	if err != nil {
 		return nil, err
 	}
+	return rt.Options()
+}
 
+// Options builds the server options: basic info, listen address, tracing and
+// logging middleware, the TTHeader meta handler, the drain timeout and the
+// Nacos registry (unless disabled).
+func (rt *Runtime) Options() ([]server.Option, error) {
+	cfg := rt.Config
 	addr, err := ListenAddr(cfg.Service.Addr)
 	if err != nil {
 		return nil, err

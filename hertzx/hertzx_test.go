@@ -144,7 +144,11 @@ func TestRunStopsGracefully(t *testing.T) {
 	var cfg Config
 	cfg.Service.Name, cfg.Service.Addr, cfg.RegistryDisabled = "gateway", fmt.Sprintf("127.0.0.1:%d", port), true
 	cfg.Log.Output = io.Discard
-	h, err := New(cfg)
+	rt, err := kitexx.NewRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(rt)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -209,7 +213,11 @@ func TestRunReportsAPortThatIsTaken(t *testing.T) {
 	var cfg Config
 	cfg.Service.Name, cfg.Service.Addr, cfg.RegistryDisabled = "gateway", l.Addr().String(), true
 	cfg.Log.Output = io.Discard
-	h, err := New(cfg)
+	rt, err := kitexx.NewRuntime(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := New(rt)
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -43,3 +43,25 @@ jobs:
       - run: go test ./nacosx/ -run TestAgainstNacos -v -count=1
         env:
           NACOS_ADDR: 127.0.0.1:8848
+
+  # mysqlx against a real MySQL: the datasource lookup and the GORM handle.
+  mysql:
+    runs-on: ubuntu-latest
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -uroot -proot --silent"
+          --health-interval 5s --health-timeout 5s --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go test ./mysqlx/ -run TestAgainstMySQL -v -count=1
+        env:
+          MYSQL_TEST_DSN_ROOT: root:root@tcp(127.0.0.1:13306)/

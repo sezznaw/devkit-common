@@ -279,6 +279,31 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   get it. `tracing_test.go` in both packages runs against an in-memory span
   recorder (`tracetest.SpanRecorder`); `recordSpans` restores the no-op
   provider, because the provider is process-global.
+- `mysqlx` and `kitexx.Runtime` (`runtime.go`): the owner's rule is that the
+  framework code of every service is the same and configuration decides what
+  is used, and that a colleague never writes "get the database": `NewRuntime`
+  (Bootstrap + whatever `mysql.enabled` asks for, before Nacos registration,
+  so a service without its database never takes traffic) fills `Runtime{Config,
+  DB}`, the generated `main.go` passes it to `app.Setup`, the generated
+  `repo.New(rt)` stores `rt.DB`, and handlers call repo methods. `Options(cfg)`
+  stays as `NewRuntime` + `rt.Options()`; `hertzx.New` takes the Runtime
+  (breaking, hence v0.9.0). `mysql.source platform` reads the platform
+  database's address from `infra.yaml` in Nacos (`mysql.platform.{addr, db,
+  user, password_env}`), its password from that variable, then the tenant's row
+  (`TENANT_CODE`) from `platform.datasource` (`mysqlx.Resolve`, plain
+  database/sql); every password is an environment variable named by data, never
+  in data. GORM: `SkipDefaultTransaction`, `NowFunc` UTC, the DSN pins
+  parseTime/loc=UTC/time_zone/utf8mb4 and timeouts, `zlogger` bridges GORM's
+  logger to `zlog.Ctx(ctx)` (debug / slow warn / error, `ErrRecordNotFound` is
+  not an error), `gorm.io/plugin/opentelemetry` makes each statement a span
+  (`WithoutMetrics`, `WithoutQueryVariables`). `gorm.Open` dials by itself, so a
+  database that is down fails at "connect to", not at the ping; both carry the
+  same `hint`. `TestAgainstMySQL` needs `MYSQL_TEST_DSN_ROOT`
+  (`root:root@tcp(127.0.0.1:13306)/`; `docker run -d --name mysqlx-test -e
+  MYSQL_ROOT_PASSWORD=root -p 13306:3306 mysql:8.4`) and runs in CI job
+  `mysql`. `Runtime` must not grow service-specific fields; the next
+  infrastructure (Redis, Kafka) gets the same shape: a config section with
+  `enabled`, opened in `NewRuntime`, a field on `Runtime`.
 - `redisx`, `etcdx`: thin constructors from YAML-loadable config structs;
   `redisx.New` pings before returning.
 

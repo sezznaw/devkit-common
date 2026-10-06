@@ -46,16 +46,15 @@ const TraceHeader = "X-Trace-Id"
 // completely; it is kitexx.OnShutdown.
 func OnShutdown(name string, fn func() error) { kitexx.OnShutdown(name, fn) }
 
-// New installs the logger and returns a Hertz server that listens on
-// service.addr, logs every request with a trace_id and turns a panic in a
-// handler into a record and a 500. It refuses, before anything is started, what
-// kitexx.Options refuses: a service without a name, a Nacos that cannot be
+// New returns a Hertz server that listens on service.addr, traces and logs
+// every request with a trace_id and turns a panic in a handler into a record
+// and a 500. rt comes from kitexx.NewRuntime, which installed the logger and
+// tracing and opened what the configuration enables. New refuses, before
+// anything is started, what kitexx.Options refuses: a Nacos that cannot be
 // reached or does not accept the account, a laptop that would register in a
 // Nacos other people use.
-func New(cfg Config, opts ...hconfig.Option) (*server.Hertz, error) {
-	if err := kitexx.Bootstrap(&cfg); err != nil {
-		return nil, err
-	}
+func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
+	cfg := rt.Config
 	bridgeHlog(zlog.Default())
 	addr, err := kitexx.ListenAddr(cfg.Service.Addr)
 	if err != nil {

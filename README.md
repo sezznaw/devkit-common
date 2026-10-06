@@ -18,15 +18,17 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `redisx`  | go-redis client with connection check |
 | `etcdx`   | etcd v3 client |
+| `mysqlx`  | MySQL (GORM) from the `mysql:` section: pool, every query a span and a record with the trace_id, slow-query warnings; the address from the configuration or from the platform's datasource table; see below |
 
 A minimal service `main`:
 
 ```go
 var cfg struct{ kitexx.Config `yaml:",inline"` }
 if err := config.LoadDefault(&cfg); err != nil { /* print and exit 1 */ }
-opts, err := kitexx.Options(cfg.Config)
-svr := orderservice.NewServer(handler.New(), opts...)
-kitexx.OnShutdown("db", db.Close)      // runs after the last request finished
+rt, err := kitexx.NewRuntime(cfg.Config)   // logger, tracing, and what the configuration enables (MySQL, ...)
+opts, err := rt.Options()
+svr := orderservice.NewServer(handler.New(repo.New(rt)), opts...)   // rt.DB goes to the repo
+kitexx.OnShutdown("cache", cache.Close)    // runs after the last request finished
 kitexx.Run(svr, cfg.Config)
 ```
 
@@ -90,8 +92,9 @@ An API service (`devkit nas`) is started like an RPC service, and
 `hertzx.Config` *is* `kitexx.Config`: the same `conf/*.yaml`, the same rules.
 
 ```go
-h, err := hertzx.New(cfg.Config)   // logger, listener, request log, recovery, the checks on Nacos
-app.Setup(&cfg, h)                 // the service: RPC clients, middleware
+rt, err := kitexx.NewRuntime(cfg.Config)   // logger, tracing, and what the configuration enables
+h, err := hertzx.New(rt)           // listener, request log, recovery, the checks on Nacos
+app.Setup(&cfg, rt, h)             // the service: RPC clients, middleware
 router.GeneratedRegister(h)        // the routes hz generated from the IDL
 err = hertzx.Run(h, cfg.Config)    // serve, then stop gracefully
 ```
@@ -239,6 +242,64 @@ nacos:
   sdk_log_level: warn      # debug | info | warn | error
 config_data_id: order.yaml # kitexx.WatchConfig; default "<service.name>.yaml"
 ```
+
+### MySQL with `mysqlx`
+
+**One framework for every service; whether MySQL is used is configuration.**
+Every service's configuration has a `mysql:` section, `enabled: false` by
+default. Enabled, `kitexx.NewRuntime` connects and pings *before* the service
+registers in Nacos (a service whose database is not there does not start, and
+says why) and hands the handle over as `rt.DB` (`*gorm.DB`). The service never
+opens a connection; its repo uses the one it is given:
+
+```go
+// repo/member.go
+func (r *Repo) GetMember(ctx context.Context, uid int64) (*Member, error) {
+	var m Member
+	err := r.db.WithContext(ctx).Where("uid = ?", uid).First(&m).Error   // WithContext: the query is a span of the request's trace
+	return &m, err
+}
+```
+
+Where the database is, `mysql.source` decides:
+
+```yaml
+# conf/dev.yaml, uat, prod: the deployment only says which tenant it serves
+# (environment variable TENANT_CODE); the address comes from the platform
+# database's datasource table, the platform database's own address from
+# infra.yaml in Nacos, and every password from an environment variable
+mysql:
+  enabled: true
+  source: platform
+  role: tenant            # tenant: this tenant's database; platform: the platform database itself
+
+# conf/local.yaml: the developer's own database
+mysql:
+  enabled: true
+  source: static
+  addr: "${MYSQL_ADDR}"   # empty: 127.0.0.1:3306
+  db: tenant_a
+  user: tenant_a
+  password: "${MYSQL_PASSWORD}"
+  max_open: 20            # pool, defaults 20 / 5 / 30m
+  max_idle: 5
+  conn_max_lifetime: 30m
+  slow_query: 200ms       # slower than this is a warn record "mysql slow query"
+```
+
+- **Every query is one record**, with the request's `trace_id`: debug when
+  fine, warn when slow, error when it failed (a row that is not there is not
+  a failure); and one span of the request's trace (the statement, without
+  the values).
+- **A laptop on a database that is not on it gets a WARN** (source static,
+  an address that is not loopback, `APP_ENV` not set), the same kind of
+  reminder as "a laptop does not register in the shared Nacos".
+- **GORM, with rules**: no `AutoMigrate` (the schema comes from the
+  migrations only); no associations and no `Preload` (join explicitly);
+  transactions passed explicitly (`repo.WithTx(tx)`), the writes of a money
+  path in one explicit transaction; `SkipDefaultTransaction` is on, one
+  statement is one statement.
+- `rt` belongs to the framework: a service takes from it, never adds to it.
 
 ### Logging with `zlog`
 
