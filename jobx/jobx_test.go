@@ -63,6 +63,9 @@ func TestExecute(t *testing.T) {
 	if !logs.Has("INFO", "job finished") {
 		t.Error("a run ends with 'job finished'")
 	}
+	if strings.Contains(logs.String(), "00000000000000000000000000000000") {
+		t.Error("with tracing off the trace_id is the run id, not zeros")
+	}
 	if n, _ := rdb.Exists(context.Background(), "job:report:fine").Result(); n != 0 {
 		t.Error("the lock is released after the run")
 	}

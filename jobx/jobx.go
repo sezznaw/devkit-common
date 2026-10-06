@@ -14,6 +14,7 @@ import (
 	"fmt"
 	"io"
 	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -155,7 +156,14 @@ func Execute(ctx context.Context, service string, jobs []Job, name string, lock 
 	ctx, span := otel.Tracer(tracerName).Start(ctx, "job "+j.Name, trace.WithNewRoot(),
 		trace.WithAttributes(attribute.String("job.name", j.Name), attribute.String("job.run_id", runID), attribute.String("service.name", service)))
 	defer span.End()
-	ctx = zlog.CtxWith(ctx, zlog.Str("job", j.Name), zlog.Str("run_id", runID), zlog.Str("trace_id", span.SpanContext().TraceID().String()))
+	// The trace id of the run: the span's when tracing is on, else the run
+	// id without dashes (32 hex characters, the shape of a trace id), so the
+	// records of one run can always be found by trace_id.
+	traceID := strings.ReplaceAll(runID, "-", "")
+	if sc := span.SpanContext(); sc.IsValid() {
+		traceID = sc.TraceID().String()
+	}
+	ctx = zlog.CtxWith(ctx, zlog.Str("job", j.Name), zlog.Str("run_id", runID), zlog.Str("trace_id", traceID))
 	log := zlog.Ctx(ctx)
 
 	key := fmt.Sprintf("job:%s:%s", service, j.Name)
