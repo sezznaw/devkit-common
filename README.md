@@ -389,6 +389,23 @@ err  = odds.PostJSON(ctx, "/v1/payout", req, &resp)   // a POST is never retried
 odds.R().SetContext(ctx).SetQueryParam(...)           // anything else: it is a *resty.Client
 ```
 
+Two guards sit under every call, raw `R()` calls included. `max_concurrent`
+(default 64) caps the calls in flight to one provider; the rest wait within
+their timeout. A circuit breaker opens after `breaker_failures` consecutive
+failed attempts (network error, 429, 5xx; default 5) and for
+`breaker_open_for` (default 30s) every call fails at once with
+`httpx.ErrCircuitOpen` instead of waiting out its timeouts; then one probe
+is let through and the circuit closes on success. State changes are logged
+and `http_client_breaker_state` / `http_client_rejected_total` count them.
+The connection pool keeps 100 idle connections per host (Go's default of 2
+would mean a TLS handshake for most calls to a vendor polled often).
+
+The worst case of one call is (retries + 1) attempts of up to `timeout`
+each plus the waits between them, about 16s with the defaults; a handler
+that cannot wait that long gives its ctx a deadline. `debug: true` logs
+every request and response with headers and bodies, on a developer's
+machine only (APP_ENV local); a deployment ignores it with a warning.
+
 Every call carries the trace (a client span `GET odds-feed /v1/odds`, the
 W3C traceparent in the request), writes one record with the trace_id
 (provider, method, path without the query string, status, latency,

@@ -10,7 +10,9 @@ package httpx
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -47,12 +49,49 @@ type Provider struct {
 	// Insecure skips TLS verification. Only for a vendor's sandbox with a
 	// self-signed certificate.
 	Insecure bool `yaml:"insecure"`
+	// MaxConcurrent calls in flight to this provider; further calls wait
+	// (within their timeout) for a slot. Default 64. 0 means no limit.
+	MaxConcurrent *int `yaml:"max_concurrent"`
+	// BreakerFailures: after this many consecutive failed attempts (network
+	// error, 429, 5xx) the circuit opens and calls fail at once with
+	// ErrCircuitOpen for breaker_open_for, then one probe is let through.
+	// Default 5. 0 disables the breaker.
+	BreakerFailures *int `yaml:"breaker_failures"`
+	// BreakerOpenFor is how long the circuit stays open. Default 30s.
+	BreakerOpenFor config.Duration `yaml:"breaker_open_for"`
+	// Debug prints every request and response, headers and bodies, to the
+	// log at debug level. Honoured on a developer's machine only
+	// (APP_ENV local): in a deployment it is ignored with a warning,
+	// because bodies carry secrets and personal data.
+	Debug bool `yaml:"debug"`
 }
 
+// The worst case of one call is (retries + 1) attempts, each up to
+// timeout, plus the waits between them (200ms, 400ms, ... up to 2s): with
+// the defaults about 16s. A handler that cannot wait that long gives its
+// ctx a deadline; the call stops when the ctx does.
+
 const (
-	defaultTimeout = 5 * time.Second
-	defaultRetries = 2
+	defaultTimeout         = 5 * time.Second
+	defaultRetries         = 2
+	defaultMaxConcurrent   = 64
+	defaultBreakerFailures = 5
+	defaultBreakerOpenFor  = 30 * time.Second
 )
+
+func (p Provider) maxConcurrent() int {
+	if p.MaxConcurrent == nil {
+		return defaultMaxConcurrent
+	}
+	return max(0, *p.MaxConcurrent)
+}
+
+func (p Provider) breakerFailures() int {
+	if p.BreakerFailures == nil {
+		return defaultBreakerFailures
+	}
+	return max(0, *p.BreakerFailures)
+}
 
 func (p Provider) retries() int {
 	if p.Retries == nil {
@@ -93,14 +132,12 @@ func New(name string, p Provider) (*Client, error) {
 		return nil, err
 	}
 	base, _ := url.Parse(p.BaseURL)
-	transport := http.DefaultTransport.(*http.Transport).Clone()
-	if p.Insecure {
-		transport.TLSClientConfig.InsecureSkipVerify = true
-	}
+	// resty -> guard (concurrency, breaker) -> otelhttp (span) -> pooled transport
+	traced := otelhttp.NewTransport(newTransport(p),
+		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method + " " + name + " " + r.URL.Path }),
+		otelhttp.WithSpanOptions(trace.WithAttributes(attribute.String("peer.service", name))))
 	rc := resty.New().
-		SetTransport(otelhttp.NewTransport(transport,
-			otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method + " " + name + " " + r.URL.Path }),
-			otelhttp.WithSpanOptions(trace.WithAttributes(attribute.String("peer.service", name))))).
+		SetTransport(newGuard(name, p, traced)).
 		SetBaseURL(p.BaseURL).
 		SetHeaders(p.Headers).
 		SetTimeout(p.Timeout.Or(defaultTimeout)).
@@ -113,6 +150,14 @@ func New(name string, p Provider) (*Client, error) {
 	c := &Client{Client: rc, Name: name, base: base}
 	rc.OnAfterResponse(c.afterResponse)
 	rc.OnError(c.onError)
+	if p.Debug {
+		if config.IsLocal() {
+			rc.SetDebug(true)
+			zlog.Warn("provider debug on: requests and responses, headers and bodies, are logged", zlog.Str("provider", name))
+		} else {
+			zlog.Warn("providers."+name+".debug is ignored outside the local environment: bodies carry secrets", zlog.Str("provider", name))
+		}
+	}
 	return c, nil
 }
 
@@ -120,6 +165,9 @@ func New(name string, p Provider) (*Client, error) {
 // method. resty's own default conditions are not used (they would retry a
 // POST on a network error).
 func retryCondition(r *resty.Response, err error) bool {
+	if errors.Is(err, ErrCircuitOpen) || errors.Is(err, ErrTooManyInFlight) {
+		return false // the breaker said no; asking again at once is pointless
+	}
 	if r == nil || r.Request == nil || r.Request.RawRequest == nil {
 		return err != nil
 	}
@@ -234,3 +282,5 @@ type restyLogger struct{ name string }
 func (l restyLogger) Errorf(f string, v ...any) { zlog.Errorf("resty["+l.name+"]: "+f, v...) }
 func (l restyLogger) Warnf(f string, v ...any)  { zlog.Warnf("resty["+l.name+"]: "+f, v...) }
 func (l restyLogger) Debugf(f string, v ...any) { zlog.Debugf("resty["+l.name+"]: "+f, v...) }
+
+func insecureTLS() *tls.Config { return &tls.Config{InsecureSkipVerify: true} } //nolint:gosec // opted in per provider, sandboxes only

@@ -255,6 +255,15 @@ err  = odds.PostJSON(ctx, "/v1/payout", req, &resp)   // POST 框架绝不重试
 odds.R().SetContext(ctx).SetQueryParam(...)           // 其他需求：它就是一个 *resty.Client
 ```
 
+每次调用下面有两道保护，裸用 `R()` 也一样。`max_concurrent`（默认 64）限制对一个 provider 同时在途的调用数，多出来的在自己的
+超时内排队。熔断器在连续 `breaker_failures` 次失败（网络错误、429、5xx；默认 5）后打开，`breaker_open_for`（默认 30s）内
+所有调用立刻以 `httpx.ErrCircuitOpen` 失败而不是等满超时；然后放一个探测请求过去，成功就恢复。状态变化有日志，
+`http_client_breaker_state` / `http_client_rejected_total` 可以看。连接池每个 host 保留 100 条空闲连接
+（Go 默认 2 条，高频拉取的供应商几乎每次都要重新 TLS 握手）。
+
+一次调用最坏耗时是 (retries + 1) 次尝试、每次最多 `timeout`、加上中间的等待，默认值下约 16s；等不起的 handler 给 ctx 加
+deadline。`debug: true` 把每次请求响应连头和 body 打到日志，只在本机（APP_ENV local）生效；部署环境忽略并告警。
+
 每次调用都带 trace（client span `GET odds-feed /v1/odds`，请求头里有 W3C traceparent），写一条带 trace_id 的日志
 （provider、方法、不含查询串的路径、状态码、耗时、第几次尝试；绝不记头和 body），并计数
 `http_client_requests_total{provider, http_method, status}` / `http_client_duration_seconds`。

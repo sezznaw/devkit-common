@@ -97,6 +97,12 @@ var (
 	HTTPClientDuration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
 		Name: "http_client_duration_seconds", Help: "Time a call to an external HTTP API took.", Buckets: DurationBuckets,
 	}, []string{"provider", "http_method"})
+	HTTPClientRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "http_client_rejected_total", Help: "Calls to external APIs not sent: circuit_open (the provider is failing) or in_flight (max_concurrent reached and the context ended).",
+	}, []string{"provider", "reason"})
+	HTTPClientBreakerState = promauto.With(Registry).NewGaugeVec(prometheus.GaugeOpts{
+		Name: "http_client_breaker_state", Help: "Circuit breaker of a provider: 0 closed (normal), 1 half-open (probing), 2 open (failing fast).",
+	}, []string{"provider"})
 	KafkaEventsPublished = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_published_total", Help: "Events published by kafkax, by topic and result.",
 	}, []string{"topic", "status"})

@@ -398,7 +398,15 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   enforces the deployment rule: `POD_NAMESPACE` set and not ending in
   `-provider` with providers configured is a start failure (the chart sets
   POD_NAMESPACE; a laptop has none). `rt.Provider(name)` panics on an unknown
-  name: it is called in `app.Setup`, so that is a start failure too.
+  name: it is called in `app.Setup`, so that is a start failure too. `guard.go` is a RoundTripper between resty and otelhttp (so retries and
+  raw R() calls pass through it): a semaphore for `max_concurrent` (waits on
+  the request ctx, which resty's timeout bounds) and sony/gobreaker v2
+  (consecutive failures, MaxRequests 1 in half-open). A 5xx/429 response is
+  made a failure for the breaker by wrapping it in `failedStatus` and
+  unwrapped again on the way out, so the caller still sees the status;
+  `ErrCircuitOpen` is excluded from retries. `newTransport` sets
+  MaxIdleConnsPerHost 100 (Go default 2) and 5s dial/TLS timeouts. `debug`
+  is honoured only when `config.IsLocal()`.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules
