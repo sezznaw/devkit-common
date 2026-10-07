@@ -383,6 +383,22 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   Tests use `prometheus/testutil`. The option counts in
   `TestOptionsWithoutRegistry` / `TestClientOptions` include the metrics
   middlewares.
+- `httpx`: resty v2 (v3 was still a release candidate on 2026-10-07; the
+  owner chose resty over imroc/req: standard transport, larger user base)
+  with `otelhttp.NewTransport` for the client span and the traceparent
+  (which needs the global propagator, `otelx.Init` installs it; the test
+  sets `propagation.TraceContext{}` itself). Retries: our own
+  `retryCondition` only (network error / 429 / 5xx, idempotent methods
+  only; resty's defaults would retry a POST on a network error). JSON is
+  decoded by us, not `SetResult`, because resty only decodes a JSON
+  content type and vendors forget it. Log and metrics come from
+  `OnAfterResponse` + `OnError` (the final attempt; `Attempt` tells), path
+  without query (tokens live there), never headers or bodies. `Config.Providers
+  map[string]httpx.Provider`, built in `Runtime.openProviders`, which also
+  enforces the deployment rule: `POD_NAMESPACE` set and not ending in
+  `-provider` with providers configured is a start failure (the chart sets
+  POD_NAMESPACE; a laptop has none). `rt.Provider(name)` panics on an unknown
+  name: it is called in `app.Setup`, so that is a start failure too.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules

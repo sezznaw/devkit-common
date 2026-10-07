@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
 | `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
+| `httpx`   | calls to external HTTP APIs (resty + otelhttp): providers listed under `providers:` with base URL, timeout, retries and headers from the environment; `rt.Provider("odds-feed").GetJSON(ctx, path, &out)`; trace carried on, one log record per call without secrets, metrics; a service with providers must run in the provider namespace; see below |
 | `metricsx` | Prometheus metrics on a port of their own (`metrics.enabled`, default port 9091): requests by method and result code with latency histograms for Kitex and Hertz, calls made to other services, Go runtime, MySQL pool, Redis commands, Kafka events; the deployment scrapes it; see below |
 | `jobx`    | scheduled jobs: a service lists them in `app/jobs.go` (name, cron schedule, timeout, function), the framework runs one per `--job=<name>` with a root span, a run id in the log, a lock, a timeout and an exit code, and `--list-jobs` is what the deployment turns into CronJobs; see below |
 | `redisx`  | Redis / Valkey from the `redis:` section, the rules of `mysqlx` (enabled, source static or platform), every command a span; the idempotency middleware uses it |
@@ -367,6 +368,37 @@ names. The client is `rt.Centrifugo`.
   to `user:<id>`
 - `History(ctx, channel, n)`: the last messages of a channel (when the
   namespace keeps history), for tests and reconnecting clients
+
+### External APIs with `httpx`
+
+```yaml
+providers:
+  odds-feed:
+    base_url: "https://api.vendor.com"
+    timeout: 3s                       # one attempt; default 5s
+    retries: 2                        # default 2; GET/HEAD/OPTIONS/PUT/DELETE only, on network errors, 429 and 5xx
+    headers:
+      X-Api-Key: "${ODDS_FEED_API_KEY}"   # the secret is in the environment, never in the file
+```
+
+```go
+odds := rt.Provider("odds-feed")        // in app.Setup; a name that is not configured panics there
+var out OddsResp
+err := odds.GetJSON(ctx, "/v1/odds?match=123", &out)
+err  = odds.PostJSON(ctx, "/v1/payout", req, &resp)   // a POST is never retried by the framework
+odds.R().SetContext(ctx).SetQueryParam(...)           // anything else: it is a *resty.Client
+```
+
+Every call carries the trace (a client span `GET odds-feed /v1/odds`, the
+W3C traceparent in the request), writes one record with the trace_id
+(provider, method, path without the query string, status, latency,
+attempt; never headers or bodies), and counts
+`http_client_requests_total{provider, http_method, status}` /
+`http_client_duration_seconds`. A non-2xx answer is a `*httpx.StatusError`
+with the status and the first bytes of the body. Only the business
+namespaces are cut off from the internet, so a service with `providers:`
+must be deployed to the `-provider` namespace: `NewRuntime` refuses to start
+otherwise (it reads `POD_NAMESPACE`) and says where to move it.
 
 ### Metrics with `metricsx`
 

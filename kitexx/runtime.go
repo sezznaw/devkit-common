@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +16,7 @@ import (
 
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/jobx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
@@ -46,7 +48,8 @@ type Runtime struct {
 	// Publish to a channel, ConnectionToken for a client.
 	Centrifugo *centrifugox.Client
 
-	jobs []jobx.Job
+	jobs      []jobx.Job
+	providers map[string]*httpx.Client
 }
 
 // TenantEnv names the environment variable a deployment sets to say which
@@ -80,7 +83,63 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	if err := rt.openCentrifugo(); err != nil {
 		return nil, err
 	}
+	if err := rt.openProviders(); err != nil {
+		return nil, err
+	}
 	return rt, nil
+}
+
+// PodNamespaceEnv is set by the deployment; a service that calls external
+// APIs must run in a namespace that may leave the cluster.
+const PodNamespaceEnv = "POD_NAMESPACE"
+
+// ProviderNamespaceSuffix marks the namespaces with egress
+// (sportsbook-dev-provider).
+const ProviderNamespaceSuffix = "-provider"
+
+// openProviders builds one httpx client per `providers:` entry. The
+// deployment rule is checked here: a service with providers in a namespace
+// without egress would fail at the first call, at 3 am; it fails at start
+// instead, with the fix in the message.
+func (rt *Runtime) openProviders() error {
+	cfg := rt.Config
+	rt.providers = map[string]*httpx.Client{}
+	if len(cfg.Providers) == 0 {
+		return nil
+	}
+	if ns := os.Getenv(PodNamespaceEnv); ns != "" && !strings.HasSuffix(ns, ProviderNamespaceSuffix) {
+		return fmt.Errorf("kitexx: this service has providers (%s) but runs in namespace %q, which cannot reach the internet; deploy it to the %s namespace (services/<env>/<service>/app.yaml: namespace: %s%s)",
+			providerNames(cfg), ns, ProviderNamespaceSuffix, strings.TrimSuffix(ns, ProviderNamespaceSuffix), ProviderNamespaceSuffix)
+	}
+	for name, p := range cfg.Providers {
+		c, err := httpx.New(name, p)
+		if err != nil {
+			return err
+		}
+		rt.providers[name] = c
+		zlog.Info("provider configured", zlog.Str("name", name), zlog.Str("base_url", p.BaseURL), zlog.Dur("timeout", p.Timeout.Or(5*time.Second)))
+	}
+	return nil
+}
+
+func providerNames(cfg Config) string {
+	names := make([]string, 0, len(cfg.Providers))
+	for n := range cfg.Providers {
+		names = append(names, n)
+	}
+	sort.Strings(names)
+	return strings.Join(names, ", ")
+}
+
+// Provider is the client of an external API listed under `providers:`. A
+// name that is not configured is a start-time mistake, not a run-time one:
+// it panics with the names that exist, and app.Setup is where it is called.
+func (rt *Runtime) Provider(name string) *httpx.Client {
+	c, ok := rt.providers[name]
+	if !ok {
+		panic(fmt.Sprintf("kitexx: no provider %q in the configuration; providers: [%s]. Add providers.%s to conf/<env>.yaml", name, providerNames(rt.Config), name))
+	}
+	return c
 }
 
 func (rt *Runtime) openCentrifugo() error {

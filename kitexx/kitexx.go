@@ -24,6 +24,7 @@ import (
 
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/mysqlx"
@@ -73,6 +74,10 @@ type Config struct {
 	// Go runtime, MySQL pool, Redis commands, Kafka client. Deployments scrape
 	// it; off on a laptop.
 	Metrics metricsx.Config `yaml:"metrics"`
+	// Providers: the external HTTP APIs this service calls, by name
+	// (`providers.odds-feed.base_url` ...); rt.Provider(name) is the client.
+	// A service with providers runs in the provider namespace (egress).
+	Providers map[string]httpx.Provider `yaml:"providers"`
 	// LogLevelDataID names a Nacos configuration whose content is a log level
 	// (debug, info, warn, error). The level of the running service follows
 	// it, which is how debug logging is switched on in production without a

@@ -91,6 +91,12 @@ var (
 	HTTPServerDuration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
 		Name: "http_server_duration_seconds", Help: "Time to handle an HTTP request.", Buckets: DurationBuckets,
 	}, []string{"http_method", "http_route"})
+	HTTPClientRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "http_client_requests_total", Help: "Calls to external HTTP APIs (httpx), by provider, method and status (\"error\": no response).",
+	}, []string{"provider", "http_method", "status"})
+	HTTPClientDuration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
+		Name: "http_client_duration_seconds", Help: "Time a call to an external HTTP API took.", Buckets: DurationBuckets,
+	}, []string{"provider", "http_method"})
 	KafkaEventsPublished = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_published_total", Help: "Events published by kafkax, by topic and result.",
 	}, []string{"topic", "status"})

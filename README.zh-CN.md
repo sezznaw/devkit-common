@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
+| `httpx`   | 调外部 HTTP 接口（resty + otelhttp）：`providers:` 里登记 base URL、超时、重试、来自环境变量的头；`rt.Provider("odds-feed").GetJSON(ctx, path, &out)`；trace 带过去，每次调用一条不含密钥的日志，指标；有 providers 的服务必须部署在 provider namespace；详见下文 |
 | `metricsx` | Prometheus 指标，单独端口（`metrics.enabled`，默认 9091）：Kitex/Hertz 每个方法的请求数、结果码、耗时直方图，对外 RPC 调用，Go 运行时，MySQL 连接池，Redis 命令，Kafka 事件；由部署抓取；详见下文 |
 | `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
 | `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
@@ -233,6 +234,32 @@ mysql:
 - `rt.Centrifugo.ConnectionToken("42")`：给登录后的客户端签连接 JWT（HS256，`token_ttl` 默认 24h），
   网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推
 - `History(ctx, channel, n)`：取频道最近的消息（命名空间开了 history 时），测试和断线重连用
+
+### 用 `httpx` 调外部接口
+
+```yaml
+providers:
+  odds-feed:
+    base_url: "https://api.vendor.com"
+    timeout: 3s                       # 单次尝试；默认 5s
+    retries: 2                        # 默认 2；只对 GET/HEAD/OPTIONS/PUT/DELETE，且只在网络错误、429、5xx 时
+    headers:
+      X-Api-Key: "${ODDS_FEED_API_KEY}"   # 密钥在环境变量里，不在文件里
+```
+
+```go
+odds := rt.Provider("odds-feed")        // 在 app.Setup 里取；配置里没有这个名字会在这里 panic
+var out OddsResp
+err := odds.GetJSON(ctx, "/v1/odds?match=123", &out)
+err  = odds.PostJSON(ctx, "/v1/payout", req, &resp)   // POST 框架绝不重试
+odds.R().SetContext(ctx).SetQueryParam(...)           // 其他需求：它就是一个 *resty.Client
+```
+
+每次调用都带 trace（client span `GET odds-feed /v1/odds`，请求头里有 W3C traceparent），写一条带 trace_id 的日志
+（provider、方法、不含查询串的路径、状态码、耗时、第几次尝试；绝不记头和 body），并计数
+`http_client_requests_total{provider, http_method, status}` / `http_client_duration_seconds`。
+非 2xx 的响应是 `*httpx.StatusError`，带状态码和 body 的前几百字节。业务 namespace 不能出网，所以有 `providers:` 的服务
+必须部署到 `-provider` namespace：`NewRuntime` 读 `POD_NAMESPACE`，放错了拒绝启动并告诉你搬到哪。
 
 ### 用 `metricsx` 出指标
 
