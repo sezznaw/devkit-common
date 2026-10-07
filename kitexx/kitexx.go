@@ -83,6 +83,10 @@ type Config struct {
 	// (`providers.odds-feed.base_url` ...); rt.Provider(name) is the client.
 	// A service with providers runs in the provider namespace (egress).
 	Providers map[string]httpx.Provider `yaml:"providers"`
+	// RPCClient: timeout, retry and circuit breaker of the calls this
+	// service makes to other services (ClientOptions). Defaults suit the
+	// cluster; the section is only for changing them.
+	RPCClient RPCClientConfig `yaml:"rpc_client"`
 	// Callbacks: an HTTP listener for the callbacks providers send us, on a
 	// port of its own (the only one the deployment exposes to them, under
 	// /callbacks/). webhookx.Server(rt) builds it; it starts and stops with
@@ -270,12 +274,12 @@ func DrainTimeout(cfg Config) time.Duration { return cfg.Shutdown.DrainTimeout.O
 // registry_disabled there is no discovery and the caller says where the
 // service is, client.WithHostPorts.
 func ClientOptions(cfg Config) ([]client.Option, error) {
-	opts := []client.Option{
+	opts := append([]client.Option{
 		client.WithTransportProtocol(transport.TTHeader),
 		client.WithMetaHandler(transmeta.ClientTTHeaderHandler),
 		client.WithMiddleware(ClientTracing()),
 		client.WithMiddleware(ClientMetrics()),
-	}
+	}, rpcClientOptions(cfg)...)
 	if cfg.Service.Name != "" {
 		// Who is calling: the "from" of the request log of the service called.
 		opts = append(opts, client.WithClientBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}))

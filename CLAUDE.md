@@ -454,7 +454,16 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `secret_env=...&path_style=...&insecure=...&region=...` (`TargetFromRow`);
   the seed row of dev is shaped that way. Tests use gofakes3 (in-memory
   S3, including presigned URLs).
-- `etcdx`: thin constructor from a YAML-loadable config struct.
+- `kitexx/rpcclient.go`: the protections of `ClientOptions` (owner asked
+  2026-10-07 why third-party calls had them and internal calls did not):
+  `WithRPCTimeout` 3s, `WithConnectTimeout` 1s, `WithFailureRetry` with
+  `retryOnlyUnsent` (ErrGetConnection / ErrNoConnection / ErrNoDestAddress /
+  ErrNoDestService only: never a timeout or a handler error, the call may
+  have run), one `circuitbreak.CBSuite` per process keyed by
+  `RPCInfo2Key` (service + method), closed by an OnShutdown hook. Section
+  `rpc_client:` (`RPCClientConfig`) changes them. `TestClientOptions` counts
+  these options (8 without a registry, 9 with the caller's name).
+- `etcdx` was removed in v0.20.0: nothing in the stack runs etcd.
 
 ## Versioning rules
 

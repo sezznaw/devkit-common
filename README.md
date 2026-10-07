@@ -24,7 +24,6 @@ go get github.com/sezznaw/devkit-common@latest
 | `metricsx` | Prometheus metrics on a port of their own (`metrics.enabled`, default port 9091): requests by method and result code with latency histograms for Kitex and Hertz, calls made to other services, Go runtime, MySQL pool, Redis commands, Kafka events; the deployment scrapes it; see below |
 | `jobx`    | scheduled jobs: a service lists them in `app/jobs.go` (name, cron schedule, timeout, function), the framework runs one per `--job=<name>` with a root span, a run id in the log, a lock, a timeout and an exit code, and `--list-jobs` is what the deployment turns into CronJobs; see below |
 | `redisx`  | Redis / Valkey from the `redis:` section, the rules of `mysqlx` (enabled, source static or platform), every command a span; the idempotency middleware uses it |
-| `etcdx`   | etcd v3 client |
 | `mysqlx`  | MySQL (GORM) from the `mysql:` section: pool, every query a span and a record with the trace_id, slow-query warnings; the address from the configuration or from the platform's datasource table; see below |
 
 A minimal service `main`:
@@ -525,6 +524,19 @@ id, so the provider's retry runs the handler again. One log record per
 callback with provider and event_id, and
 `callbacks_received_total{provider, http_route, result}`. Handlers stay
 idempotent anyway: a provider may send the same notification under two ids.
+
+### Calls between services: timeout, retry, breaker
+
+`ClientOptions` protects every call this service makes to another service,
+with defaults a cluster wants and an `rpc_client:` section only to change
+them: a 3s timeout per call (`timeout`), 1s to connect (`connect_timeout`),
+one retry (`retries`) only when the request was never sent (no instance, no
+connection; a timeout or an error from the handler is not retried, because
+the call may have run), and a circuit breaker per service and method
+(`breaker: false` to switch off): over 50% errors in at least 200 calls and
+the calls fail at once with `kerrors.ErrCircuitBreak` until the downstream
+recovers. A caller that must retry a write does it itself with the same
+request_id; the idempotency middleware replays the result.
 
 ### Metrics with `metricsx`
 

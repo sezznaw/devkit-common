@@ -141,12 +141,12 @@ func TestClientOptions(t *testing.T) {
 	}
 	// TTHeader and its meta handler, which carry the trace_id, and the client
 	// tracing middleware; no resolver.
-	if len(opts) != 4 {
-		t.Fatalf("expected 4 options without a registry, got %d", len(opts))
+	if len(opts) != 8 {
+		t.Fatalf("expected 8 options without a registry, got %d", len(opts))
 	}
 	cfg.Service.Name = "order"
-	if opts, _ = ClientOptions(cfg); len(opts) != 5 {
-		t.Fatalf("expected the caller's name as a fifth option, got %d", len(opts))
+	if opts, _ = ClientOptions(cfg); len(opts) != 9 {
+		t.Fatalf("expected the caller's name as a ninth option, got %d", len(opts))
 	}
 }
 

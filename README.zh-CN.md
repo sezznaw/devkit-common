@@ -24,7 +24,6 @@ go get github.com/sezznaw/devkit-common@latest
 | `metricsx` | Prometheus 指标，单独端口（`metrics.enabled`，默认 9091）：Kitex/Hertz 每个方法的请求数、结果码、耗时直方图，对外 RPC 调用，Go 运行时，MySQL 连接池，Redis 命令，Kafka 事件；由部署抓取；详见下文 |
 | `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
 | `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
-| `etcdx`   | etcd v3 客户端 |
 | `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
 
 最小的服务入口：
@@ -355,6 +354,14 @@ webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPa
 返回 nil 就按路由的应答回（默认 200 "ok"，可 `WithReply`），返回 error 或 panic 回 500 并忘掉这个事件 id，厂商重试时会再跑。
 每个回调一条带 provider 和 event_id 的日志，指标 `callbacks_received_total{provider, http_route, result}`。
 handler 仍要幂等：厂商可能用两个 id 发同一件事。
+
+### 服务之间的调用：超时、重试、熔断
+
+`ClientOptions` 给本服务对其他服务的每次调用加上保护，默认值就是集群里该有的，`rpc_client:` 段只用来改它们：
+单次调用 3s 超时（`timeout`）、建连 1s（`connect_timeout`）、重试 1 次（`retries`）但只在请求根本没发出去时
+（没有实例、没有连接；超时或 handler 的错误不重试，因为那次可能已经执行了）、按被调服务和方法熔断（`breaker: false` 关闭）：
+至少 200 次调用里错误超过一半就立刻以 `kerrors.ErrCircuitBreak` 失败，直到下游恢复。写操作要重试的话由调用方自己带同一个
+request_id 再调，幂等中间件会回放结果。
 
 ### 用 `metricsx` 出指标
 
