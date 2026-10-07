@@ -545,8 +545,8 @@ An API service documents itself from its IDL. `make gen` runs
 file: it adds `api.body` to every bare struct field (the convention is POST +
 JSON), runs thriftgo with CloudWeGo's `thrift-gen-http-swagger` plugin, and
 writes `cmd/<service>/openapi.yaml`, which `main.go` embeds. With
-`docs.enabled` the service serves `/openapi.yaml` and `/docs` (Swagger UI,
-"Try it out" against the service itself). The response structs carry the
+`docs.enabled` the service serves `/openapi.yaml` and `/docs` (Scalar API Reference,
+"Send request" against the service itself) and `/openapi.json`. The response structs carry the
 envelope `{code, msg, data}`, so the page shows exactly what a client gets.
 Comments on methods and fields in the IDL become the descriptions; nothing
 else to write. On for local and dev, off in production.

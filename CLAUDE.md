@@ -470,8 +470,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   (`fieldLine` regex: "N: [optional|required] type name" with no "(" on the
   line) before running thriftgo; `Patch` edits info via yaml.Node to keep
   key order. `ServeDocs(h, cfg, spec)`: /openapi.yaml, /docs → redirect,
-  /docs/*any via hertz-contrib/swagger + swaggo/files (embedded UI), only
-  with `docs.enabled` (`kitexx.Config.Docs`). The hertz-service template
+  /docs is a page loading the embedded Scalar bundle (`hertzx/docs/scalar.js`,
+  4.4 MB, version in docs/README.md; the owner wanted the same look as the
+  Casual Casino docs, which use Scalar), /openapi.json is the yaml converted;
+  only with `docs.enabled` (`kitexx.Config.Docs`). hertz-contrib/swagger
+  was used first and dropped. The hertz-service template
   (0.15.0) installs the plugin in `make tools`, runs apidoc in `make gen`
   into cmd/<svc>/openapi.yaml (gitignored, embedded with go:embed by
   main.go) and calls ServeDocs after hertzx.New.

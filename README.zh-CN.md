@@ -368,7 +368,7 @@ request_id 再调，幂等中间件会回放结果。
 API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 `go run github.com/sezznaw/devkit-common/cmd/apidoc`：
 给没写注解的结构体字段补上 `api.body`（我们的约定是 POST + JSON），用 thriftgo 加 CloudWeGo 的 `thrift-gen-http-swagger`
 插件生成，写到 `cmd/<服务>/openapi.yaml`，`main.go` 把它嵌进二进制。开了 `docs.enabled`，服务就提供 `/openapi.yaml` 和
-`/docs`（Swagger UI，"Try it out" 直接打本服务）。响应结构体本身带着 `{code, msg, data}` 信封，所以页面显示的就是客户端
+`/docs`（Scalar 文档页，"Send request" 直接打本服务）和 `/openapi.json`。响应结构体本身带着 `{code, msg, data}` 信封，所以页面显示的就是客户端
 拿到的样子。IDL 里方法和字段的注释就是文档说明，不用再写别的。local 和 dev 开，生产关。
 
 ### 用 `metricsx` 出指标
