@@ -429,9 +429,17 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   on the header and compares case-insensitively in constant time; `{timestamp}`
   in the payload enables the skew window. Panics in Handle (unknown
   provider, no callback entry, custom without WithVerifier) are start-time
-  on purpose. Tests: hertz `ut`, miniredis, kfake (`archive_test.go`). Not
-  verified on dev yet: no provider service exists; the ingress of such a
-  service must not carry the office-only middleware.
+  on purpose. Tests: hertz `ut`, miniredis, kfake (`archive_test.go`). `webhookx.Server(rt)` (server.go) is the listener for a Kitex service:
+  one Hertz engine per Runtime (sync.Map keyed by *Runtime), the hertzx
+  middlewares, started through `rt.OnStart` (new: `Runtime.starters`, run
+  by `rt.Run` before Kafka and the RPC server; `RunStarters` for tests) and
+  stopped by an OnShutdown hook; the port is probed first because Hertz
+  panics on a taken port. `callbacks.enabled` false makes `Server` panic on
+  purpose. The owner's decision (2026-10-07): one vendor-integration
+  service, `ser-vendor`, Kitex for internal RPC plus this listener for
+  callbacks, in the provider namespace; no separate proxy service (the
+  namespace policy is the egress, the Ingress is the entry). The ingress of
+  that service must not carry the office-only middleware.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules

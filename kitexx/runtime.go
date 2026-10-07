@@ -50,6 +50,7 @@ type Runtime struct {
 
 	jobs      []jobx.Job
 	providers map[string]*httpx.Client
+	starters  []starter
 }
 
 // TenantEnv names the environment variable a deployment sets to say which

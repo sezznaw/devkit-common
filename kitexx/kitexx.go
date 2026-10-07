@@ -78,6 +78,11 @@ type Config struct {
 	// (`providers.odds-feed.base_url` ...); rt.Provider(name) is the client.
 	// A service with providers runs in the provider namespace (egress).
 	Providers map[string]httpx.Provider `yaml:"providers"`
+	// Callbacks: an HTTP listener for the callbacks providers send us, on a
+	// port of its own (the only one the deployment exposes to them, under
+	// /callbacks/). webhookx.Server(rt) builds it; it starts and stops with
+	// the RPC server. For the one service that integrates vendors.
+	Callbacks CallbacksConfig `yaml:"callbacks"`
 	// LogLevelDataID names a Nacos configuration whose content is a log level
 	// (debug, info, warn, error). The level of the running service follows
 	// it, which is how debug logging is switched on in production without a
@@ -289,6 +294,10 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 // gives in-flight requests up to drain_timeout. Only after all of that does
 // svr.Run return, which is when the OnShutdown hooks run.
 func (rt *Runtime) Run(svr server.Server) error {
+	if err := RunStarters(rt); err != nil {
+		zlog.Error("cannot start", zlog.Err(err))
+		return err
+	}
 	if rt.Kafka != nil {
 		if err := rt.Kafka.Start(context.Background()); err != nil {
 			zlog.Error("cannot start consumers", zlog.Err(err))
@@ -453,3 +462,50 @@ func ListenAddr(v string) (*net.TCPAddr, error) {
 }
 
 func nacosCloseShared() { nacosx.CloseShared() }
+
+// CallbacksConfig is the `callbacks:` section.
+type CallbacksConfig struct {
+	// Enabled starts the callback listener in rt.Run.
+	Enabled bool `yaml:"enabled"`
+	// Addr: a port ("8081", the default) or host:port. Never service.addr.
+	Addr string `yaml:"addr"`
+}
+
+// DefaultCallbacksPort is the callback port when callbacks.addr is empty;
+// the service chart exposes it.
+const DefaultCallbacksPort = 8081
+
+// ListenAddr resolves callbacks.addr.
+func (c CallbacksConfig) ListenAddr() (string, error) {
+	a := strings.TrimSpace(c.Addr)
+	if a == "" {
+		a = strconv.Itoa(DefaultCallbacksPort)
+	}
+	addr, err := ListenAddr(a)
+	if err != nil {
+		return "", fmt.Errorf("callbacks.addr: %w", err)
+	}
+	return addr.String(), nil
+}
+
+// OnStart registers something to start right before the RPC server does,
+// in rt.Run: the callback listener, a poller. Its stop goes through
+// OnShutdown as usual.
+func (rt *Runtime) OnStart(name string, fn func() error) {
+	rt.starters = append(rt.starters, starter{name, fn})
+}
+
+type starter struct {
+	name string
+	fn   func() error
+}
+
+// RunStarters runs what OnStart registered; rt.Run does it, tests may too.
+func RunStarters(rt *Runtime) error {
+	for _, st := range rt.starters {
+		if err := st.fn(); err != nil {
+			return fmt.Errorf("%s: %w", st.name, err)
+		}
+	}
+	return nil
+}

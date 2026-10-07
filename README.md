@@ -468,6 +468,18 @@ webhookx.Handle(rt, h, "payment-x", "/callbacks/payment-x/paid", func(ctx contex
 }, webhookx.WithReply(200, "application/json", `{"code":"SUCCESS"}`))
 ```
 
+On a Kitex service (the one that integrates vendors), the HTTP listener for
+callbacks is the framework's: `callbacks: {enabled: true, addr: 8081}` in
+the configuration, `webhookx.Server(rt)` in `app.Setup` returns the engine
+(tracing, metrics, request log, recovery already on it), `rt.Run` starts it
+right before the RPC server and stops it with it. The deployment exposes
+only that port to the internet, under `/callbacks/`.
+
+```go
+cb := webhookx.Server(rt)
+webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPaid)
+```
+
 What happens to every callback, in order: source address against
 `allow_cidrs` (403), body limit (413, default 1 MiB), signature (401;
 `verify.type` hmac-sha256 over a payload template with a timestamp window,

@@ -312,6 +312,15 @@ webhookx.Handle(rt, h, "payment-x", "/callbacks/payment-x/paid", func(ctx contex
 }, webhookx.WithReply(200, "application/json", `{"code":"SUCCESS"}`))
 ```
 
+在 Kitex 服务（对接厂商的那个服务）上，收回调的 HTTP 监听由框架提供：配置 `callbacks: {enabled: true, addr: 8081}`，
+`app.Setup` 里 `webhookx.Server(rt)` 返回引擎（trace、指标、请求日志、panic 恢复都已装好），`rt.Run` 在起 RPC 服务器之前
+把它起来、退出时一起停。部署只把这个端口的 `/callbacks/` 开给公网。
+
+```go
+cb := webhookx.Server(rt)
+webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPaid)
+```
+
 每个回调依次经过：来源地址对照 `allow_cidrs`（403）、body 上限（413，默认 1 MiB）、验签（401；`verify.type` 为 hmac-sha256
 对带时间戳窗口的模板签名、basic，或 `custom` 配 `webhookx.WithVerifier(fn)` 走厂商算法）、原始请求复制到 Kafka 留档主题
 （留档失败回 500 让厂商重试，没留住的绝不处理）、事件 id 查 Redis（重复投递直接应答、不跑 handler）、然后是 handler：
