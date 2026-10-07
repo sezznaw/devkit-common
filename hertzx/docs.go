@@ -37,7 +37,11 @@ func ServeDocs(h *server.Hertz, cfg kitexx.Config, spec []byte) {
 	if err != nil {
 		zlog.Warn("openapi.yaml does not parse; /openapi.json not served", zlog.Err(err))
 	}
-	page := []byte(strings.NewReplacer("{{title}}", cfg.Service.Name+" · API 文档").Replace(docsPage))
+	title := specTitle(spec)
+	if title == "" {
+		title = cfg.Service.Name
+	}
+	page := []byte(strings.NewReplacer("{{title}}", title+" · API 文档").Replace(docsPage))
 	h.GET("/openapi.yaml", func(_ context.Context, c *app.RequestContext) {
 		c.Data(200, "application/yaml; charset=utf-8", spec)
 	})
@@ -105,4 +109,18 @@ func normalize(v any) any {
 		return t
 	}
 	return v
+}
+
+// specTitle is info.title of the document: the browser tab shows the same
+// name as the page.
+func specTitle(spec []byte) string {
+	var doc struct {
+		Info struct {
+			Title string `yaml:"title"`
+		} `yaml:"info"`
+	}
+	if yaml.Unmarshal(spec, &doc) != nil {
+		return ""
+	}
+	return strings.TrimSpace(doc.Info.Title)
 }

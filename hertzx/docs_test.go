@@ -13,7 +13,7 @@ import (
 
 func TestServeDocs(t *testing.T) {
 	zlogtest.Capture(t)
-	spec := []byte("openapi: 3.0.3\ninfo: {title: t, version: v}\npaths: {}\n")
+	spec := []byte("openapi: 3.0.3\ninfo: {title: 玩家网关, version: v}\npaths: {}\n")
 	h := server.New(server.WithDisablePrintRoute(true))
 	cfg := kitexx.Config{}
 	cfg.Service.Name = "ser-api"
@@ -25,7 +25,7 @@ func TestServeDocs(t *testing.T) {
 	if w := ut.PerformRequest(h.Engine, "GET", "/openapi.json", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"openapi":"3.0.3"`) {
 		t.Errorf("openapi.json: %d %s", w.Code, w.Body.String())
 	}
-	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `id="api-reference"`) || !strings.Contains(w.Body.String(), "ser-api · API 文档") {
+	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `id="api-reference"`) || !strings.Contains(w.Body.String(), "玩家网关 · API 文档") {
 		t.Errorf("/docs page: %d", w.Code)
 	}
 	if w := ut.PerformRequest(h.Engine, "GET", "/docs/scalar.js", nil); w.Code != 200 || w.Body.Len() < 1_000_000 {
