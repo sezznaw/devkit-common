@@ -334,3 +334,22 @@ func TestOptionsRefusesALaptopInASharedNacos(t *testing.T) {
 		t.Fatalf("err = %v", err)
 	}
 }
+
+func TestBootstrapVersionFromEnv(t *testing.T) {
+	t.Setenv(VersionEnv, "abc1234")
+	cfg := Config{}
+	cfg.Service.Name = "x"
+	if err := Bootstrap(&cfg); err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Log.Version != "abc1234" {
+		t.Errorf("version from APP_VERSION: %q", cfg.Log.Version)
+	}
+	cfg = Config{}
+	cfg.Service.Name = "x"
+	cfg.Log.Version = "v9"
+	_ = Bootstrap(&cfg)
+	if cfg.Log.Version != "v9" {
+		t.Errorf("log.version wins: %q", cfg.Log.Version)
+	}
+}

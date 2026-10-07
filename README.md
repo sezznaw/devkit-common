@@ -556,6 +556,10 @@ sentence of a method's comment is its title, the rest its description. Three
 their path, `/v1/<domain>/...`; `/ping` goes under 系统). Nothing else to
 write. On for local and dev, off in production.
 
+### Version
+
+Every record and span carries `version`: `log.version` from the configuration, else `APP_VERSION` (the deployment sets it to the image tag), else the VCS revision compiled into the binary (`-dirty` when the tree was modified at build time, which CI's `go mod tidy` can cause; the environment variable avoids that).
+
 ### Metrics with `metricsx`
 
 ```yaml

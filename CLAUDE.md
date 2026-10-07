@@ -489,6 +489,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   main.go) and calls ServeDocs after hertzx.New.
 - `etcdx` was removed in v0.20.0: nothing in the stack runs etcd.
 
+- `kitexx.VersionEnv` (`APP_VERSION`, v0.24.0): `Bootstrap` fills `cfg.Log.Version`
+  from it when the configuration leaves it empty; the chart sets it to the
+  image tag. Found by the acceptance-test agent on 2026-10-07: the VCS
+  revision in CI builds came out `-dirty`.
+
 ## Versioning rules
 
 - Tags are plain semver (`v0.1.0`). Once a tag is pushed, proxy.golang.org

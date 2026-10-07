@@ -373,6 +373,10 @@ API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 
 `// @docs title: Sportsbook 玩家网关`、`// @docs description: ...`、`// @docs tag member: 会员`（接口按路径第二段 `/v1/<领域>/...`
 分组，`/ping` 归到"系统"）。不用再写别的。local 和 dev 开，生产关。
 
+### 版本号
+
+每条日志和 span 带的 `version`：配置里的 `log.version`，否则环境变量 `APP_VERSION`（部署把镜像 tag 注进来），否则编译进二进制的 git 提交号（构建时工作区有改动会带 `-dirty`，CI 的 `go mod tidy` 可能导致；用环境变量就不会）。
+
 ### 用 `metricsx` 出指标
 
 ```yaml

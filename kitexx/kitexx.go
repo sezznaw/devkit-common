@@ -187,6 +187,15 @@ func Bootstrap(cfg *Config) error {
 	if cfg.Log.Service == "" {
 		cfg.Log.Service, cfg.Log.ServiceNote = cfg.Service.Name, "from service.name"
 	}
+	// The version every record and span carries: log.version if set, else
+	// APP_VERSION, which the deployment sets to the image tag (the chart does;
+	// CI's `go mod tidy` would otherwise mark the VCS revision "-dirty"), else
+	// the VCS revision zlog reads from the binary.
+	if cfg.Log.Version == "" {
+		if v := strings.TrimSpace(os.Getenv(VersionEnv)); v != "" {
+			cfg.Log.Version = v
+		}
+	}
 	if cfg.Log.Env == "" {
 		cfg.Log.Env, cfg.Log.EnvNote = config.Env(), "from "+config.EnvVar
 		if os.Getenv(config.EnvVar) == "" {
@@ -523,3 +532,8 @@ func RunStarters(rt *Runtime) error {
 	}
 	return nil
 }
+
+// VersionEnv is the environment variable the deployment sets to the image
+// tag; it becomes log.version (the `version` of every record and span) when
+// the configuration does not set one.
+const VersionEnv = "APP_VERSION"
