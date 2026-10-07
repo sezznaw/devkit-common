@@ -16,16 +16,20 @@ func TestServeDocs(t *testing.T) {
 	spec := []byte("openapi: 3.0.3\ninfo: {title: t, version: v}\npaths: {}\n")
 	h := server.New(server.WithDisablePrintRoute(true))
 	cfg := kitexx.Config{}
+	cfg.Service.Name = "ser-api"
 	cfg.Docs.Enabled = true
 	ServeDocs(h, cfg, spec)
 	if w := ut.PerformRequest(h.Engine, "GET", "/openapi.yaml", nil); w.Code != 200 || !strings.Contains(w.Body.String(), "openapi: 3.0.3") {
 		t.Errorf("openapi.yaml: %d %s", w.Code, w.Body.String())
 	}
-	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); w.Code != 302 {
-		t.Errorf("/docs redirect: %d", w.Code)
+	if w := ut.PerformRequest(h.Engine, "GET", "/openapi.json", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"openapi":"3.0.3"`) {
+		t.Errorf("openapi.json: %d %s", w.Code, w.Body.String())
 	}
-	if w := ut.PerformRequest(h.Engine, "GET", "/docs/index.html", nil); w.Code != 200 || !strings.Contains(w.Body.String(), "swagger") {
-		t.Errorf("/docs/index.html: %d", w.Code)
+	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `id="api-reference"`) || !strings.Contains(w.Body.String(), "ser-api · API 文档") {
+		t.Errorf("/docs page: %d", w.Code)
+	}
+	if w := ut.PerformRequest(h.Engine, "GET", "/docs/scalar.js", nil); w.Code != 200 || w.Body.Len() < 1_000_000 {
+		t.Errorf("/docs/scalar.js: %d %d bytes", w.Code, w.Body.Len())
 	}
 	off := server.New(server.WithDisablePrintRoute(true))
 	ServeDocs(off, kitexx.Config{}, spec)
