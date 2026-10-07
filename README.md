@@ -389,6 +389,29 @@ err  = odds.PostJSON(ctx, "/v1/payout", req, &resp)   // a POST is never retried
 odds.R().SetContext(ctx).SetQueryParam(...)           // anything else: it is a *resty.Client
 ```
 
+Authentication is configuration too, `auth:` under the provider:
+
+```yaml
+    auth: {type: bearer, token: "${ODDS_FEED_TOKEN}"}
+    auth: {type: basic, username: "${PAY_USER}", password: "${PAY_PASS}"}
+    auth: {type: oauth2, token_url: "https://id.vendor.com/token", client_id: "${PAY_CLIENT_ID}", client_secret: "${PAY_CLIENT_SECRET}"}
+    auth: {type: hmac-sha256, secret: "${PAY_HMAC_SECRET}", header: X-Signature, payload: "{method}\n{path}\n{timestamp}\n{body}"}
+    auth: {type: custom}        # the vendor's own scheme: a Signer the integration sets
+```
+
+oauth2 is the client-credentials flow with the token cached and refreshed.
+hmac-sha256 signs a payload template ({method} {path} {query} {timestamp}
+{body}) and sends the timestamp in `timestamp_header` (default
+X-Timestamp); `encoding` hex or base64. For a scheme none of these fit,
+`type: custom` and in app.Setup `rt.Provider("pay").UseSigner(paysig.Sign)`,
+where `Sign(req *http.Request, body []byte) error` is a plain function in
+the integration's package that sets the vendor's headers; it runs on every
+attempt, with the body already read for it. Secrets come from the
+environment in every case: the deployment injects the `provider-secrets`
+Secret into every service, one variable per secret, named
+`<PROVIDER>_<FIELD>` (ODDS_FEED_API_KEY); the integration says which names
+it needs, the operator fills them in.
+
 Two guards sit under every call, raw `R()` calls included. `max_concurrent`
 (default 64) caps the calls in flight to one provider; the rest wait within
 their timeout. A circuit breaker opens after `breaker_failures` consecutive

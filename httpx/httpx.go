@@ -59,6 +59,10 @@ type Provider struct {
 	BreakerFailures *int `yaml:"breaker_failures"`
 	// BreakerOpenFor is how long the circuit stays open. Default 30s.
 	BreakerOpenFor config.Duration `yaml:"breaker_open_for"`
+	// Auth is how requests are authenticated: bearer, basic, hmac-sha256,
+	// oauth2 (client credentials) from configuration, or custom with a
+	// Signer the integration sets (UseSigner). Secrets are ${ENV} values.
+	Auth Auth `yaml:"auth"`
 	// Debug prints every request and response, headers and bodies, to the
 	// log at debug level. Honoured on a developer's machine only
 	// (APP_ENV local): in a deployment it is ignored with a warning,
@@ -111,7 +115,7 @@ func (p Provider) Validate(name string) error {
 			return fmt.Errorf("httpx: providers.%s.headers.%s is empty (is its environment variable set?)", name, k)
 		}
 	}
-	return nil
+	return p.Auth.Validate(name)
 }
 
 // Client is the client of one provider. It is a *resty.Client: use R() for
@@ -120,6 +124,7 @@ type Client struct {
 	*resty.Client
 	Name string
 	base *url.URL
+	auth *authTransport
 }
 
 // New builds the client of one provider. Every call through it gets: the
@@ -132,12 +137,14 @@ func New(name string, p Provider) (*Client, error) {
 		return nil, err
 	}
 	base, _ := url.Parse(p.BaseURL)
-	// resty -> guard (concurrency, breaker) -> otelhttp (span) -> pooled transport
-	traced := otelhttp.NewTransport(newTransport(p),
+	// resty -> auth (sign each attempt) -> guard (concurrency, breaker) -> otelhttp (span) -> pooled transport
+	pool := newTransport(p)
+	traced := otelhttp.NewTransport(pool,
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method + " " + name + " " + r.URL.Path }),
 		otelhttp.WithSpanOptions(trace.WithAttributes(attribute.String("peer.service", name))))
+	auth := newAuthTransport(name, p.Auth, newGuard(name, p, traced), pool)
 	rc := resty.New().
-		SetTransport(newGuard(name, p, traced)).
+		SetTransport(auth).
 		SetBaseURL(p.BaseURL).
 		SetHeaders(p.Headers).
 		SetTimeout(p.Timeout.Or(defaultTimeout)).
@@ -147,7 +154,7 @@ func New(name string, p Provider) (*Client, error) {
 		SetRetryResetReaders(true).
 		SetLogger(restyLogger{name}).
 		AddRetryCondition(retryCondition)
-	c := &Client{Client: rc, Name: name, base: base}
+	c := &Client{Client: rc, Name: name, base: base, auth: auth}
 	rc.OnAfterResponse(c.afterResponse)
 	rc.OnError(c.onError)
 	if p.Debug {

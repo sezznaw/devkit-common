@@ -53,7 +53,11 @@ type Runtime struct {
 }
 
 // TenantEnv names the environment variable a deployment sets to say which
-// tenant it serves; mysql.source platform looks that tenant's database up.
+// tenant it serves; mysql.source platform looks that tenant's database up
+// in the deployment's datasource table. One tenant is one complete
+// deployment (own machines, own databases, own Nacos), so the table holds
+// one tenant and "platform" means "this deployment's registry of data
+// sources", not a layer shared across tenants.
 const TenantEnv = "TENANT_CODE"
 
 // infraDataID is the Nacos configuration that holds the addresses of the

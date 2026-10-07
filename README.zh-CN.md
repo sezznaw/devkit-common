@@ -255,6 +255,22 @@ err  = odds.PostJSON(ctx, "/v1/payout", req, &resp)   // POST 框架绝不重试
 odds.R().SetContext(ctx).SetQueryParam(...)           // 其他需求：它就是一个 *resty.Client
 ```
 
+认证也是配置，写在 provider 的 `auth:` 下：
+
+```yaml
+    auth: {type: bearer, token: "${ODDS_FEED_TOKEN}"}
+    auth: {type: basic, username: "${PAY_USER}", password: "${PAY_PASS}"}
+    auth: {type: oauth2, token_url: "https://id.vendor.com/token", client_id: "${PAY_CLIENT_ID}", client_secret: "${PAY_CLIENT_SECRET}"}
+    auth: {type: hmac-sha256, secret: "${PAY_HMAC_SECRET}", header: X-Signature, payload: "{method}\n{path}\n{timestamp}\n{body}"}
+    auth: {type: custom}        # 厂商私有算法：对接代码设一个 Signer
+```
+
+oauth2 是 client credentials 流程，token 缓存并在过期前刷新。hmac-sha256 对一个模板（{method} {path} {query} {timestamp} {body}）
+签名，时间戳放在 `timestamp_header`（默认 X-Timestamp），`encoding` 为 hex 或 base64。都不合适的厂商用 `type: custom`，在 app.Setup 里
+`rt.Provider("pay").UseSigner(paysig.Sign)`，`Sign(req *http.Request, body []byte) error` 是对接代码包里的一个普通函数，
+只负责按厂商算法设请求头；每次尝试都会调用，body 已经替它读好。所有密钥都来自环境变量：部署把 `provider-secrets` 这个 Secret
+注入每个服务，一个密钥一个变量，命名 `<厂商>_<字段>`（ODDS_FEED_API_KEY）；对接同事说需要哪些名字，运维填值。
+
 每次调用下面有两道保护，裸用 `R()` 也一样。`max_concurrent`（默认 64）限制对一个 provider 同时在途的调用数，多出来的在自己的
 超时内排队。熔断器在连续 `breaker_failures` 次失败（网络错误、429、5xx；默认 5）后打开，`breaker_open_for`（默认 30s）内
 所有调用立刻以 `httpx.ErrCircuitOpen` 失败而不是等满超时；然后放一个探测请求过去，成功就恢复。状态变化有日志，

@@ -406,7 +406,18 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   unwrapped again on the way out, so the caller still sees the status;
   `ErrCircuitOpen` is excluded from retries. `newTransport` sets
   MaxIdleConnsPerHost 100 (Go default 2) and 5s dial/TLS timeouts. `debug`
-  is honoured only when `config.IsLocal()`.
+  is honoured only when `config.IsLocal()`. `auth.go` is another RoundTripper, first in the chain (resty → auth →
+  guard → otelhttp → pool) so every attempt is signed afresh: bearer, basic,
+  oauth2 (x/oauth2 clientcredentials + ReuseTokenSource; the token endpoint
+  uses the pooled transport through `oauth2.HTTPClient` in the ctx),
+  hmac-sha256 over a payload template, or custom (`Signer`, set with
+  `UseSigner`, stored in an atomic.Pointer; before it is set every call is
+  `ErrNoSigner`). `readBody` reads the body for signing and restores Body
+  and GetBody so the request can still be sent and retried. Owner's model
+  (decided 2026-10-07): one tenant = one complete deployment, so vendor
+  credentials are the deployment's environment (Secret `provider-secrets`),
+  no per-tenant lookup; `TENANT_CODE` and the "platform" database were kept
+  with their comments re-characterised as this deployment's registry.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules
