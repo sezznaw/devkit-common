@@ -10,7 +10,12 @@
 // envelope {code, msg, data} themselves, so the document shows exactly what
 // the client receives. Afterwards the title and version are filled in.
 //
-//	go run github.com/sezznaw/devkit-common/cmd/apidoc -idl ../idl/ser-api/ser-api.thrift -out cmd/ser-api/openapi.yaml -title "ser-api" -version v1.2.3
+// `// @docs title: ...`, `// @docs description: ...` and `// @docs tag <domain>: <名字>`
+// lines in the IDL name the document and its sections (docs.go); the first
+// line of a method's comment is its summary. -title / -description on the
+// command line win over the directives.
+//
+//	go run github.com/sezznaw/devkit-common/cmd/apidoc -idl ../idl/ser-api/ser-api.thrift -out cmd/ser-api/openapi.yaml -version v1.2.3
 package main
 
 import (
@@ -82,7 +87,18 @@ func run(idl, out, title, version, desc string) error {
 	if err != nil {
 		return fmt.Errorf("the plugin wrote no openapi.yaml: %w", err)
 	}
-	patched, err := Patch(doc, title, version, desc, strings.TrimSuffix(filepath.Base(idl), ".thrift"))
+	src, err := os.ReadFile(idl)
+	if err != nil {
+		return err
+	}
+	d := ParseDirectives(src)
+	if title == "" {
+		title = d.Title
+	}
+	if desc == "" {
+		desc = d.Description
+	}
+	patched, err := Patch(doc, title, version, desc, strings.TrimSuffix(filepath.Base(idl), ".thrift"), d)
 	if err != nil {
 		return err
 	}
@@ -128,7 +144,7 @@ func Annotate(src []byte) []byte {
 
 // Patch fills info.title / version / description, keeping the document's
 // order (a yaml.Node edit, not a map round trip).
-func Patch(doc []byte, title, version, desc, fallback string) ([]byte, error) {
+func Patch(doc []byte, title, version, desc, fallback string, d Directives) ([]byte, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(doc, &root); err != nil {
 		return nil, fmt.Errorf("parse openapi.yaml: %w", err)
@@ -155,6 +171,7 @@ func Patch(doc []byte, title, version, desc, fallback string) ([]byte, error) {
 	} else if d := mapGet(info, "description"); d != nil && d.Value == "API description" {
 		mapDel(info, "description")
 	}
+	Localize(top, d)
 	out, err := yaml.Marshal(&root)
 	if err != nil {
 		return nil, err

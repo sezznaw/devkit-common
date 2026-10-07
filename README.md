@@ -548,8 +548,13 @@ writes `cmd/<service>/openapi.yaml`, which `main.go` embeds. With
 `docs.enabled` the service serves `/openapi.yaml` and `/docs` (Scalar API Reference,
 "Send request" against the service itself) and `/openapi.json`. The response structs carry the
 envelope `{code, msg, data}`, so the page shows exactly what a client gets.
-Comments on methods and fields in the IDL become the descriptions; nothing
-else to write. On for local and dev, off in production.
+Comments on methods and fields in the IDL become the descriptions: the first
+sentence of a method's comment is its title, the rest its description. Three
+`// @docs` lines at the top of the IDL name the page and its sections:
+`// @docs title: Sportsbook 玩家网关`, `// @docs description: ...`,
+`// @docs tag member: 会员` (operations are grouped by the second segment of
+their path, `/v1/<domain>/...`; `/ping` goes under 系统). Nothing else to
+write. On for local and dev, off in production.
 
 ### Metrics with `metricsx`
 

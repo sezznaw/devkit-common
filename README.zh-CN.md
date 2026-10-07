@@ -369,7 +369,9 @@ API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 
 给没写注解的结构体字段补上 `api.body`（我们的约定是 POST + JSON），用 thriftgo 加 CloudWeGo 的 `thrift-gen-http-swagger`
 插件生成，写到 `cmd/<服务>/openapi.yaml`，`main.go` 把它嵌进二进制。开了 `docs.enabled`，服务就提供 `/openapi.yaml` 和
 `/docs`（Scalar 文档页，"Send request" 直接打本服务）和 `/openapi.json`。响应结构体本身带着 `{code, msg, data}` 信封，所以页面显示的就是客户端
-拿到的样子。IDL 里方法和字段的注释就是文档说明，不用再写别的。local 和 dev 开，生产关。
+拿到的样子。IDL 里方法和字段的注释就是文档说明：方法注释的第一句是接口标题，其余是说明。IDL 开头的三种 `// @docs` 行给页面起名和分组：
+`// @docs title: Sportsbook 玩家网关`、`// @docs description: ...`、`// @docs tag member: 会员`（接口按路径第二段 `/v1/<领域>/...`
+分组，`/ping` 归到"系统"）。不用再写别的。local 和 dev 开，生产关。
 
 ### 用 `metricsx` 出指标
 
