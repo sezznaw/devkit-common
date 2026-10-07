@@ -83,6 +83,11 @@ type Config struct {
 	// (`providers.odds-feed.base_url` ...); rt.Provider(name) is the client.
 	// A service with providers runs in the provider namespace (egress).
 	Providers map[string]httpx.Provider `yaml:"providers"`
+	// Docs: docs.enabled makes an API service serve /docs and /openapi.yaml
+	// (hertzx.ServeDocs; the document is generated from the IDL by make gen).
+	Docs struct {
+		Enabled bool `yaml:"enabled"`
+	} `yaml:"docs"`
 	// RPCClient: timeout, retry and circuit breaker of the calls this
 	// service makes to other services (ClientOptions). Defaults suit the
 	// cluster; the section is only for changing them.

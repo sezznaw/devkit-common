@@ -463,6 +463,18 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `RPCInfo2Key` (service + method), closed by an OnShutdown hook. Section
   `rpc_client:` (`RPCClientConfig`) changes them. `TestClientOptions` counts
   these options (8 without a registry, 9 with the caller's name).
+- `cmd/apidoc` + `hertzx/docs.go`: OpenAPI from the IDL. The CloudWeGo plugin
+  `thrift-gen-http-swagger` documents only annotated fields and emits
+  `responses: {}` for a response struct without `api.body` on its fields, so
+  `Annotate` adds `api.body="<name>"` to every bare field of a temp copy
+  (`fieldLine` regex: "N: [optional|required] type name" with no "(" on the
+  line) before running thriftgo; `Patch` edits info via yaml.Node to keep
+  key order. `ServeDocs(h, cfg, spec)`: /openapi.yaml, /docs → redirect,
+  /docs/*any via hertz-contrib/swagger + swaggo/files (embedded UI), only
+  with `docs.enabled` (`kitexx.Config.Docs`). The hertz-service template
+  (0.15.0) installs the plugin in `make tools`, runs apidoc in `make gen`
+  into cmd/<svc>/openapi.yaml (gitignored, embedded with go:embed by
+  main.go) and calls ServeDocs after hertzx.New.
 - `etcdx` was removed in v0.20.0: nothing in the stack runs etcd.
 
 ## Versioning rules
