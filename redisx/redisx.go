@@ -134,6 +134,7 @@ func Open(ctx context.Context, t Target, cfg Config) (*redis.Client, error) {
 		_ = cli.Close()
 		return nil, fmt.Errorf("redisx: ping %s db %d: %w (is the server up, is redis.addr right, and does the deployment set the password?)", t.Addr, t.DB, err)
 	}
+	cli.AddHook(metricsHook{})
 	if err := redisotel.InstrumentTracing(cli, redisotel.WithDBStatement(false)); err != nil {
 		_ = cli.Close()
 		return nil, fmt.Errorf("redisx: tracing: %w", err)

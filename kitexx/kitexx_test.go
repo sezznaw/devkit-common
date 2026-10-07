@@ -37,8 +37,8 @@ func TestOptionsWithoutRegistry(t *testing.T) {
 	}
 	// basic info, listen address, tracing, logging and idempotency
 	// middlewares, meta handler, drain timeout; no registry.
-	if len(opts) != 7 {
-		t.Fatalf("expected 7 options without a registry, got %d", len(opts))
+	if len(opts) != 8 {
+		t.Fatalf("expected 8 options without a registry, got %d", len(opts))
 	}
 }
 
@@ -141,12 +141,12 @@ func TestClientOptions(t *testing.T) {
 	}
 	// TTHeader and its meta handler, which carry the trace_id, and the client
 	// tracing middleware; no resolver.
-	if len(opts) != 3 {
-		t.Fatalf("expected 3 options without a registry, got %d", len(opts))
+	if len(opts) != 4 {
+		t.Fatalf("expected 4 options without a registry, got %d", len(opts))
 	}
 	cfg.Service.Name = "order"
-	if opts, _ = ClientOptions(cfg); len(opts) != 4 {
-		t.Fatalf("expected the caller's name as a fourth option, got %d", len(opts))
+	if opts, _ = ClientOptions(cfg); len(opts) != 5 {
+		t.Fatalf("expected the caller's name as a fifth option, got %d", len(opts))
 	}
 }
 

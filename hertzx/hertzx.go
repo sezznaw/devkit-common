@@ -73,7 +73,7 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 		server.WithDisablePrintRoute(true),
 	}, opts...)
 	h := server.New(all...)
-	h.Use(Tracing(), RequestLog(), Recovery())
+	h.Use(Tracing(), Metrics(), RequestLog(), Recovery())
 	return h, nil
 }
 

@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
+| `metricsx` | Prometheus 指标，单独端口（`metrics.enabled`，默认 9091）：Kitex/Hertz 每个方法的请求数、结果码、耗时直方图，对外 RPC 调用，Go 运行时，MySQL 连接池，Redis 命令，Kafka 事件；由部署抓取；详见下文 |
 | `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
 | `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
 | `etcdx`   | etcd v3 客户端 |
@@ -232,6 +233,29 @@ mysql:
 - `rt.Centrifugo.ConnectionToken("42")`：给登录后的客户端签连接 JWT（HS256，`token_ttl` 默认 24h），
   网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推
 - `History(ctx, channel, n)`：取频道最近的消息（命名空间开了 history 时），测试和断线重连用
+
+### 用 `metricsx` 出指标
+
+```yaml
+metrics:
+  enabled: true     # dev / uat / prod 打开；本机关掉（两个服务会抢端口）
+  addr: 9091        # 默认值，服务 chart 抓的就是这个端口
+```
+
+不用写代码：开了 `metrics.enabled`，框架在这个端口提供 `/metrics`（和 `/healthz`），与服务自己的端口分开，
+所以永远不会从 ingress 暴露出去。记录的指标：
+
+- `rpc_server_requests_total{rpc_service, rpc_method, code}` 和 `rpc_server_duration_seconds`：处理的每个 RPC；
+  `code` 是 `ok`、`BizStatusError` 的业务码（码表有限，在 idl 仓库）或 `error`
+- `rpc_client_requests_total` / `rpc_client_duration_seconds`：本服务发出的调用，按被调服务分
+- `http_server_requests_total{http_method, http_route, status}` / `http_server_duration_seconds`（Hertz）：
+  route 是 IDL 里的模式，不是原始路径；没匹配到路由的请求记为 `unmatched`
+- `go_sql_*`（MySQL 连接池，按库）、`redis_commands_total{cmd, status}` / `redis_command_duration_seconds`、
+  `kafka_events_published_total`、`kafka_events_handled_total{topic, result}`（`ok`、`retried`、`dlq`）、
+  `kafka_records_produced_total`、`kafka_records_fetched_total`、`kafka_broker_connects_total`，以及 Go 运行时和进程指标
+
+服务自己的指标：包顶层 `promauto.With(metricsx.Registry).NewCounter(...)`；Prometheus 默认注册表不会被提供。
+端口被占用是启动时的一条告警，不是启动失败。
 
 ### 用 `jobx` 写定时任务
 

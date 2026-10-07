@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
 | `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
+| `metricsx` | Prometheus metrics on a port of their own (`metrics.enabled`, default port 9091): requests by method and result code with latency histograms for Kitex and Hertz, calls made to other services, Go runtime, MySQL pool, Redis commands, Kafka events; the deployment scrapes it; see below |
 | `jobx`    | scheduled jobs: a service lists them in `app/jobs.go` (name, cron schedule, timeout, function), the framework runs one per `--job=<name>` with a root span, a run id in the log, a lock, a timeout and an exit code, and `--list-jobs` is what the deployment turns into CronJobs; see below |
 | `redisx`  | Redis / Valkey from the `redis:` section, the rules of `mysqlx` (enabled, source static or platform), every command a span; the idempotency middleware uses it |
 | `etcdx`   | etcd v3 client |
@@ -366,6 +367,37 @@ names. The client is `rt.Centrifugo`.
   to `user:<id>`
 - `History(ctx, channel, n)`: the last messages of a channel (when the
   namespace keeps history), for tests and reconnecting clients
+
+### Metrics with `metricsx`
+
+```yaml
+metrics:
+  enabled: true     # dev / uat / prod; off on a laptop (two services would fight over the port)
+  addr: 9091        # the default; the service chart scrapes this port
+```
+
+Nothing to write: with `metrics.enabled` the framework serves `/metrics`
+(and `/healthz`) on that port, apart from the service's own port so that it
+is never reachable through the ingress, and records
+
+- `rpc_server_requests_total{rpc_service, rpc_method, code}` and
+  `rpc_server_duration_seconds`: every RPC handled; `code` is `ok`, the
+  business code of a `BizStatusError` (bounded by the table in the idl
+  repository), or `error`
+- `rpc_client_requests_total` / `rpc_client_duration_seconds`: the calls
+  this service makes, by the service called
+- `http_server_requests_total{http_method, http_route, status}` /
+  `http_server_duration_seconds` (Hertz): the route is the IDL pattern,
+  never the raw path; a request that matched no route is `unmatched`
+- `go_sql_*` (the MySQL pool, by database), `redis_commands_total{cmd,
+  status}` / `redis_command_duration_seconds`, `kafka_events_published_total`,
+  `kafka_events_handled_total{topic, result}` (`ok`, `retried`, `dlq`),
+  `kafka_records_produced_total`, `kafka_records_fetched_total`,
+  `kafka_broker_connects_total`, and the Go runtime and process collectors
+
+A metric of the service's own: `promauto.With(metricsx.Registry).NewCounter(...)`
+at package level; the default Prometheus registry is not served. A port that
+is taken is a warning at start, not a failure.
 
 ### Scheduled jobs with `jobx`
 

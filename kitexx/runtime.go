@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -16,6 +17,7 @@ import (
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/jobx"
 	"github.com/sezznaw/devkit-common/kafkax"
+	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/zlog"
@@ -65,6 +67,7 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 		return nil, err
 	}
 	rt := &Runtime{Config: cfg}
+	rt.serveMetrics()
 	if err := rt.openMySQL(); err != nil {
 		return nil, err
 	}
@@ -253,6 +256,9 @@ func (rt *Runtime) openMySQL() error {
 		return err
 	}
 	rt.DB = db
+	if sqlDB, err := db.DB(); err == nil {
+		metricsx.RegisterDBStats(sqlDB, target.DB)
+	}
 	zlog.Info("mysql connected", zlog.Str("addr", target.Addr), zlog.Str("db", target.DB), zlog.Str("user", target.User),
 		zlog.Str("source", cfg.MySQL.SourceName()), zlog.Str("role", cfg.MySQL.RoleName()))
 	OnShutdown("mysql close", func() error { return mysqlx.Close(db) })
@@ -339,4 +345,26 @@ func isLoopback(addr string) bool {
 	}
 	ip := net.ParseIP(host)
 	return ip != nil && ip.IsLoopback()
+}
+
+// serveMetrics starts the /metrics listener when metrics.enabled is set. A
+// port that is taken (two services on one laptop) is a warning, not a start
+// failure: metrics are how the service is watched, not what it does.
+func (rt *Runtime) serveMetrics() {
+	cfg := rt.Config
+	if !cfg.Metrics.Enabled {
+		zlog.Info("metrics off", zlog.Str("hint", "set metrics.enabled: true in conf/<env>.yaml; deployments scrape port "+strconv.Itoa(metricsx.DefaultPort)))
+		return
+	}
+	addr, shutdown, err := metricsx.Serve(cfg.Metrics)
+	if err != nil {
+		zlog.Warn("metrics not served", zlog.Err(err))
+		return
+	}
+	OnShutdown("metrics", func() error {
+		ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+		defer cancel()
+		return shutdown(ctx)
+	})
+	zlog.Info("metrics on", zlog.Str("addr", addr), zlog.Str("path", "/metrics"))
 }

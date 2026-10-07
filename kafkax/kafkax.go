@@ -24,6 +24,7 @@ import (
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -163,6 +164,7 @@ func Open(ctx context.Context, t Target, cfg Config, service, tenant string) (*C
 	}
 	tracer := kotel.NewTracer()
 	hooks := kotel.NewKotel(kotel.WithTracer(tracer)).Hooks()
+	hooks = append(hooks, metricsHook{})
 	c := &Client{cfg: cfg, target: t, service: service, tenant: tenant, tracer: tracer, hooks: hooks}
 	prod, err := kgo.NewClient(append(c.baseOpts(),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
@@ -219,9 +221,11 @@ func (c *Client) Publish(ctx context.Context, topic, key, eventType string, data
 	}
 	start := time.Now()
 	if err := c.prod.ProduceSync(ctx, rec).FirstErr(); err != nil {
+		metricsx.KafkaEventsPublished.WithLabelValues(topic, "error").Inc()
 		zlog.Ctx(ctx).Error("event not published", zlog.Str("topic", topic), zlog.Str("type", eventType), zlog.Str("key", key), zlog.Err(err))
 		return fmt.Errorf("kafkax: publish %s to %s: %w", eventType, topic, err)
 	}
+	metricsx.KafkaEventsPublished.WithLabelValues(topic, "ok").Inc()
 	zlog.Ctx(ctx).Info("event published", zlog.Str("topic", topic), zlog.Str("type", eventType), zlog.Str("key", key), zlog.Str("event_id", ev.ID), zlog.Dur("latency", time.Since(start)))
 	return nil
 }
@@ -299,27 +303,32 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 	log := zlog.Ctx(ctx).With(zlog.Str("topic", r.Topic), zlog.Str("key", ev.Key), zlog.Int("partition", r.Partition), zlog.Int("offset", r.Offset))
 	if err := json.Unmarshal(r.Value, ev); err != nil {
 		log.Error("event is not an envelope; parked", zlog.Err(err))
+		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "dlq").Inc()
 		c.park(ctx, r, err)
 		return
 	}
+	defer func() { metricsx.KafkaHandleDuration.WithLabelValues(r.Topic).Observe(time.Since(start).Seconds()) }()
 	log = log.With(zlog.Str("type", ev.Type), zlog.Str("event_id", ev.ID))
 	span.SetAttributes(attribute.String("event.type", ev.Type), attribute.String("event.id", ev.ID))
 
 	var err error
 	for attempt := 1; attempt <= c.cfg.retries(); attempt++ {
 		if err = safely(ctx, h, ev); err == nil {
+			metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "ok").Inc()
 			log.Info("event handled", zlog.Int("attempt", attempt), zlog.Dur("latency", time.Since(start)))
 			return
 		}
 		if ctx.Err() != nil {
 			return
 		}
+		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "retried").Inc()
 		log.Warn("handler failed", zlog.Int("attempt", attempt), zlog.Err(err))
 		time.Sleep(time.Duration(attempt) * 200 * time.Millisecond)
 	}
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
 	log.Error("event parked in dlq after retries", zlog.Err(err))
+	metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "dlq").Inc()
 	c.park(ctx, r, err)
 }
 

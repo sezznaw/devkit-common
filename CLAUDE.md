@@ -366,6 +366,23 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   registration, no consumers). The templates' `app/jobs.go` is the once file
   with `Jobs(rt)`, called with an empty Runtime for the list, so it must only
   register, never connect.
+- `metricsx`: Prometheus on client_golang, one process registry
+  (`metricsx.Registry`, Go + process collectors; never the default
+  registry), served by `Serve` on `metrics.addr` (default 9091, `Serve` opens
+  the listener so a taken port is its error; `Runtime.serveMetrics` turns
+  that into a WARN and goes on). Middlewares: `kitexx.ServerMetrics` /
+  `ClientMetrics` (after the tracing middleware in `Options` /
+  `ClientOptions`; `resultCode` is ok / biz code / error, never an error
+  string, label cardinality), `hertzx.Metrics` (route = `c.FullPath()` or
+  `unmatched`). `mysqlx` pool via `collectors.NewDBStatsCollector` in
+  `openMySQL` (`metricsx.Register` tolerates a duplicate), `redisx`
+  `metricsHook` (go-redis Hook, added in `Open`), `kafkax` `metricsHook`
+  (own franz-go hook; kprom was tried and dropped: it registers its vectors
+  in `OnNewClient`, so a second client in one process panics with a
+  duplicate registration) plus event counters in `Publish` / `handle`.
+  Tests use `prometheus/testutil`. The option counts in
+  `TestOptionsWithoutRegistry` / `TestClientOptions` include the metrics
+  middlewares.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules

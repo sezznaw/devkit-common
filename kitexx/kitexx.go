@@ -25,6 +25,7 @@ import (
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/kafkax"
+	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/otelx"
@@ -67,6 +68,11 @@ type Config struct {
 	// Centrifugo, when enabled, is Runtime.Centrifugo: Publish to channels,
 	// ConnectionToken for clients.
 	Centrifugo centrifugox.Config `yaml:"centrifugo"`
+	// Metrics: metrics.enabled serves Prometheus metrics on metrics.addr
+	// (default port 9091): requests by method and code, latency histograms,
+	// Go runtime, MySQL pool, Redis commands, Kafka client. Deployments scrape
+	// it; off on a laptop.
+	Metrics metricsx.Config `yaml:"metrics"`
 	// LogLevelDataID names a Nacos configuration whose content is a log level
 	// (debug, info, warn, error). The level of the running service follows
 	// it, which is how debug logging is switched on in production without a
@@ -124,6 +130,7 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
 		server.WithServiceAddr(addr),
 		server.WithMiddleware(ServerTracing()),
+		server.WithMiddleware(ServerMetrics()),
 		server.WithMiddleware(LoggingMiddleware()),
 		server.WithMiddleware(rt.Idempotency()),
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
@@ -252,6 +259,7 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 		client.WithTransportProtocol(transport.TTHeader),
 		client.WithMetaHandler(transmeta.ClientTTHeaderHandler),
 		client.WithMiddleware(ClientTracing()),
+		client.WithMiddleware(ClientMetrics()),
 	}
 	if cfg.Service.Name != "" {
 		// Who is calling: the "from" of the request log of the service called.
