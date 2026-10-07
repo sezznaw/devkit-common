@@ -106,6 +106,12 @@ var (
 	CallbacksReceived = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "callbacks_received_total", Help: "Provider callbacks received (webhookx), by provider, route and result: ok, duplicate, bad_source, bad_signature, too_large, archive_failed, dedupe_unavailable, handler_error.",
 	}, []string{"provider", "http_route", "result"})
+	S3Requests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "s3_requests_total", Help: "Object storage calls (s3x), by operation and result: ok, not_found, error.",
+	}, []string{"op", "status"})
+	S3Duration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
+		Name: "s3_request_duration_seconds", Help: "Time an object storage call took.", Buckets: DurationBuckets,
+	}, []string{"op"})
 	KafkaEventsPublished = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_published_total", Help: "Events published by kafkax, by topic and result.",
 	}, []string{"topic", "status"})

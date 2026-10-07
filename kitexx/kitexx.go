@@ -31,6 +31,7 @@ import (
 	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/otelx"
 	"github.com/sezznaw/devkit-common/redisx"
+	"github.com/sezznaw/devkit-common/s3x"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -69,6 +70,10 @@ type Config struct {
 	// Centrifugo, when enabled, is Runtime.Centrifugo: Publish to channels,
 	// ConnectionToken for clients.
 	Centrifugo centrifugox.Config `yaml:"centrifugo"`
+	// S3: s3.enabled opens the object storage (SeaweedFS on dev) as rt.S3,
+	// one bucket under a prefix of the service's own; source platform reads
+	// the datasource row of kind s3.
+	S3 s3x.Config `yaml:"s3"`
 	// Metrics: metrics.enabled serves Prometheus metrics on metrics.addr
 	// (default port 9091): requests by method and code, latency histograms,
 	// Go runtime, MySQL pool, Redis commands, Kafka client. Deployments scrape

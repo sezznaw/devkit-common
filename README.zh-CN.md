@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
+| `s3x`     | 对象存储（dev 是 SeaweedFS，以后可换任何 S3），按 `s3:` 配置：`rt.S3.Put/Get/Stat/List/Delete`、预签名下载和上传链接，所有文件在服务自己的前缀下；source static 或本部署的数据源表；每次调用一个 span 和一条指标；详见下文 |
 | `httpx`   | 调外部 HTTP 接口（resty + otelhttp）：`providers:` 里登记 base URL、超时、重试、来自环境变量的头；`rt.Provider("odds-feed").GetJSON(ctx, path, &out)`；trace 带过去，每次调用一条不含密钥的日志，指标；有 providers 的服务必须部署在 provider namespace；详见下文 |
 | `webhookx` | 厂商回调我们（支付结果、赛果结算），在 provider namespace 的 Hertz 服务上：`webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`；来源 IP、验签（hmac-sha256、basic 或厂商私有 Verifier）、原始报文留档到 Kafka、按事件 id 用 Redis 去重、handler 出错回 500 让厂商重试、指标；详见下文 |
 | `metricsx` | Prometheus 指标，单独端口（`metrics.enabled`，默认 9091）：Kitex/Hertz 每个方法的请求数、结果码、耗时直方图，对外 RPC 调用，Go 运行时，MySQL 连接池，Redis 命令，Kafka 事件；由部署抓取；详见下文 |
@@ -235,6 +236,33 @@ mysql:
 - `rt.Centrifugo.ConnectionToken("42")`：给登录后的客户端签连接 JWT（HS256，`token_ttl` 默认 24h），
   网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推
 - `History(ctx, channel, n)`：取频道最近的消息（命名空间开了 history 时），测试和断线重连用
+
+### 用 `s3x` 存文件
+
+```yaml
+s3:
+  enabled: true
+  source: platform      # dev / uat / prod：数据源表 kind=s3 那行（地址、桶、密钥变量名）
+  # source: static      # 本机：docker run -d -p 8333:8333 chrislusf/seaweedfs server -s3
+  # endpoint: "http://127.0.0.1:8333"
+  # bucket: sportsbook-dev-assets
+  # prefix: ser-user    # 默认是服务名；所有 key 都在它下面
+```
+
+```go
+err  := rt.S3.Put(ctx, "avatars/42.png", file, "image/png")
+data, err := rt.S3.GetBytes(ctx, "kyc/42/front.jpg")
+url, err  := rt.S3.PresignGet(ctx, "exports/2026-10.xlsx", 10*time.Minute)   // 客户端直接下载
+url, err  := rt.S3.PresignPut(ctx, "avatars/42.png", "image/png", 5*time.Minute) // 客户端直接上传
+objs, err := rt.S3.List(ctx, "avatars", 100)
+err  = rt.S3.Delete(ctx, "avatars/42.png")
+```
+
+一套部署一个桶，一个服务一个前缀（默认服务名），服务之间碰不到彼此的文件；key 是 "avatars/42.png" 这样的路径。
+不存在返回 `s3x.ErrNotFound`。大文件走预签名链接，不经过服务。其他需求用 `rt.S3.Raw()` 拿 AWS SDK 客户端。
+每次调用是一个 span（otelaws）、一条 debug 日志和 `s3_requests_total{op, status}` / `s3_request_duration_seconds`。
+dev 的凭证是 SeaweedFS 的 admin 身份，放在 `app-datasources`（S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY）；正式环境给业务
+单独建一个只能访问这个桶的身份。
 
 ### 用 `httpx` 调外部接口
 

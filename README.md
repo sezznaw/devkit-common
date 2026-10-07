@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
 | `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
+| `s3x`     | object storage (SeaweedFS on dev, any S3 later) from the `s3:` section: `rt.S3.Put/Get/Stat/List/Delete`, presigned download and upload URLs, every file under the service's own prefix; source static or the deployment's datasource row; every call a span and a metric; see below |
 | `httpx`   | calls to external HTTP APIs (resty + otelhttp): providers listed under `providers:` with base URL, timeout, retries and headers from the environment; `rt.Provider("odds-feed").GetJSON(ctx, path, &out)`; trace carried on, one log record per call without secrets, metrics; a service with providers must run in the provider namespace; see below |
 | `webhookx` | the callbacks a provider sends us (payment results, settlements), on a Hertz service in the provider namespace: `webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`; source-address check, signature check (hmac-sha256, basic, or the vendor's own Verifier), raw copy to Kafka for disputes, event-id dedupe through Redis, 500 on a handler error so the provider retries, metrics; see below |
 | `metricsx` | Prometheus metrics on a port of their own (`metrics.enabled`, default port 9091): requests by method and result code with latency histograms for Kitex and Hertz, calls made to other services, Go runtime, MySQL pool, Redis commands, Kafka events; the deployment scrapes it; see below |
@@ -369,6 +370,37 @@ names. The client is `rt.Centrifugo`.
   to `user:<id>`
 - `History(ctx, channel, n)`: the last messages of a channel (when the
   namespace keeps history), for tests and reconnecting clients
+
+### Files with `s3x`
+
+```yaml
+s3:
+  enabled: true
+  source: platform      # dev / uat / prod: the datasource row of kind s3 (endpoint, bucket, key variables)
+  # source: static      # a laptop: docker run -d -p 8333:8333 chrislusf/seaweedfs server -s3
+  # endpoint: "http://127.0.0.1:8333"
+  # bucket: sportsbook-dev-assets
+  # prefix: ser-user    # default: the service name; every key lives under it
+```
+
+```go
+err  := rt.S3.Put(ctx, "avatars/42.png", file, "image/png")
+data, err := rt.S3.GetBytes(ctx, "kyc/42/front.jpg")
+url, err  := rt.S3.PresignGet(ctx, "exports/2026-10.xlsx", 10*time.Minute)   // the client downloads directly
+url, err  := rt.S3.PresignPut(ctx, "avatars/42.png", "image/png", 5*time.Minute) // the client uploads directly
+objs, err := rt.S3.List(ctx, "avatars", 100)
+err  = rt.S3.Delete(ctx, "avatars/42.png")
+```
+
+One bucket per deployment, one prefix per service (default the service
+name), so services never touch each other's files; keys are paths like
+"avatars/42.png". A missing object is `s3x.ErrNotFound`. Large files go
+through presigned URLs, not through the service. `rt.S3.Raw()` is the AWS
+SDK client for the rest. Every call is a span (otelaws), a debug record and
+`s3_requests_total{op, status}` / `s3_request_duration_seconds`. The dev
+credentials are the SeaweedFS admin identity in `app-datasources`
+(S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY); production gets an identity of
+its own with access to that bucket only.
 
 ### External APIs with `httpx`
 

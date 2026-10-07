@@ -22,6 +22,7 @@ import (
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/redisx"
+	"github.com/sezznaw/devkit-common/s3x"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -47,6 +48,9 @@ type Runtime struct {
 	// Centrifugo is the push server, nil when centrifugo.enabled is false:
 	// Publish to a channel, ConnectionToken for a client.
 	Centrifugo *centrifugox.Client
+	// S3 is the object storage, nil when s3.enabled is false: Put, Get,
+	// Stat, List, Delete and presigned URLs, all under the service's prefix.
+	S3 *s3x.Client
 
 	jobs      []jobx.Job
 	providers map[string]*httpx.Client
@@ -88,10 +92,55 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	if err := rt.openCentrifugo(); err != nil {
 		return nil, err
 	}
+	if err := rt.openS3(); err != nil {
+		return nil, err
+	}
 	if err := rt.openProviders(); err != nil {
 		return nil, err
 	}
 	return rt, nil
+}
+
+func (rt *Runtime) openS3() error {
+	cfg := rt.Config
+	if !cfg.S3.Enabled {
+		zlog.Info("s3 off", zlog.Str("hint", "set s3.enabled: true in conf/<env>.yaml for a service that stores files"))
+		return nil
+	}
+	if err := cfg.S3.Validate(); err != nil {
+		return err
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	target, err := s3Target(ctx, cfg)
+	if err != nil {
+		return err
+	}
+	cli, err := s3x.Open(ctx, target, cfg.S3, cfg.Service.Name)
+	if err != nil {
+		return err
+	}
+	rt.S3 = cli
+	zlog.Info("s3 connected", zlog.Str("endpoint", target.Endpoint), zlog.Str("bucket", target.Bucket), zlog.Str("prefix", cli.Prefix()), zlog.Str("source", cfg.S3.SourceName()))
+	return nil
+}
+
+// s3Target: the static fields, or the datasource row of kind s3 (host:port,
+// db_name = bucket, password_env = the access key's variable, params with
+// path_style / insecure / secret_env).
+func s3Target(ctx context.Context, cfg Config) (s3x.Target, error) {
+	if cfg.S3.SourceName() == s3x.SourceStatic {
+		return cfg.S3.Static(), nil
+	}
+	platform, err := platformDatabase(cfg, "s3.source platform")
+	if err != nil {
+		return s3x.Target{}, err
+	}
+	row, err := mysqlx.ResolveKind(ctx, platform, os.Getenv(TenantEnv), mysqlx.RoleTenant, "s3", os.Getenv)
+	if err != nil {
+		return s3x.Target{}, err
+	}
+	return s3x.TargetFromRow(row.Addr, row.DB, row.Password, row.Params, os.Getenv)
 }
 
 // PodNamespaceEnv is set by the deployment; a service that calls external

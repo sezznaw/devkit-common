@@ -440,6 +440,20 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   callbacks, in the provider namespace; no separate proxy service (the
   namespace policy is the egress, the Ingress is the entry). The ingress of
   that service must not carry the office-only middleware.
+- `s3x`: aws-sdk-go-v2 s3 with `otelaws.AppendMiddlewares`, BaseEndpoint +
+  UsePathStyle (SeaweedFS), static credentials. `Open` does HeadBucket (the
+  bucket must exist; the chart's createBuckets makes them). `Client.full`
+  prefixes every key with the service's prefix (default service name); all
+  methods go through `do` (timeout, metric `s3_requests_total{op,status}`
+  with status ok / not_found / error, debug or error record). `Get` uses
+  `context.WithoutCancel` for the body because the caller reads it after
+  `do` returns. `mapErr` turns NotFound / NoSuchKey / HTTP 404 into
+  `ErrNotFound`. `source platform` reuses `mysqlx.ResolveKind` with kind
+  "s3": the row's password_env holds the ACCESS KEY's variable (so
+  `row.Password` is the access key) and params carry
+  `secret_env=...&path_style=...&insecure=...&region=...` (`TargetFromRow`);
+  the seed row of dev is shaped that way. Tests use gofakes3 (in-memory
+  S3, including presigned URLs).
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules
