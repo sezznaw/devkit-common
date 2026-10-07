@@ -418,6 +418,20 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   credentials are the deployment's environment (Secret `provider-secrets`),
   no per-tenant lookup; `TENANT_CODE` and the "platform" database were kept
   with their comments re-characterised as this deployment's registry.
+- `webhookx` (inbound callbacks) and `httpx.Callback` (its config under
+  the provider): `Handle(rt, h, provider, path, handler, opts...)` registers
+  POST and PUT on the Hertz engine; order in `serve` is cidr → size →
+  verify → event id → Kafka archive → Redis SETNX → handler, each step a
+  distinct `result` label and status. Archive failure and Redis failure are
+  500 on purpose (the provider retries; never handle what was not kept),
+  duplicate is the route's reply without the handler, handler error deletes
+  the SETNX key so the retry runs. hmac verify tolerates a `scheme=` prefix
+  on the header and compares case-insensitively in constant time; `{timestamp}`
+  in the payload enables the skew window. Panics in Handle (unknown
+  provider, no callback entry, custom without WithVerifier) are start-time
+  on purpose. Tests: hertz `ut`, miniredis, kfake (`archive_test.go`). Not
+  verified on dev yet: no provider service exists; the ingress of such a
+  service must not carry the office-only middleware.
 - `etcdx`: thin constructor from a YAML-loadable config struct.
 
 ## Versioning rules

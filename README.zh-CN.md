@@ -19,6 +19,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
 | `httpx`   | 调外部 HTTP 接口（resty + otelhttp）：`providers:` 里登记 base URL、超时、重试、来自环境变量的头；`rt.Provider("odds-feed").GetJSON(ctx, path, &out)`；trace 带过去，每次调用一条不含密钥的日志，指标；有 providers 的服务必须部署在 provider namespace；详见下文 |
+| `webhookx` | 厂商回调我们（支付结果、赛果结算），在 provider namespace 的 Hertz 服务上：`webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`；来源 IP、验签（hmac-sha256、basic 或厂商私有 Verifier）、原始报文留档到 Kafka、按事件 id 用 Redis 去重、handler 出错回 500 让厂商重试、指标；详见下文 |
 | `metricsx` | Prometheus 指标，单独端口（`metrics.enabled`，默认 9091）：Kitex/Hertz 每个方法的请求数、结果码、耗时直方图，对外 RPC 调用，Go 运行时，MySQL 连接池，Redis 命令，Kafka 事件；由部署抓取；详见下文 |
 | `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
 | `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
@@ -285,6 +286,38 @@ deadline。`debug: true` 把每次请求响应连头和 body 打到日志，只�
 `http_client_requests_total{provider, http_method, status}` / `http_client_duration_seconds`。
 非 2xx 的响应是 `*httpx.StatusError`，带状态码和 body 的前几百字节。业务 namespace 不能出网，所以有 `providers:` 的服务
 必须部署到 `-provider` namespace：`NewRuntime` 读 `POD_NAMESPACE`，放错了拒绝启动并告诉你搬到哪。
+
+### 用 `webhookx` 收回调
+
+另一个方向：厂商调我们。规则写在 provider 的 `callback:` 下，handler 是一个函数，路由在 provider namespace 里某个 Hertz 服务的
+`app.Setup` 注册（回调路径是厂商定的，不进 IDL）：
+
+```yaml
+providers:
+  payment-x:
+    base_url: "https://pay.vendor.com"
+    callback:
+      verify: {type: hmac-sha256, secret: "${PAYMENT_X_CALLBACK_SECRET}", header: X-Signature, payload: "{timestamp}.{body}", timestamp_header: X-Timestamp, max_skew: 5m}
+      allow_cidrs: ["203.0.113.0/24"]          # 可选，厂商公布的来源地址
+      event_id: {json: "data.id"}               # 或 {header: X-Event-Id}；重复投递靠它变成空操作
+      dedupe_ttl: 168h                          # 默认 7 天
+      archive_topic: callbacks.payment-x        # 默认值；"-" 关闭留档
+```
+
+```go
+webhookx.Handle(rt, h, "payment-x", "/callbacks/payment-x/paid", func(ctx context.Context, ev *webhookx.Event) error {
+	var n PaidNotice
+	if err := ev.Decode(&n); err != nil { return err }
+	return wallet.Credit(ctx, n.OrderID, n.Amount)   // 按订单号幂等
+}, webhookx.WithReply(200, "application/json", `{"code":"SUCCESS"}`))
+```
+
+每个回调依次经过：来源地址对照 `allow_cidrs`（403）、body 上限（413，默认 1 MiB）、验签（401；`verify.type` 为 hmac-sha256
+对带时间戳窗口的模板签名、basic，或 `custom` 配 `webhookx.WithVerifier(fn)` 走厂商算法）、原始请求复制到 Kafka 留档主题
+（留档失败回 500 让厂商重试，没留住的绝不处理）、事件 id 查 Redis（重复投递直接应答、不跑 handler）、然后是 handler：
+返回 nil 就按路由的应答回（默认 200 "ok"，可 `WithReply`），返回 error 或 panic 回 500 并忘掉这个事件 id，厂商重试时会再跑。
+每个回调一条带 provider 和 event_id 的日志，指标 `callbacks_received_total{provider, http_route, result}`。
+handler 仍要幂等：厂商可能用两个 id 发同一件事。
 
 ### 用 `metricsx` 出指标
 

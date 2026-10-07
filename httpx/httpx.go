@@ -63,6 +63,10 @@ type Provider struct {
 	// oauth2 (client credentials) from configuration, or custom with a
 	// Signer the integration sets (UseSigner). Secrets are ${ENV} values.
 	Auth Auth `yaml:"auth"`
+	// Callback is how this provider calls us back (payment results, event
+	// settlements): how to verify the call, which field is the event id.
+	// webhookx.Handle uses it.
+	Callback Callback `yaml:"callback"`
 	// Debug prints every request and response, headers and bodies, to the
 	// log at debug level. Honoured on a developer's machine only
 	// (APP_ENV local): in a deployment it is ignored with a warning,
@@ -115,7 +119,10 @@ func (p Provider) Validate(name string) error {
 			return fmt.Errorf("httpx: providers.%s.headers.%s is empty (is its environment variable set?)", name, k)
 		}
 	}
-	return p.Auth.Validate(name)
+	if err := p.Auth.Validate(name); err != nil {
+		return err
+	}
+	return p.Callback.Validate(name)
 }
 
 // Client is the client of one provider. It is a *resty.Client: use R() for

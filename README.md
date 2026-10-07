@@ -19,6 +19,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
 | `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
 | `httpx`   | calls to external HTTP APIs (resty + otelhttp): providers listed under `providers:` with base URL, timeout, retries and headers from the environment; `rt.Provider("odds-feed").GetJSON(ctx, path, &out)`; trace carried on, one log record per call without secrets, metrics; a service with providers must run in the provider namespace; see below |
+| `webhookx` | the callbacks a provider sends us (payment results, settlements), on a Hertz service in the provider namespace: `webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`; source-address check, signature check (hmac-sha256, basic, or the vendor's own Verifier), raw copy to Kafka for disputes, event-id dedupe through Redis, 500 on a handler error so the provider retries, metrics; see below |
 | `metricsx` | Prometheus metrics on a port of their own (`metrics.enabled`, default port 9091): requests by method and result code with latency histograms for Kitex and Hertz, calls made to other services, Go runtime, MySQL pool, Redis commands, Kafka events; the deployment scrapes it; see below |
 | `jobx`    | scheduled jobs: a service lists them in `app/jobs.go` (name, cron schedule, timeout, function), the framework runs one per `--job=<name>` with a root span, a run id in the log, a lock, a timeout and an exit code, and `--list-jobs` is what the deployment turns into CronJobs; see below |
 | `redisx`  | Redis / Valkey from the `redis:` section, the rules of `mysqlx` (enabled, source static or platform), every command a span; the idempotency middleware uses it |
@@ -439,6 +440,47 @@ with the status and the first bytes of the body. Only the business
 namespaces are cut off from the internet, so a service with `providers:`
 must be deployed to the `-provider` namespace: `NewRuntime` refuses to start
 otherwise (it reads `POD_NAMESPACE`) and says where to move it.
+
+### Callbacks with `webhookx`
+
+The other direction: the provider calls us. The rules go under the
+provider's `callback:` entry, the handler is a function, and the route is
+registered in `app.Setup` of a Hertz service in the provider namespace
+(callback paths are the vendor's, so they are not in the IDL):
+
+```yaml
+providers:
+  payment-x:
+    base_url: "https://pay.vendor.com"
+    callback:
+      verify: {type: hmac-sha256, secret: "${PAYMENT_X_CALLBACK_SECRET}", header: X-Signature, payload: "{timestamp}.{body}", timestamp_header: X-Timestamp, max_skew: 5m}
+      allow_cidrs: ["203.0.113.0/24"]          # optional, the vendor's published addresses
+      event_id: {json: "data.id"}               # or {header: X-Event-Id}; what makes a redelivery a no-op
+      dedupe_ttl: 168h                          # default 7 days
+      archive_topic: callbacks.payment-x        # default; "-" switches the raw copy off
+```
+
+```go
+webhookx.Handle(rt, h, "payment-x", "/callbacks/payment-x/paid", func(ctx context.Context, ev *webhookx.Event) error {
+	var n PaidNotice
+	if err := ev.Decode(&n); err != nil { return err }
+	return wallet.Credit(ctx, n.OrderID, n.Amount)   // idempotent by order id
+}, webhookx.WithReply(200, "application/json", `{"code":"SUCCESS"}`))
+```
+
+What happens to every callback, in order: source address against
+`allow_cidrs` (403), body limit (413, default 1 MiB), signature (401;
+`verify.type` hmac-sha256 over a payload template with a timestamp window,
+basic, or `custom` with `webhookx.WithVerifier(fn)` for the vendor's own
+scheme), the raw request copied to the Kafka archive topic (a failure there
+is a 500: the provider retries, we never handle what we could not keep),
+the event id checked in Redis (a redelivery is acknowledged without running
+the handler), then the handler: nil answers the route's reply (200 "ok"
+unless `WithReply`), an error or a panic answers 500 and forgets the event
+id, so the provider's retry runs the handler again. One log record per
+callback with provider and event_id, and
+`callbacks_received_total{provider, http_route, result}`. Handlers stay
+idempotent anyway: a provider may send the same notification under two ids.
 
 ### Metrics with `metricsx`
 

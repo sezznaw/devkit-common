@@ -103,6 +103,9 @@ var (
 	HTTPClientBreakerState = promauto.With(Registry).NewGaugeVec(prometheus.GaugeOpts{
 		Name: "http_client_breaker_state", Help: "Circuit breaker of a provider: 0 closed (normal), 1 half-open (probing), 2 open (failing fast).",
 	}, []string{"provider"})
+	CallbacksReceived = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "callbacks_received_total", Help: "Provider callbacks received (webhookx), by provider, route and result: ok, duplicate, bad_source, bad_signature, too_large, archive_failed, dedupe_unavailable, handler_error.",
+	}, []string{"provider", "http_route", "result"})
 	KafkaEventsPublished = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_published_total", Help: "Events published by kafkax, by topic and result.",
 	}, []string{"topic", "status"})
