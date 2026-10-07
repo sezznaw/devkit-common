@@ -12,7 +12,7 @@ go get github.com/sezznaw/devkit-common@latest
 | 包        | 作用 |
 |-----------|------|
 | `zlog`    | 公司统一日志，基于 zap：由编译器检查的强类型字段；给人看的控制台格式（颜色、可点击的 `文件:行号`）和给采集系统的 JSON 格式；带 `trace_id` 的请求级 logger；详见下文 |
-| `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
+| `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开（`${VAR:-默认值}` 未设时取默认）；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
 | `kitexx`  | Kitex 服务端/客户端选项：Nacos 注册与发现、优雅退出、统一日志与跨服务的 `trace_id`、`OnShutdown`、`Run` |
 | `hertzx`  | 基于 Hertz 的 API（HTTP）服务用的同一套东西：与 `kitexx` 共用一份配置，请求日志带 `trace_id` 并继续传给 RPC 服务，panic 恢复，同样的 Nacos 规则和优雅退出；详见下文 |
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |

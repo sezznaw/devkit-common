@@ -42,6 +42,10 @@ func Load(dir string, out any) error {
 }
 
 // LoadFile reads a single YAML file into out, expanding ${VAR} references.
+// ${VAR:-default} takes the default when VAR is unset or empty, which is how
+// conf/local.yaml carries the values of the local stack without anyone
+// exporting them; a deployment sets the variables and the defaults never
+// apply there.
 func LoadFile(path string, out any) error {
 	data, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
@@ -50,9 +54,7 @@ func LoadFile(path string, out any) error {
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
 	}
-	expanded := os.Expand(string(data), func(key string) string {
-		return os.Getenv(key)
-	})
+	expanded := os.Expand(string(data), Expand)
 	if err := yaml.Unmarshal([]byte(expanded), out); err != nil {
 		return fmt.Errorf("config: parse %s: %w", path, err)
 	}
@@ -126,4 +128,18 @@ func available(dir string) string {
 		names = append(names, strings.TrimSuffix(filepath.Base(m), ".yaml"))
 	}
 	return strings.Join(names, ", ")
+}
+
+// Expand resolves one ${...} reference: "VAR" is the environment variable,
+// "VAR:-default" is the variable or, when it is unset or empty, the default.
+// Anything else (an unknown form) expands to the variable named by the text
+// before the first colon, so a typo does not silently become a literal.
+func Expand(key string) string {
+	if name, def, ok := strings.Cut(key, ":-"); ok {
+		if v := os.Getenv(name); v != "" {
+			return v
+		}
+		return def
+	}
+	return os.Getenv(key)
 }

@@ -12,7 +12,7 @@ go get github.com/sezznaw/devkit-common@latest
 | Package   | Purpose |
 |-----------|---------|
 | `zlog`    | Company logger on zap: typed fields checked by the compiler, a console format for people (colors, clickable `file:line`) and JSON for log collectors, request-scoped loggers with a `trace_id`; see below |
-| `config`  | Load `conf/<APP_ENV>.yaml` with `${VAR}` expansion; `Dir`/`LoadDefault` find the conf directory; `Duration` for `3s`-style values |
+| `config`  | Load `conf/<APP_ENV>.yaml` with `${VAR}` expansion (`${VAR:-default}` when unset); `Dir`/`LoadDefault` find the conf directory; `Duration` for `3s`-style values |
 | `kitexx`  | Kitex server/client options: Nacos registration and discovery, graceful stop, unified logging with a `trace_id` across services, `OnShutdown`, `Run` |
 | `hertzx`  | The same for API (HTTP) services on Hertz: one configuration with `kitexx`, request log with a `trace_id` that travels on to the RPC services, recovery, the same rules for Nacos and the same graceful stop; see below |
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |

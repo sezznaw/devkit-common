@@ -118,7 +118,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
     record, only per value (`max_field_bytes`).
 - `config`: `Load(dir, &cfg)` reads `<dir>/<APP_ENV>.yaml` (default `local`: a developer's machine; the
   deployed environments are `dev`, `uat` and `prod`)
-  and expands `${VAR}` from the environment *before* YAML parsing.
+  and expands `${VAR}` from the environment *before* YAML parsing; `${VAR:-default}`
+  (v0.23.0, `Expand`) takes the default when unset or empty, so conf/local.yaml
+  carries the local stack's values (nacos/nacos, tenant_a, ...) and `make run`
+  needs no exports. The owner hit "using password: NO" on 2026-10-07 because
+  MYSQL_PASSWORD was not exported; this is the fix.
 - `kitexx` shutdown design, which is easy to get wrong: Kitex's `Stop()` runs
   its own shutdown hooks, then deregisters, then closes the listener and
   drains, and `svr.Run()` returns only after all that. Therefore (1)

@@ -87,3 +87,20 @@ func TestDefaultEnvIsLocal(t *testing.T) {
 		t.Fatalf("APP_ENV=dev: Env() = %q, IsLocal() = %v", Env(), IsLocal())
 	}
 }
+
+func TestExpandDefaults(t *testing.T) {
+	t.Setenv("SET_VAR", "from-env")
+	t.Setenv("EMPTY_VAR", "")
+	for in, want := range map[string]string{
+		"SET_VAR":                        "from-env",
+		"SET_VAR:-x":                     "from-env",
+		"EMPTY_VAR:-fallback":            "fallback",
+		"MISSING_VAR_ZZ:-127.0.0.1:3306": "127.0.0.1:3306", // the default may contain colons
+		"MISSING_VAR_ZZ:-":               "",
+		"MISSING_VAR_ZZ":                 "",
+	} {
+		if got := Expand(in); got != want {
+			t.Errorf("Expand(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
