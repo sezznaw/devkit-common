@@ -269,6 +269,16 @@ func (rt *Runtime) openKafka() error {
 	rt.Kafka = cli
 	zlog.Info("kafka connected", zlog.Any("brokers", target.Brokers), zlog.Bool("sasl", target.Username != ""),
 		zlog.Str("source", cfg.Kafka.SourceName()), zlog.Str("role", cfg.Kafka.RoleName()))
+	// The outbox relay: events queued in the database (PublishTx) go out
+	// from here. Needs the service's MySQL; off by kafka.outbox.enabled.
+	if rt.DB != nil && cfg.Kafka.Outbox.EnabledOrDefault() {
+		db := rt.DB
+		rt.OnStart("outbox relay", func() error {
+			cli.StartOutbox(context.Background(), db, cfg.Kafka.Outbox)
+			return nil
+		})
+		OnShutdown("outbox relay stop", func() error { cli.StopOutbox(); return nil })
+	}
 	OnShutdown("kafka close", cli.Close)
 	return nil
 }

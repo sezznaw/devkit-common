@@ -115,6 +115,15 @@ var (
 	KafkaEventsPublished = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_published_total", Help: "Events published by kafkax, by topic and result.",
 	}, []string{"topic", "status"})
+	KafkaOutboxPublished = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "kafka_outbox_published_total", Help: "Outbox rows the relay published, by topic and result.",
+	}, []string{"topic", "status"})
+	KafkaOutboxPending = promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
+		Name: "kafka_outbox_pending", Help: "Outbox rows not yet published.",
+	})
+	KafkaOutboxOldestAge = promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
+		Name: "kafka_outbox_oldest_age_seconds", Help: "Age of the oldest unpublished outbox row; 0 when none.",
+	})
 	KafkaEventsHandled = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_handled_total", Help: "Events consumed by kafkax, by topic and outcome: ok, retried, dlq.",
 	}, []string{"topic", "result"})

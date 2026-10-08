@@ -498,3 +498,7 @@ log_level_data_id: order.log-level              # kitexx：日志级别跟随这
 ```sh
 go test ./...
 ```
+
+#### 事务里的事件：outbox
+
+和数据库变更同属一件事的事件走 outbox，不走 `Publish`：在事务里 `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` 把事件写进本服务的 `outbox` 表（项目迁移建表，`kafkax.OutboxDDL` 是表结构）。事务提交则变更和事件都落地，回滚则都没有；同一进程里的转发器（服务同时有 Kafka 和 MySQL 时自动开，`kafka.outbox.enabled: false` 关）随后把行发出去，信封和 `Publish` 一样，trace 是发起请求的那条。至少一次投递、event id 不变，消费者照旧按 `ev.ID` 去重。发不出去的行按退避重试（1s、2s…5 分钟；表里有 `attempts`、`last_error`、`next_attempt_at`），一个坏主题不会挡住别的；多副本分摊（`FOR UPDATE SKIP LOCKED`）。已发的行保留 `kafka.outbox.retention`（7 天）后删除。指标 `kafka_outbox_pending`、`kafka_outbox_oldest_age_seconds`（按它告警）、`kafka_outbox_published_total{topic,status}`。`devkit lint` 的 `outbox` 规则拒绝在跑事务的代码里直接 `Publish`。

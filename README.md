@@ -355,6 +355,10 @@ idempotent by nature).
 
 Event and topic naming is in the idl repository's README.
 
+#### Events in a transaction: the outbox
+
+An event that belongs with a database change goes through the outbox, not through `Publish`: inside the transaction, `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` writes the event into the service's `outbox` table (the project's migrations create it; `kafkax.OutboxDDL` is the schema). The transaction commits both the change and the event, or neither; a relay in the same process (on automatically when the service has Kafka and MySQL, `kafka.outbox.enabled: false` turns it off) publishes the rows right after, with the same envelope as `Publish` and the trace of the request that queued them. Delivery is at least once with a stable event id, so consumers deduplicate on `ev.ID` as before. A row that fails to publish is retried with backoff (1s, 2s, ... 5 minutes; `attempts`, `last_error`, `next_attempt_at` in the table), one bad topic never blocks the others; replicas share the work (`FOR UPDATE SKIP LOCKED`). Sent rows stay for `kafka.outbox.retention` (7 days) and are then deleted. Metrics: `kafka_outbox_pending`, `kafka_outbox_oldest_age_seconds` (alert on it), `kafka_outbox_published_total{topic,status}`. `devkit lint` (rule `outbox`) refuses a direct `Publish` in code that also runs a transaction.
+
 ### Push with `centrifugox`
 
 The `centrifugo:` section: `enabled`; `source static` with `api_addr`,

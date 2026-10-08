@@ -43,6 +43,11 @@ type Config struct {
 	// MaxRetries is how often a failing handler is retried before the message
 	// goes to <topic>.dlq. Default 3.
 	MaxRetries int `yaml:"max_retries"`
+
+	// Outbox: the relay that publishes what PublishTx queued in the
+	// database (events written in the same transaction as the change). On
+	// by default when the service has MySQL too; see OutboxConfig.
+	Outbox OutboxConfig `yaml:"outbox"`
 }
 
 const (
@@ -149,6 +154,8 @@ type Client struct {
 	cons []*kgo.Client
 	stop context.CancelFunc
 	wg   sync.WaitGroup
+
+	outboxState
 }
 
 type subscription struct {
