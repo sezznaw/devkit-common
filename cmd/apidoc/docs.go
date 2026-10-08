@@ -157,7 +157,9 @@ func Localize(top *yaml.Node, d Directives) {
 				}
 				if desc := mapGet(op, "description"); desc != nil && mapGet(op, "summary") == nil {
 					summary, rest := splitSummary(desc.Value)
-					mapSet(op, "summary", summary)
+					if summary != "" {
+						mapSet(op, "summary", summary)
+					}
 					if rest == "" {
 						mapDel(op, "description")
 					} else {
@@ -217,17 +219,31 @@ func setTag(op *yaml.Node, tag string) {
 	op.Content = append([]*yaml.Node{{Kind: yaml.ScalarNode, Value: "tags"}, seq}, op.Content...)
 }
 
-// splitSummary: the first line (or sentence, up to the first 。 or .) is the
-// summary, the rest the description.
+// splitSummary: the first sentence of the first line (up to the first 。 or
+// ". ") is the summary, the rest the description. Directive lines (`@public`,
+// `@docs ...`) are the IDL's, not the reader's, and are dropped: the plugin
+// copies every comment line above a method, directives included.
 func splitSummary(s string) (summary, rest string) {
-	s = strings.TrimSpace(s)
-	if i := strings.IndexAny(s, "\n"); i >= 0 {
-		return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+1:])
+	var lines []string
+	for _, l := range strings.Split(s, "\n") {
+		l = strings.TrimSpace(l)
+		if l == "" || strings.HasPrefix(l, "@") {
+			continue
+		}
+		lines = append(lines, l)
 	}
+	if len(lines) == 0 {
+		return "", ""
+	}
+	first, tail := lines[0], strings.Join(lines[1:], "\n")
 	for _, sep := range []string{"。", ". ", "：", ": "} {
-		if i := strings.Index(s, sep); i > 0 && i < len(s)-len(sep) {
-			return strings.TrimSpace(s[:i]), strings.TrimSpace(s[i+len(sep):])
+		if i := strings.Index(first, sep); i > 0 && i < len(first)-len(sep) {
+			summary, after := strings.TrimSpace(first[:i]), strings.TrimSpace(first[i+len(sep):])
+			if tail != "" {
+				after = strings.TrimSpace(after + "\n" + tail)
+			}
+			return summary, after
 		}
 	}
-	return s, ""
+	return first, tail
 }

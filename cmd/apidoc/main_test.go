@@ -114,3 +114,20 @@ func TestPublicMethodsAndSecurity(t *testing.T) {
 		t.Errorf("profile requires bearer:\n%s", profile)
 	}
 }
+
+func TestSplitSummaryDropsDirectives(t *testing.T) {
+	cases := []struct{ in, summary, rest string }{
+		{"登录。账号或密码错误 2003。\n@public", "登录", "账号或密码错误 2003。"},
+		{"登出。结束当前会话。", "登出", "结束当前会话。"},
+		{"健康检查。返回 pong: <message>。\n@public", "健康检查", "返回 pong: <message>。"},
+		{"取资料\n第二行说明", "取资料", "第二行说明"},
+		{"@public", "", ""},
+		{"只有标题。", "只有标题。", ""},
+	}
+	for _, c := range cases {
+		s, r := splitSummary(c.in)
+		if s != c.summary || r != c.rest {
+			t.Errorf("%q: got (%q, %q), want (%q, %q)", c.in, s, r, c.summary, c.rest)
+		}
+	}
+}
