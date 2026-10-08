@@ -82,6 +82,65 @@ func PublicMethods(src []byte) map[string]bool {
 
 var methodLine = regexp.MustCompile(`^\s*\w+\s+(\w+)\s*\(`)
 
+var permLine = regexp.MustCompile(`@perm\s+([A-Za-z0-9_.:*-]+)`)
+
+// PermMethods are the service methods whose comment block carries a
+// `// @perm <point>` line, with the point: the gateway serves them only to
+// a login holding that permission point (hertzx.RequirePermission).
+func PermMethods(src []byte) map[string]string {
+	out := map[string]string{}
+	pending := ""
+	for _, line := range strings.Split(string(src), "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case t == "":
+			continue
+		case strings.HasPrefix(t, "//"):
+			if m := permLine.FindStringSubmatch(t); m != nil {
+				pending = m[1]
+			}
+		default:
+			if pending != "" {
+				if m := methodLine.FindStringSubmatch(line); m != nil {
+					out[m[1]] = pending
+				}
+			}
+			pending = ""
+		}
+	}
+	return out
+}
+
+// Permissions writes each method's permission point as the operation's
+// x-permission, which hertzx.RequirePermission reads from the embedded
+// document and hertzx.PermissionPoints lists for a role editor.
+func Permissions(top *yaml.Node, perms map[string]string) {
+	paths := mapGet(top, "paths")
+	if paths == nil || len(perms) == 0 {
+		return
+	}
+	for i := 0; i+1 < len(paths.Content); i += 2 {
+		item := paths.Content[i+1]
+		for j := 0; j+1 < len(item.Content); j += 2 {
+			op := item.Content[j+1]
+			if op.Kind != yaml.MappingNode {
+				continue
+			}
+			method := ""
+			if n := mapGet(op, "operationId"); n != nil {
+				method = n.Value
+				if k := strings.LastIndex(method, "_"); k >= 0 {
+					method = method[k+1:]
+				}
+			}
+			mapDel(op, "x-permission")
+			if p := perms[method]; p != "" {
+				mapSet(op, "x-permission", p)
+			}
+		}
+	}
+}
+
 // Secure adds the bearer security scheme and requires it on every operation
 // except the public ones (an empty security list, which is how the gateway's
 // RequireLogin recognises them in the embedded document).
