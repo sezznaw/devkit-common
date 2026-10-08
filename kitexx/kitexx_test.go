@@ -37,8 +37,8 @@ func TestOptionsWithoutRegistry(t *testing.T) {
 	}
 	// basic info, listen address, tracing, logging and idempotency
 	// middlewares, meta handler, drain timeout; no registry.
-	if len(opts) != 8 {
-		t.Fatalf("expected 8 options without a registry, got %d", len(opts))
+	if len(opts) != 9 {
+		t.Fatalf("expected 9 options without a registry, got %d", len(opts))
 	}
 }
 

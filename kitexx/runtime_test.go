@@ -22,7 +22,7 @@ func TestRuntimeWithoutMySQL(t *testing.T) {
 		t.Error("mysql disabled: DB stays nil")
 	}
 	opts, err := rt.Options()
-	if err != nil || len(opts) != 8 {
+	if err != nil || len(opts) != 9 {
 		t.Errorf("options: %d %v", len(opts), err)
 	}
 }

@@ -165,6 +165,7 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithMiddleware(ServerTracing()),
 		server.WithMiddleware(ServerMetrics()),
 		server.WithMiddleware(LoggingMiddleware()),
+		server.WithMiddleware(ValidationMiddleware()),
 		server.WithMiddleware(rt.Idempotency()),
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
 		server.WithExitWaitTime(DrainTimeout(cfg)),
