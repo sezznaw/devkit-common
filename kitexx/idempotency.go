@@ -58,11 +58,11 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 			}
 			id := r.GetRequestId()
 			if id == "" {
-				return kerrors.NewBizStatusError(CodeRequestIDRequired, "request_id is required")
+				return BizError(ctx, kerrors.NewBizStatusError(CodeRequestIDRequired, "request_id is required"))
 			}
 			if rdb == nil {
 				zlog.Ctx(ctx).Error("idempotent request but redis.enabled is false", zlog.Str("request_id", id))
-				return kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store is not configured")
+				return BizError(ctx, kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store is not configured"))
 			}
 			_, method, _ := rpcNames(ctx)
 			key := fmt.Sprintf("idem:%s:%s:%s", service, method, id)
@@ -70,21 +70,21 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 			claimed, err := rdb.SetNX(ctx, key, pending, IdempotencyTTL).Result()
 			if err != nil {
 				zlog.Ctx(ctx).Error("idempotency store", zlog.Str("request_id", id), zlog.Err(err))
-				return kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store unavailable")
+				return BizError(ctx, kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store unavailable"))
 			}
 			if !claimed {
 				kept, err := rdb.Get(ctx, key).Bytes()
 				if err != nil && !errors.Is(err, redis.Nil) {
-					return kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store unavailable")
+					return BizError(ctx, kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store unavailable"))
 				}
 				if errors.Is(err, redis.Nil) || string(kept) == pending {
 					// Nil: the first call failed between our SetNX and its Del;
 					// treat it as in progress, the caller retries in a moment.
-					return kerrors.NewBizStatusError(CodeRequestInProgress, "request with this request_id is in progress")
+					return BizError(ctx, kerrors.NewBizStatusError(CodeRequestInProgress, "request with this request_id is in progress"))
 				}
 				if err := setSuccess(resp, kept); err != nil {
 					zlog.Ctx(ctx).Error("idempotency: kept result does not fit", zlog.Str("request_id", id), zlog.Err(err))
-					return kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store unavailable")
+					return BizError(ctx, kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store unavailable"))
 				}
 				zlog.Ctx(ctx).Info("replayed", zlog.Str("request_id", id))
 				return nil

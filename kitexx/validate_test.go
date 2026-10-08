@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	"github.com/cloudwego/kitex/pkg/kerrors"
+	"github.com/cloudwego/kitex/pkg/rpcinfo"
 )
 
 type validReq struct{ Username string }
@@ -26,10 +27,22 @@ func itoa(n int) string { return string(rune('0' + n)) }
 func TestValidationMiddleware(t *testing.T) {
 	ran := false
 	ep := ValidationMiddleware()(func(ctx context.Context, req, resp any) error { ran = true; return nil })
+	// without rpcinfo (a bare test) the error comes back as is
 	err := ep(context.Background(), &validArgs{Req: &validReq{Username: "ab"}}, nil)
 	biz, ok := kerrors.FromBizStatusError(err)
 	if !ok || biz.BizStatusCode() != CodeBadParam || biz.BizMessage() != "username: min_size rule failed, current value: 2" {
 		t.Fatalf("invalid: %v", err)
+	}
+	// with rpcinfo (a real server) it is set as the business status and nil is returned,
+	// which is what the client decodes as the business error
+	inv := rpcinfo.NewInvocation("svc", "Method")
+	ri := rpcinfo.NewRPCInfo(nil, nil, inv, rpcinfo.NewRPCConfig(), rpcinfo.NewRPCStats())
+	rctx := rpcinfo.NewCtxWithRPCInfo(context.Background(), ri)
+	if err := ep(rctx, &validArgs{Req: &validReq{Username: "ab"}}, nil); err != nil {
+		t.Fatalf("with rpcinfo the middleware returns nil, got %v", err)
+	}
+	if got := inv.BizStatusErr(); got == nil || got.BizStatusCode() != CodeBadParam {
+		t.Fatalf("biz status not set: %v", got)
 	}
 	if ran {
 		t.Fatal("handler must not run")

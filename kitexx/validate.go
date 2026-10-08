@@ -7,6 +7,7 @@ import (
 
 	"github.com/cloudwego/kitex/pkg/endpoint"
 	"github.com/cloudwego/kitex/pkg/kerrors"
+	"github.com/cloudwego/kitex/pkg/rpcinfo"
 )
 
 // CodeBadParam is the business code of a request that fails validation
@@ -32,12 +33,36 @@ func ValidationMiddleware() endpoint.Middleware {
 		return func(ctx context.Context, req, resp any) error {
 			if v, ok := firstArgument(req).(validatable); ok {
 				if err := v.IsValid(); err != nil {
-					return kerrors.NewBizStatusError(CodeBadParam, FriendlyValidation(err.Error()))
+					return BizError(ctx, kerrors.NewBizStatusError(CodeBadParam, FriendlyValidation(err.Error())))
 				}
 			}
 			return next(ctx, req, resp)
 		}
 	}
+}
+
+// BizError is how a server middleware answers with a business code. Kitex
+// turns a BizStatusError into a TTHeader status only when the handler
+// returns it; one returned by a middleware would reach the client as a
+// transport error ("remote or network error") and the gateway would say
+// 5001. So the middleware sets it on the RPC info itself and returns nil,
+// which is what the client decodes as the business error.
+//
+// BizError 是服务端中间件回业务码的方式：Kitex 只把 handler 返回的 BizStatusError 转成
+// TTHeader 状态，中间件直接返回的会变成传输错误（网关看到 5001）；所以这里把它写进 rpcinfo
+// 再返回 nil，客户端就按业务错误解码。
+func BizError(ctx context.Context, err error) error {
+	biz, ok := kerrors.FromBizStatusError(err)
+	if !ok {
+		return err
+	}
+	if ri := rpcinfo.GetRPCInfo(ctx); ri != nil {
+		if setter, ok := ri.Invocation().(rpcinfo.InvocationSetter); ok {
+			setter.SetBizStatusErr(biz)
+			return nil
+		}
+	}
+	return err
 }
 
 var validatorMsg = regexp.MustCompile(`^field (\w+) (.*)$`)

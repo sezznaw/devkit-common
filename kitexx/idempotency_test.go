@@ -3,6 +3,7 @@ package kitexx
 import (
 	"context"
 	"errors"
+	"github.com/cloudwego/kitex/pkg/rpcinfo"
 	"testing"
 
 	"github.com/alicebob/miniredis/v2"
@@ -84,17 +85,10 @@ func TestIdempotencyRefusals(t *testing.T) {
 	zlogtest.Discard(t)
 	rt := runtimeWithRedis(t)
 	ctx := withRPCInfo(context.Background(), "wallet", "Transfer", "")
-	code := func(err error) int32 {
-		b, ok := kerrors.FromBizStatusError(err)
-		if !ok {
-			return -1
-		}
-		return b.BizStatusCode()
-	}
 
 	// Empty id.
 	ep := rt.Idempotency()(func(ctx context.Context, req, resp any) error { return nil })
-	if err := ep(ctx, &transferArgs{Req: &transferReq{}}, &transferResult{}); code(err) != CodeRequestIDRequired {
+	if err := ep(ctx, &transferArgs{Req: &transferReq{}}, &transferResult{}); bizOf(ctx, err) != CodeRequestIDRequired {
 		t.Errorf("empty request_id: %v", err)
 	}
 
@@ -109,7 +103,7 @@ func TestIdempotencyRefusals(t *testing.T) {
 	})
 	go func() { _ = slow(ctx, &transferArgs{Req: &transferReq{RequestId: "r3"}}, &transferResult{}) }()
 	<-started
-	if err := slow(ctx, &transferArgs{Req: &transferReq{RequestId: "r3"}}, &transferResult{}); code(err) != CodeRequestInProgress {
+	if err := slow(ctx, &transferArgs{Req: &transferReq{RequestId: "r3"}}, &transferResult{}); bizOf(ctx, err) != CodeRequestInProgress {
 		t.Errorf("while running: %v", err)
 	}
 	close(release)
@@ -141,10 +135,24 @@ func TestIdempotencyRefusals(t *testing.T) {
 
 	// No Redis: an idempotent request is refused, a plain one is not.
 	none := (&Runtime{}).Idempotency()(func(ctx context.Context, req, resp any) error { return nil })
-	if err := none(ctx, &transferArgs{Req: &transferReq{RequestId: "r5"}}, &transferResult{}); code(err) != CodeIdempotencyUnavailable {
+	if err := none(ctx, &transferArgs{Req: &transferReq{RequestId: "r5"}}, &transferResult{}); bizOf(ctx, err) != CodeIdempotencyUnavailable {
 		t.Errorf("without redis: %v", err)
 	}
 	if err := none(ctx, &plainArgs{Req: &struct{ X int }{1}}, &transferResult{}); err != nil {
 		t.Errorf("without redis, plain request: %v", err)
 	}
+}
+
+// bizOf reads the business code a middleware answered with: set on the
+// RPC info (BizError) when there is one, else the returned error.
+func bizOf(ctx context.Context, err error) int32 {
+	if ri := rpcinfo.GetRPCInfo(ctx); ri != nil {
+		if biz := ri.Invocation().BizStatusErr(); biz != nil {
+			return biz.BizStatusCode()
+		}
+	}
+	if biz, ok := kerrors.FromBizStatusError(err); ok {
+		return biz.BizStatusCode()
+	}
+	return 0
 }
