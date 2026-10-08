@@ -6,8 +6,8 @@
 package centrifugox
 
 import (
-	"cmp"
 	"bytes"
+	"cmp"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -53,8 +53,8 @@ const (
 	SourcePlatform = "platform"
 
 	defaultUserChannel = "user:"
-	defaultTokenTTL = 24 * time.Hour
-	tracerName      = "github.com/sezznaw/devkit-common/centrifugox"
+	defaultTokenTTL    = 24 * time.Hour
+	tracerName         = "github.com/sezznaw/devkit-common/centrifugox"
 )
 
 func (c Config) SourceName() string {
@@ -95,12 +95,12 @@ func (c Config) Static() Target {
 
 // Client talks to one Centrifugo.
 type Client struct {
-	api    string
-	key    string
+	api         string
+	key         string
 	secret      []byte
 	ttl         time.Duration
 	userChannel string
-	http   *http.Client
+	http        *http.Client
 }
 
 // Open checks the server answers (the info call) and returns the client.
@@ -109,12 +109,12 @@ func Open(ctx context.Context, t Target, cfg Config) (*Client, error) {
 		return nil, fmt.Errorf("centrifugox: api_addr and api_key are required")
 	}
 	c := &Client{
-		api:    strings.TrimRight(t.APIAddr, "/"),
-		key:    t.APIKey,
+		api:         strings.TrimRight(t.APIAddr, "/"),
+		key:         t.APIKey,
 		secret:      []byte(t.TokenSecret),
 		ttl:         cfg.TokenTTL.Or(defaultTokenTTL),
 		userChannel: cmp.Or(cfg.UserChannel, defaultUserChannel),
-		http:   &http.Client{Timeout: 10 * time.Second},
+		http:        &http.Client{Timeout: 10 * time.Second},
 	}
 	var info json.RawMessage
 	if err := c.call(ctx, "info", map[string]any{}, &info); err != nil {
