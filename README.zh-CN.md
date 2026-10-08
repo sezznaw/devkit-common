@@ -376,9 +376,11 @@ API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 
 
 ### 金额 `moneyx`
 
-金额是最小货币单位的整数加 ISO 4217 货币码，永远不是浮点：`moneyx.Money{Amount: 1234, Currency: "USD"}` 是 12.34 美元。IDL 侧是 `common.Money`（项目 `idl/common/common.thrift`，两个同名字段）：`moneyx.Of(req.Stake)` 转进来，`&common.Money{Amount: m.Amount, Currency: m.Currency}` 回去。JSON 就是 IDL 的样子 `{"amount":1234,"currency":"USD"}`。
+金额是货币主单位的十进制小数加 ISO 4217 货币码：`moneyx.MustParse("12.34", "USD")`。不是"分"的整数——钱在系统每个边界上都是小数（厂商回调、支付、玩家、流水、报表），整数要在每个边界换算一次、每次都得知道货币小数位；也不是浮点——浮点存不下 0.1。运算交给 shopspring/decimal（唯一依赖），`moneyx` 补货币、货币小数位（USD 2、JPY 0、KWD 3、BTC 8；`RegisterCurrency` 可加）、舍入策略和 IDL / JSON / GORM 的形状。完整理由见包注释。
 
-运算都在类型上，小数只在这里出现一次：`Add`、`Sub`、`Cmp`（货币必须一致），`MulDecimal("1.85")` 算赔率、`MulRatio(25, 1000)` 算 2.5% 的费（都四舍五入到最小单位，远离零），`Split(n)` 分成加起来正好的几份。`Parse("12.34", "USD")` 按货币的小数位（`Exponent`：USD 2、JPY 0、BTC 8）读用户输入，多了就拒绝。GORM 存两列：嵌入并加前缀 `Balance moneyx.Money \`gorm:"embedded;embeddedPrefix:balance_"\``，迁移里就是 `balance_amount BIGINT`、`balance_currency CHAR(3)`。`devkit lint` 的 `money-type` 规则拒绝 IDL 里其他类型的金额字段。
+IDL 侧是 `common.Money {string amount, string currency}`（项目的 `idl/common/common.thrift`）：`m, err := moneyx.Of(req.Stake)` 转进来并拒绝超出货币小数位的输入；`a, c := m.Parts()` 回去。JSON 是 `{"amount":"12.34","currency":"USD"}`，字符串，JavaScript 不会碰到浮点。比例（赔率、费率、汇率）是 `common.Decimal`，字符串，Go 里是 `decimal.Decimal`。
+
+`Add`、`Sub`、`Cmp`、`Equal`（别用 `==`，decimal 的 `==` 比的是内部结构）精确且要求同货币。小数只在一处出现：`m.Mul(rate, mode)` 按指定 `Rounding` 舍入一次到货币小数位（`RoundHalfUp`、派彩用 `RoundDown`、手续费用 `RoundUp`、`RoundHalfEven`）；多步公式中间用 `m.Amount` 走小数，最后 `FromDecimal(d, 货币, mode)` 回来一次。`Split(n)`、`Allocate(70, 20, 10)` 分出加起来正好的几份。GORM 存两列：嵌入并加前缀 `Balance moneyx.Money \`gorm:"embedded;embeddedPrefix:balance_"\``，迁移里 `balance_amount DECIMAL(24,8)`、`balance_currency CHAR(3)`。`devkit lint`（`money-type`、`rate-type`、`no-float-money`）拒绝金额和比例字段的其他类型。
 
 ### 版本号
 
