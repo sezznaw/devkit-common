@@ -557,6 +557,12 @@ sentence of a method's comment is its title, the rest its description. Three
 their path, `/v1/<domain>/...`; `/ping` goes under 系统). Nothing else to
 write. On for local and dev, off in production.
 
+### Money with `moneyx`
+
+Money is an integer amount in the currency's smallest unit plus the ISO 4217 code, never a float: `moneyx.Money{Amount: 1234, Currency: "USD"}` is 12.34 USD. The IDL side is `common.Money` (the project's `idl/common/common.thrift`, two fields with the same names): `moneyx.Of(req.Stake)` converts a generated struct in, `&common.Money{Amount: m.Amount, Currency: m.Currency}` goes out. The JSON form is the IDL's, `{"amount":1234,"currency":"USD"}`.
+
+Arithmetic lives on the type and is the only place a fraction appears: `Add`, `Sub`, `Cmp` (currencies must match), `MulDecimal("1.85")` for odds and `MulRatio(25, 1000)` for a 2.5% fee (both round half away from zero to the smallest unit, once), `Split(n)` for parts that add up exactly. `Parse("12.34", "USD")` reads user input with the currency's decimals (`Exponent`: 2 for USD, 0 for JPY, 8 for BTC) and refuses more. GORM stores a Money as two columns: embed it with a prefix, `Balance moneyx.Money \`gorm:"embedded;embeddedPrefix:balance_"\``, which gives `balance_amount BIGINT` and `balance_currency CHAR(3)` in the migration. `devkit lint` (rule `money-type`) refuses an IDL money field of any other type.
+
 ### Version
 
 Every record and span carries `version`: `log.version` from the configuration, else `APP_VERSION` (the deployment sets it to the image tag), else the VCS revision compiled into the binary (`-dirty` when the tree was modified at build time, which CI's `go mod tidy` can cause; the environment variable avoids that).

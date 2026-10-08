@@ -374,6 +374,12 @@ API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 
 `// @docs title: Sportsbook 玩家网关`、`// @docs description: ...`、`// @docs tag member: 会员`（接口按路径第二段 `/v1/<领域>/...`
 分组，`/ping` 归到"系统"）。不用再写别的。local 和 dev 开，生产关。
 
+### 金额 `moneyx`
+
+金额是最小货币单位的整数加 ISO 4217 货币码，永远不是浮点：`moneyx.Money{Amount: 1234, Currency: "USD"}` 是 12.34 美元。IDL 侧是 `common.Money`（项目 `idl/common/common.thrift`，两个同名字段）：`moneyx.Of(req.Stake)` 转进来，`&common.Money{Amount: m.Amount, Currency: m.Currency}` 回去。JSON 就是 IDL 的样子 `{"amount":1234,"currency":"USD"}`。
+
+运算都在类型上，小数只在这里出现一次：`Add`、`Sub`、`Cmp`（货币必须一致），`MulDecimal("1.85")` 算赔率、`MulRatio(25, 1000)` 算 2.5% 的费（都四舍五入到最小单位，远离零），`Split(n)` 分成加起来正好的几份。`Parse("12.34", "USD")` 按货币的小数位（`Exponent`：USD 2、JPY 0、BTC 8）读用户输入，多了就拒绝。GORM 存两列：嵌入并加前缀 `Balance moneyx.Money \`gorm:"embedded;embeddedPrefix:balance_"\``，迁移里就是 `balance_amount BIGINT`、`balance_currency CHAR(3)`。`devkit lint` 的 `money-type` 规则拒绝 IDL 里其他类型的金额字段。
+
 ### 版本号
 
 每条日志和 span 带的 `version`：配置里的 `log.version`，否则环境变量 `APP_VERSION`（部署把镜像 tag 注进来），否则编译进二进制的 git 提交号（构建时工作区有改动会带 `-dirty`，CI 的 `go mod tidy` 可能导致；用环境变量就不会）。
