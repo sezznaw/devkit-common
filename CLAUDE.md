@@ -9,7 +9,7 @@ Three names to keep straight:
 
 - Go module path: `github.com/sezznaw/devkit-common`
 - GitHub repository: `sezznaw/devkit-common` (public)
-- Local directory: `common` (sibling of `../devkit` and `../devkit-registry`)
+- Local directory: `devkit-common` (sibling of `../devkit` and `../devkit-registry`; renamed from `common` on 2026-10-08)
 
 It is a runtime dependency of production services, which is why it is its own
 module rather than part of the devkit CLI or the template registry.
