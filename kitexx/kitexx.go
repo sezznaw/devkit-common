@@ -92,6 +92,11 @@ type Config struct {
 	Docs struct {
 		Enabled bool `yaml:"enabled"`
 	} `yaml:"docs"`
+	// CORS: cors.enabled lets browsers on other origins (a web front end
+	// served from its own domain, a developer's Vite on localhost) call an
+	// API service; hertzx.New installs the middleware. allowed_origins lists
+	// the exact origins (scheme, host, port); nothing is allowed by default.
+	CORS CORSConfig `yaml:"cors"`
 	// RPCClient: timeout, retry and circuit breaker of the calls this
 	// service makes to other services (ClientOptions). Defaults suit the
 	// cluster; the section is only for changing them.

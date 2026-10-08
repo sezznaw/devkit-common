@@ -25,6 +25,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	hconfig "github.com/cloudwego/hertz/pkg/common/config"
+	"github.com/hertz-contrib/cors"
 
 	"github.com/sezznaw/devkit-common/kitexx"
 	"github.com/sezznaw/devkit-common/nacosx"
@@ -73,8 +74,29 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 		server.WithDisablePrintRoute(true),
 	}, opts...)
 	h := server.New(all...)
+	// CORS first: a preflight is answered before the login check sees it.
+	if cfg.CORS.Enabled {
+		h.Use(CORS(cfg.CORS))
+		zlog.Info("cors on", zlog.Any("allowed_origins", cfg.CORS.AllowedOrigins))
+	}
 	h.Use(Tracing(), Metrics(), RequestLog(), Recovery())
 	return h, nil
+}
+
+// CORS is the middleware of the `cors:` section: the listed origins may
+// call every route with POST, GET or OPTIONS and the headers a client of
+// ours sends; the page can read x-trace-id. A browser request from an origin
+// not in the list is refused with 403 (requests without an Origin header,
+// such as curl or a mobile app, are not affected).
+func CORS(cfg kitexx.CORSConfig) app.HandlerFunc {
+	return cors.New(cors.Config{
+		AllowOrigins:     cfg.AllowedOrigins,
+		AllowMethods:     []string{"POST", "GET", "OPTIONS"},
+		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-Id"},
+		ExposeHeaders:    []string{"x-trace-id"},
+		AllowCredentials: false,
+		MaxAge:           12 * time.Hour,
+	})
 }
 
 // Run serves until SIGINT, SIGTERM or SIGHUP and then stops in the order that
