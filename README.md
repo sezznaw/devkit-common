@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
 | `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
+| `authx`   | the login state: one authentication service issues access (JWT, 15m) and refresh (30d, rotated, replay detected) tokens per realm (member, admin, agent) with sessions in Redis; every gateway verifies its realm's tokens locally plus one Redis read and puts the identity into the context (`kitexx.UID(ctx)`, carried over RPC); `hertzx.RequireLogin` protects every endpoint not marked `// @public` in the IDL; see below |
 | `s3x`     | object storage (SeaweedFS on dev, any S3 later) from the `s3:` section: `rt.S3.Put/Get/Stat/List/Delete`, presigned download and upload URLs, every file under the service's own prefix; source static or the deployment's datasource row; every call a span and a metric; see below |
 | `httpx`   | calls to external HTTP APIs (resty + otelhttp): providers listed under `providers:` with base URL, timeout, retries and headers from the environment; `rt.Provider("odds-feed").GetJSON(ctx, path, &out)`; trace carried on, one log record per call without secrets, metrics; a service with providers must run in the provider namespace; see below |
 | `webhookx` | the callbacks a provider sends us (payment results, settlements), on a Hertz service in the provider namespace: `webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`; source-address check, signature check (hmac-sha256, basic, or the vendor's own Verifier), raw copy to Kafka for disputes, event-id dedupe through Redis, 500 on a handler error so the provider retries, metrics; see below |
@@ -559,6 +560,37 @@ write. On for local and dev, off in production.
 ### Version
 
 Every record and span carries `version`: `log.version` from the configuration, else `APP_VERSION` (the deployment sets it to the image tag), else the VCS revision compiled into the binary (`-dirty` when the tree was modified at build time, which CI's `go mod tidy` can cause; the environment variable avoids that).
+
+### Login state with `authx`
+
+```yaml
+auth:
+  enabled: true
+  secret: "${AUTH_JWT_SECRET}"   # same value in the authentication service and every gateway; 32+ chars
+  realm: member                  # a gateway: which principals it serves (member | admin | agent)
+  access_ttl: 15m
+  refresh_ttl: 720h
+  single_session: true           # a new login ends the previous session
+```
+
+One service authenticates everyone (`ser-auth`): it verifies credentials
+through the owning service (members: ser-member) and uses
+`authx.NewIssuer(rt.Config.Auth, rt.Redis)` for `Login`, `Refresh` (the old
+refresh token is retired; using it again is a leak and revokes every session
+of the principal), `Logout` (session ended, access token blacklisted) and
+`RevokeAll` (password changed, account frozen, kicked by staff). Sessions
+live in its Redis keys (`auth:*`).
+
+A gateway verifies, it does not call ser-auth per request:
+`authx.NewVerifier(rt.Config.Auth, rt.Redis)` checks the signature and
+claims locally and reads Redis once (session alive, token not blacklisted);
+`hertzx.RequireLogin(h, verifier, openAPI)` installs that on every endpoint
+except the ones the IDL marks `// @public` (apidoc leaves those without a
+security requirement) and the framework's paths (/ping, /docs, /openapi.*).
+A request without a token is HTTP 401 `{code: 1004}`, a revoked session
+`{code: 1005}`. The identity travels with the context: `kitexx.UID(ctx)` in
+the gateway handler and in every RPC service it calls, so `uid` is never a
+request field. Authorization (what a principal may do) is not here.
 
 ### Metrics with `metricsx`
 

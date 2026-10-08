@@ -12,7 +12,10 @@
 //
 // `// @docs title: ...`, `// @docs description: ...` and `// @docs tag <domain>: <名字>`
 // lines in the IDL name the document and its sections (docs.go); the first
-// line of a method's comment is its summary. -title / -description on the
+// line of a method's comment is its summary. A `// @public` line in a
+// method's comment marks it as needing no login; every other operation gets
+// the bearer security requirement, which is also what the gateway's
+// RequireLogin reads to decide what to protect. -title / -description on the
 // command line win over the directives.
 //
 //	go run github.com/sezznaw/devkit-common/cmd/apidoc -idl ../idl/ser-api/ser-api.thrift -out cmd/ser-api/openapi.yaml -version v1.2.3
@@ -98,7 +101,7 @@ func run(idl, out, title, version, desc string) error {
 	if desc == "" {
 		desc = d.Description
 	}
-	patched, err := Patch(doc, title, version, desc, strings.TrimSuffix(filepath.Base(idl), ".thrift"), d)
+	patched, err := Patch(doc, title, version, desc, strings.TrimSuffix(filepath.Base(idl), ".thrift"), d, PublicMethods(src))
 	if err != nil {
 		return err
 	}
@@ -144,7 +147,7 @@ func Annotate(src []byte) []byte {
 
 // Patch fills info.title / version / description, keeping the document's
 // order (a yaml.Node edit, not a map round trip).
-func Patch(doc []byte, title, version, desc, fallback string, d Directives) ([]byte, error) {
+func Patch(doc []byte, title, version, desc, fallback string, d Directives, public map[string]bool) ([]byte, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(doc, &root); err != nil {
 		return nil, fmt.Errorf("parse openapi.yaml: %w", err)
@@ -172,6 +175,7 @@ func Patch(doc []byte, title, version, desc, fallback string, d Directives) ([]b
 		mapDel(info, "description")
 	}
 	Localize(top, d)
+	Secure(top, public)
 	out, err := yaml.Marshal(&root)
 	if err != nil {
 		return nil, err

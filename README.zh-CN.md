@@ -18,6 +18,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
+| `authx`   | 登录态：一个认证服务按领域（member、admin、agent）签发 access（JWT，15 分钟）和 refresh（30 天，轮换、检测重放）令牌，会话在 Redis；每个网关本地校验自己领域的令牌加一次 Redis 读，把身份放进上下文（`kitexx.UID(ctx)`，随 RPC 透传）；`hertzx.RequireLogin` 保护 IDL 里没标 `// @public` 的所有接口；详见下文 |
 | `s3x`     | 对象存储（dev 是 SeaweedFS，以后可换任何 S3），按 `s3:` 配置：`rt.S3.Put/Get/Stat/List/Delete`、预签名下载和上传链接，所有文件在服务自己的前缀下；source static 或本部署的数据源表；每次调用一个 span 和一条指标；详见下文 |
 | `httpx`   | 调外部 HTTP 接口（resty + otelhttp）：`providers:` 里登记 base URL、超时、重试、来自环境变量的头；`rt.Provider("odds-feed").GetJSON(ctx, path, &out)`；trace 带过去，每次调用一条不含密钥的日志，指标；有 providers 的服务必须部署在 provider namespace；详见下文 |
 | `webhookx` | 厂商回调我们（支付结果、赛果结算），在 provider namespace 的 Hertz 服务上：`webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`；来源 IP、验签（hmac-sha256、basic 或厂商私有 Verifier）、原始报文留档到 Kafka、按事件 id 用 Redis 去重、handler 出错回 500 让厂商重试、指标；详见下文 |
@@ -376,6 +377,28 @@ API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 
 ### 版本号
 
 每条日志和 span 带的 `version`：配置里的 `log.version`，否则环境变量 `APP_VERSION`（部署把镜像 tag 注进来），否则编译进二进制的 git 提交号（构建时工作区有改动会带 `-dirty`，CI 的 `go mod tidy` 可能导致；用环境变量就不会）。
+
+### 用 `authx` 管登录态
+
+```yaml
+auth:
+  enabled: true
+  secret: "${AUTH_JWT_SECRET}"   # 认证服务和每个网关同一个值；至少 32 字符
+  realm: member                  # 网关填：服务哪类主体（member | admin | agent）
+  access_ttl: 15m
+  refresh_ttl: 720h
+  single_session: true           # 新登录顶掉旧会话
+```
+
+一个服务负责所有人的认证（`ser-auth`）：通过账号所属的服务校验密码（会员是 ser-member），用
+`authx.NewIssuer(rt.Config.Auth, rt.Redis)` 做 `Login`、`Refresh`（旧 refresh 作废；再用它就是泄露，吊销该主体全部会话）、
+`Logout`（结束会话、拉黑 access）和 `RevokeAll`（改密码、封号、后台踢人）。会话数据在它的 Redis 键里（`auth:*`）。
+
+网关只校验、不按请求调 ser-auth：`authx.NewVerifier(rt.Config.Auth, rt.Redis)` 本地验签名和声明，再读一次 Redis
+（会话是否还活着、令牌是否被拉黑）；`hertzx.RequireLogin(h, verifier, openAPI)` 把它装到所有接口上，除了 IDL 里标了
+`// @public` 的（apidoc 不给它们加安全要求）和框架自己的路径（/ping、/docs、/openapi.*）。没带令牌回 HTTP 401
+`{code: 1004}`，会话已失效回 `{code: 1005}`。身份随上下文走：网关 handler 和它调用的每个 RPC 服务里 `kitexx.UID(ctx)`
+都能拿到，`uid` 永远不再是请求字段。授权（能做什么）不在这里。
 
 ### 用 `metricsx` 出指标
 

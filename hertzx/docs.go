@@ -72,8 +72,34 @@ const docsPage = `<!doctype html>
     <title>{{title}}</title>
   </head>
   <body>
+    <script>
+      // 登录后自动带 token：拦截页面发出的 fetch，把登录 / 刷新接口返回的 data.access_token 记住，
+      // 之后每个没有 Authorization 的请求自动加上。token 只存在这个浏览器的 localStorage 里。
+      (function () {
+        var KEY = 'sportsbook_docs_access_token';
+        var orig = window.fetch.bind(window);
+        function remember(resp) {
+          try {
+            resp.clone().json().then(function (d) {
+              if (d && d.data && typeof d.data.access_token === 'string') localStorage.setItem(KEY, d.data.access_token);
+              if (d && d.code === 1004 || d && d.code === 1005) localStorage.removeItem(KEY);
+            }).catch(function () {});
+          } catch (e) {}
+        }
+        window.fetch = function (input, init) {
+          var req = input instanceof Request ? input : new Request(input, init);
+          var tok = localStorage.getItem(KEY);
+          var sameOrigin = req.url.indexOf(location.origin) === 0;
+          if (tok && sameOrigin && !req.headers.get('Authorization')) {
+            var h = new Headers(req.headers); h.set('Authorization', 'Bearer ' + tok);
+            req = new Request(req, { headers: h });
+          }
+          return orig(req).then(function (resp) { if (sameOrigin) remember(resp); return resp; });
+        };
+      })();
+    </script>
     <script id="api-reference" data-url="/openapi.yaml"
-      data-configuration='{"orderSchemaPropertiesBy":"preserve","orderRequiredPropertiesFirst":false,"persistAuth":true,"hideClientButton":true,"defaultOpenAllTags":true}'></script>
+      data-configuration='{"orderSchemaPropertiesBy":"preserve","orderRequiredPropertiesFirst":false,"persistAuth":true,"hideClientButton":true,"defaultOpenAllTags":true,"authentication":{"preferredSecurityScheme":"bearerAuth"}}'></script>
     <script src="/docs/scalar.js"></script>
   </body>
 </html>

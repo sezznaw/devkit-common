@@ -53,6 +53,82 @@ func ParseDirectives(src []byte) Directives {
 
 const systemTag = "系统"
 
+// PublicMethods are the service methods whose comment block carries a
+// `// @public` line: no login required. Everything else needs a bearer token.
+func PublicMethods(src []byte) map[string]bool {
+	out := map[string]bool{}
+	lines := strings.Split(string(src), "\n")
+	pending := false
+	for _, line := range lines {
+		t := strings.TrimSpace(line)
+		switch {
+		case t == "":
+			continue
+		case strings.HasPrefix(t, "//"):
+			if strings.Contains(t, "@public") {
+				pending = true
+			}
+		default:
+			if pending {
+				if m := methodLine.FindStringSubmatch(line); m != nil {
+					out[m[1]] = true
+				}
+			}
+			pending = false
+		}
+	}
+	return out
+}
+
+var methodLine = regexp.MustCompile(`^\s*\w+\s+(\w+)\s*\(`)
+
+// Secure adds the bearer security scheme and requires it on every operation
+// except the public ones (an empty security list, which is how the gateway's
+// RequireLogin recognises them in the embedded document).
+func Secure(top *yaml.Node, public map[string]bool) {
+	paths := mapGet(top, "paths")
+	if paths == nil {
+		return
+	}
+	for i := 0; i+1 < len(paths.Content); i += 2 {
+		item := paths.Content[i+1]
+		for j := 0; j+1 < len(item.Content); j += 2 {
+			op := item.Content[j+1]
+			if op.Kind != yaml.MappingNode {
+				continue
+			}
+			opID := ""
+			if n := mapGet(op, "operationId"); n != nil {
+				opID = n.Value
+			}
+			method := opID
+			if k := strings.LastIndex(opID, "_"); k >= 0 {
+				method = opID[k+1:]
+			}
+			mapDel(op, "security")
+			if public[method] {
+				op.Content = append(op.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "security"}, &yaml.Node{Kind: yaml.SequenceNode, Style: yaml.FlowStyle})
+			} else {
+				req := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Value: "bearerAuth"}, {Kind: yaml.SequenceNode, Style: yaml.FlowStyle}}}
+				op.Content = append(op.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "security"}, &yaml.Node{Kind: yaml.SequenceNode, Content: []*yaml.Node{req}})
+			}
+		}
+	}
+	comp := mapGet(top, "components")
+	if comp == nil {
+		comp = &yaml.Node{Kind: yaml.MappingNode}
+		top.Content = append(top.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "components"}, comp)
+	}
+	mapDel(comp, "securitySchemes")
+	scheme := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		{Kind: yaml.ScalarNode, Value: "type"}, {Kind: yaml.ScalarNode, Value: "http"},
+		{Kind: yaml.ScalarNode, Value: "scheme"}, {Kind: yaml.ScalarNode, Value: "bearer"},
+		{Kind: yaml.ScalarNode, Value: "bearerFormat"}, {Kind: yaml.ScalarNode, Value: "JWT"},
+		{Kind: yaml.ScalarNode, Value: "description"}, {Kind: yaml.ScalarNode, Value: "登录接口返回的 access_token；Authorization: Bearer <token>。标了 @public 的接口不需要。"},
+	}}
+	comp.Content = append(comp.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "securitySchemes"}, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Value: "bearerAuth"}, scheme}})
+}
+
 // Localize rewrites the generated document for people: every operation gets
 // a summary (the first line of its IDL comment) and a tag named after its
 // domain, the top-level tag list follows the directives' order, and the

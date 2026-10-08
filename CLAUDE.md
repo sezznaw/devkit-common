@@ -487,6 +487,22 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   (0.15.0) installs the plugin in `make tools`, runs apidoc in `make gen`
   into cmd/<svc>/openapi.yaml (gitignored, embedded with go:embed by
   main.go) and calls ServeDocs after hertzx.New.
+- `authx` (v0.25.0; owner's design decisions 2026-10-08: a dedicated
+  ser-auth, authentication for every realm, authorization elsewhere; members
+  single-session, no guest login; access 15m, refresh 30d): HS256 JWT with
+  claims sub/typ(realm)/sid/jti; Redis keys `auth:sess:<realm>:<uid>` (current
+  sid), `auth:sessions:<realm>:<uid>` (set), `auth:sid:<sid>` (alive marker,
+  what Verify and Refresh check), `auth:rt:<sha256(token)>` (refresh record),
+  `auth:rtused:<hash>` (retired, for replay detection), `auth:bl:<jti>`
+  (logout before expiry). Issuer (ser-auth) and Verifier (gateways) share
+  the package; nobody else touches the keys. `kitexx/identity.go` carries
+  UID/REALM/SID as persistent metainfo (like TRACE_ID); `UID(ctx)` is how
+  handlers get the member, `MustUID` panics to catch a wrongly @public
+  endpoint. `hertzx.RequireLogin` reads the embedded OpenAPI: apidoc's
+  `Secure` gives every operation `security: [{bearerAuth: []}]` except the
+  methods whose comment has `// @public` (`security: []`), so the IDL is the
+  single source of what is public; the docs page gets a bearer scheme and a
+  script that remembers `data.access_token` from responses and attaches it.
 - `etcdx` was removed in v0.20.0: nothing in the stack runs etcd.
 
 - `kitexx.VersionEnv` (`APP_VERSION`, v0.24.0): `Bootstrap` fills `cfg.Log.Version`

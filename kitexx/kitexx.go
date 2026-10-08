@@ -22,6 +22,7 @@ import (
 	"github.com/cloudwego/kitex/server"
 	"github.com/cloudwego/kitex/transport"
 
+	"github.com/sezznaw/devkit-common/authx"
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/httpx"
@@ -74,6 +75,9 @@ type Config struct {
 	// one bucket under a prefix of the service's own; source platform reads
 	// the datasource row of kind s3.
 	S3 s3x.Config `yaml:"s3"`
+	// Auth: the login state (authx). A gateway sets realm and verifies
+	// tokens (hertzx.RequireLogin); the authentication service issues them.
+	Auth authx.Config `yaml:"auth"`
 	// Metrics: metrics.enabled serves Prometheus metrics on metrics.addr
 	// (default port 9091): requests by method and code, latency histograms,
 	// Go runtime, MySQL pool, Redis commands, Kafka client. Deployments scrape
@@ -377,6 +381,9 @@ func LoggingMiddleware() endpoint.Middleware {
 			}
 			ctx, traceID := ensureTraceID(ctx)
 			ctx = zlog.CtxWith(ctx, zlog.Str(traceIDField, traceID), zlog.Str("method", method))
+			if uid, ok := UID(ctx); ok {
+				ctx = zlog.CtxWith(ctx, zlog.Int("uid", uid))
+			}
 
 			err := next(ctx, req, resp)
 
