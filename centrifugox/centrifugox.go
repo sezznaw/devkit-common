@@ -6,6 +6,7 @@
 package centrifugox
 
 import (
+	"cmp"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -39,12 +40,19 @@ type Config struct {
 	TokenSecret string `yaml:"token_secret"`
 	// TokenTTL is how long a connection token is valid. Default 24h.
 	TokenTTL config.Duration `yaml:"token_ttl"`
+	// UserChannel is the prefix of a user's own channel: UserChannel(uid)
+	// is where the service publishes to one user and the channel a
+	// connection token subscribes its holder to (server side, so the
+	// client needs no permission and cannot pick another user's channel).
+	// Default "user:" (the Centrifugo namespace "user").
+	UserChannel string `yaml:"user_channel"`
 }
 
 const (
 	SourceStatic   = "static"
 	SourcePlatform = "platform"
 
+	defaultUserChannel = "user:"
 	defaultTokenTTL = 24 * time.Hour
 	tracerName      = "github.com/sezznaw/devkit-common/centrifugox"
 )
@@ -89,8 +97,9 @@ func (c Config) Static() Target {
 type Client struct {
 	api    string
 	key    string
-	secret []byte
-	ttl    time.Duration
+	secret      []byte
+	ttl         time.Duration
+	userChannel string
 	http   *http.Client
 }
 
@@ -102,8 +111,9 @@ func Open(ctx context.Context, t Target, cfg Config) (*Client, error) {
 	c := &Client{
 		api:    strings.TrimRight(t.APIAddr, "/"),
 		key:    t.APIKey,
-		secret: []byte(t.TokenSecret),
-		ttl:    cfg.TokenTTL.Or(defaultTokenTTL),
+		secret:      []byte(t.TokenSecret),
+		ttl:         cfg.TokenTTL.Or(defaultTokenTTL),
+		userChannel: cmp.Or(cfg.UserChannel, defaultUserChannel),
 		http:   &http.Client{Timeout: 10 * time.Second},
 	}
 	var info json.RawMessage
@@ -151,17 +161,34 @@ func (c *Client) History(ctx context.Context, channel string, limit int) ([]json
 // ConnectionToken signs the JWT a client presents when it connects: its
 // subject is the user id, so Centrifugo knows who it is and the service can
 // publish to "user:<id>". The gateway hands it to a logged-in client.
-func (c *Client) ConnectionToken(userID string) (string, error) {
+func (c *Client) ConnectionToken(userID string, extraChannels ...string) (string, error) {
 	if len(c.secret) == 0 {
 		return "", fmt.Errorf("centrifugox: token_secret is not set; connection tokens cannot be signed")
 	}
 	now := time.Now()
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, jwt.RegisteredClaims{
-		Subject:   userID,
-		IssuedAt:  jwt.NewNumericDate(now),
-		ExpiresAt: jwt.NewNumericDate(now.Add(c.ttl)),
+	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, connectionClaims{
+		RegisteredClaims: jwt.RegisteredClaims{
+			Subject:   userID,
+			IssuedAt:  jwt.NewNumericDate(now),
+			ExpiresAt: jwt.NewNumericDate(now.Add(c.ttl)),
+		},
+		Channels: append([]string{c.UserChannel(userID)}, extraChannels...),
 	})
 	return tok.SignedString(c.secret)
+}
+
+// connectionClaims: Centrifugo's "channels" claim lists the server-side
+// subscriptions the connection gets at connect; the client receives them
+// on its connection ("publication" with the channel), without subscribing.
+type connectionClaims struct {
+	jwt.RegisteredClaims
+	Channels []string `json:"channels,omitempty"`
+}
+
+// UserChannel is the channel of one user: Publish to it to reach that
+// user; the user's connection token subscribes to it.
+func (c *Client) UserChannel(userID string) string {
+	return c.userChannel + userID
 }
 
 // apiError is Centrifugo's error object.

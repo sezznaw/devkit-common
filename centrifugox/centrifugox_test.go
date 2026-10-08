@@ -86,10 +86,18 @@ func TestConnectionToken(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	claims := jwt.RegisteredClaims{}
+	claims := connectionClaims{}
 	parsed, err := jwt.ParseWithClaims(tok, &claims, func(*jwt.Token) (any, error) { return []byte("secret"), nil })
 	if err != nil || !parsed.Valid || claims.Subject != "42" || claims.ExpiresAt == nil {
 		t.Errorf("token: %v %+v", err, claims)
+	}
+	if len(claims.Channels) != 1 || claims.Channels[0] != "user:42" || c.UserChannel("42") != "user:42" {
+		t.Errorf("channels: %v", claims.Channels)
+	}
+	tok2, _ := c.ConnectionToken("42", "odds:live")
+	claims = connectionClaims{}
+	if _, err := jwt.ParseWithClaims(tok2, &claims, func(*jwt.Token) (any, error) { return []byte("secret"), nil }); err != nil || len(claims.Channels) != 2 {
+		t.Errorf("extra channels: %v %v", err, claims.Channels)
 	}
 	none, _ := Open(context.Background(), Target{APIAddr: srv.URL, APIKey: "key"}, Config{})
 	if _, err := none.ConnectionToken("42"); err == nil {
