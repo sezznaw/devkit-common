@@ -26,6 +26,11 @@ go get github.com/sezznaw/devkit-common@latest
 | `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
 | `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
 | `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
+| `delayx`  | 到某一刻执行一次（取消未支付订单、开赛封盘）：业务事务里 `rt.Delay.Schedule`，app.Setup 里 `rt.Delay.Handle`；至少一次、退避重试、failed 状态、指标；见下文 |
+| `idx`     | 业务唯一号（`rt.ID.Next()`）：53 位、按时间有序、跨副本唯一（实例号在 Redis 租）、JSON 数字装得下；见下文 |
+| `moneyx`  | 金额 = 小数 amount + 货币码，底层 shopspring/decimal，舍入模式、分账、`common.Money` 传输形式；见下文 |
+| `verifyx` | 部署后验证：框架的检查加 `app/verify.go`，`--verify` 作为 PostSync Job 跑；见下文 |
+| `testx`   | 测试用 Runtime（进程内 Redis 和 Kafka、记录推送的 Centrifugo、按迁移建的库）、身份 ctx、网关 JSON 助手；见下文 |
 
 最小的服务入口：
 
@@ -212,6 +217,12 @@ mysql:
 
 没有 `request_id` 字段的方法不受影响。
 
+### 锁与缓存 `redisx`
+
+**跨副本的锁。** `redisx.WithLock(ctx, rt.Redis, "settle:"+matchID, 30*time.Second, func(ctx context.Context) error {...})` 在服务所有副本范围内持锁执行函数（key `lock:<服务>:<名字>`）：结算一场比赛、改一个会员的余额、同步一个厂商。第二个调用方立刻得到 `redisx.ErrLocked`，或 `redisx.Wait(2*time.Second)` 等一会再放弃。函数运行期间锁在后台自动续期，所以 TTL 是"进程死掉多久后别人能接手"，不是工作时限；中途锁丢了（Redis 不可用、key 被删）函数的 ctx 被取消，WithLock 返回 `redisx.ErrLockLost`。handler 里的 `sync.Mutex` 只锁本副本，所以 `devkit lint` 的 `mutex` 规则在 handler、repo 里拦它，自己写 `SetNX` 也拦（规则 `lock`）。指标 `locks_total{name,result}`、`lock_wait_seconds`。
+
+**读穿缓存。** `members := redisx.NewCache[repo.Member](rt.Redis, "member", 5*time.Minute).Negative(repo.ErrMemberNotFound, 30*time.Second)`，然后 `m, err := members.Get(ctx, id, func(ctx) (repo.Member, error) { return r.load(ctx, id) })`：有缓存给缓存（key `cache:<服务>:member:<id>`，JSON），没有就跑 loader——同一个 key 同一进程同时只跑一次，热 key 不会打穿数据库——结果按 TTL ±10% 存起来。`Negative` 把"查无此物"也记一小段时间。写方在事务**提交之后**调 `members.Del(ctx, id)`（提交前删，并发的读会把旧值填回去）。Redis 不可用时 Get 就是直接调 loader，每分钟告警一条：缓存是优化，不是真相来源；`rt.Redis` 为 nil（没开 redis）同理。类型结构变了就换个缓存名。指标 `cache_requests_total{name,result}`（hit、miss、negative、error）。
+
 ### 用 `kafkax` 发事件和消费事件
 
 `kafka:` 段和前面一样（`enabled`、`source static` 的 `brokers` 或 `source platform` 的 datasource 表 kind 为 kafka 的行），
@@ -227,35 +238,21 @@ mysql:
 
 事件命名、主题命名在 idl 仓库的 README。
 
-### RPC 服务过载保护（`limits:`）
+#### 事务里的事件：outbox
 
-Kitex 服务的一个实例拒绝超出能力的请求，让过载变成快速的"忙"而不是一堆慢请求：同时处理不超过 `limits.max_in_flight`（默认 1000），每秒不超过 `limits.max_qps`（默认关，服务知道自己容量后再开；按 100ms 窗口计）, 连接不超过 `limits.max_connections`（10000）。被拒的请求不执行，回业务码 5003（`kitexx.CodeBusy`），网关像别的码一样透传，调用方稍后重试；指标 `rpc_server_rejected_total{rpc_method,reason}`，日志每分钟一条 WARN。Kitex 自带的限流器只用来限连接：限 QPS 时它直接断连接，客户端分不出是过载还是崩了（`devkit lint` 拦 `server.WithLimit`）。中间件排在链的最前面，拒绝一次不花别的代价。
+和数据库变更同属一件事的事件走 outbox，不走 `Publish`：在事务里 `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` 把事件写进本服务的 `outbox` 表（项目迁移建表，`kafkax.OutboxDDL` 是表结构）。事务提交则变更和事件都落地，回滚则都没有；同一进程里的转发器（服务同时有 Kafka 和 MySQL 时自动开，`kafka.outbox.enabled: false` 关）随后把行发出去，信封和 `Publish` 一样，trace 是发起请求的那条。至少一次投递、event id 不变，消费者照旧按 `ev.ID` 去重。发不出去的行按退避重试（1s、2s…5 分钟；表里有 `attempts`、`last_error`、`next_attempt_at`），一个坏主题不会挡住别的；多副本分摊（`FOR UPDATE SKIP LOCKED`）。已发的行保留 `kafka.outbox.retention`（7 天）后删除。指标 `kafka_outbox_pending`、`kafka_outbox_oldest_age_seconds`（按它告警）、`kafka_outbox_published_total{topic,status}`。`devkit lint` 的 `outbox` 规则拒绝在跑事务的代码里直接 `Publish`。
 
-### 唯一号 `idx`
+#### 死信与积压
 
-注单号、订单号、流水号用 `rt.ID.Next()`：53 位整数，跨服务所有副本唯一、按毫秒有序、看不出数量。选 53 位是为了它到哪都精确：JSON 数字、JavaScript 的 Number（整数到 2^53 为止）、Go 的 int64、BIGINT 列；64 位雪花过了网关必须转字串，哪里忘了就丢精度，而我们的规模用不着那几位。高 41 位是 2026-01-01 起的毫秒（够到 2095），低 12 位按 `id.instance_bits` 分给副本数和每毫秒的号数（默认 5 + 7：每服务 32 副本，每副本每毫秒 128 个、每秒 12.8 万；副本少单量大的项目设 3 + 9；以后改分配也不会和旧号冲突，高位的时间把它们分开）。实例号在 Redis 里租（`idx:<服务>:<n>`，后台续租、退出释放），副本之间不会重；没有 Redis 用 `INSTANCE_ID`；两者都没有只有本机运行会退到主机名哈希（并告警），线上 `Next` 会报 `idx.ErrNoInstance`（panic，由 Recovery 变成一次失败请求），宁可失败也不发重号。网关 IDL 和 RPC IDL 一样写 `i64 bet_no`。`idx.Time(id)` 是生成时刻。号不是秘密：读注单的 handler 要校验它属于登录的 uid。没人引用的行（会员、角色）继续自增；生成器给会离开系统的号用。
-
-### 用 `testx` 写测试
-
-handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL("../../infra/db/migrations/tenant"), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
-
-### 网关防护（`guard:`）
-
-API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 取代理转发的（X-Forwarded-For），即 Hertz 的 ClientIP。
-
-### 锁与缓存 `redisx`
-
-**跨副本的锁。** `redisx.WithLock(ctx, rt.Redis, "settle:"+matchID, 30*time.Second, func(ctx context.Context) error {...})` 在服务所有副本范围内持锁执行函数（key `lock:<服务>:<名字>`）：结算一场比赛、改一个会员的余额、同步一个厂商。第二个调用方立刻得到 `redisx.ErrLocked`，或 `redisx.Wait(2*time.Second)` 等一会再放弃。函数运行期间锁在后台自动续期，所以 TTL 是"进程死掉多久后别人能接手"，不是工作时限；中途锁丢了（Redis 不可用、key 被删）函数的 ctx 被取消，WithLock 返回 `redisx.ErrLockLost`。handler 里的 `sync.Mutex` 只锁本副本，所以 `devkit lint` 的 `mutex` 规则在 handler、repo 里拦它，自己写 `SetNX` 也拦（规则 `lock`）。指标 `locks_total{name,result}`、`lock_wait_seconds`。
-
-**读穿缓存。** `members := redisx.NewCache[repo.Member](rt.Redis, "member", 5*time.Minute).Negative(repo.ErrMemberNotFound, 30*time.Second)`，然后 `m, err := members.Get(ctx, id, func(ctx) (repo.Member, error) { return r.load(ctx, id) })`：有缓存给缓存（key `cache:<服务>:member:<id>`，JSON），没有就跑 loader——同一个 key 同一进程同时只跑一次，热 key 不会打穿数据库——结果按 TTL ±10% 存起来。`Negative` 把"查无此物"也记一小段时间。写方在事务**提交之后**调 `members.Del(ctx, id)`（提交前删，并发的读会把旧值填回去）。Redis 不可用时 Get 就是直接调 loader，每分钟告警一条：缓存是优化，不是真相来源；`rt.Redis` 为 nil（没开 redis）同理。类型结构变了就换个缓存名。指标 `cache_requests_total{name,result}`（hit、miss、negative、error）。
+handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<二进制> --dlq list` 列出本服务订阅的每个主题的死信队列里待处理的消息（offset、时间、key、事件类型和 id、错误）；`--dlq show <主题> <offset>` 看一条的全文；`--dlq replay <主题>` 把待处理的全部重发回原主题——原始记录加一个 `replayed-from` 头，修好的 handler 像第一次一样处理——然后标记完成；`--dlq replay <主题> <offset>` 只重发一条；`--dlq drop <主题>` 不重发直接标记完成。"待处理"是工具自己的消费组（`<服务>-dlq`）还没提交过去的部分，队列本身只追加。线上在服务自己的 Pod 里跑：`kubectl -n <ns> exec deploy/<服务> -- /app/<服务> --dlq list`；本机 `make dlq ARGS="list"`。先把修复发上去再回放。消费者还会上报 `kafka_consumer_lag{topic}`（每次拉取后离主题末尾还差多少条），`kafka_events_handled_total{result="dlq"}` 计被放进死信的数量；部署按这两个告警。
 
 ### 到某一刻执行一次：`delayx`
 
 必须在某个时刻执行的函数（15 分钟后取消未支付订单、开赛封盘、一小时后重试派彩）是延时任务，不是 `time.AfterFunc`（进程重启就丢），也不是定时扫表（一分钟延迟、全表扫）。在需要它的那次业务变更的事务里 `rt.Delay.Schedule(ctx, tx, "order.cancel-unpaid", orderNo, time.Now().Add(15*time.Minute), payload)` 往本服务的 `delayed_task` 表写一行（项目迁移建表，`delayx.DDL` 是表结构）：订单和它的取消任务要么一起存在，要么都不存在。`app.Setup` 里每种 kind 注册一次函数 `rt.Delay.Handle("order.cancel-unpaid", func(ctx, t *delayx.Task) error {...})`；同一进程里的调度器（服务有 MySQL 且注册了 handler 时自动开，`delay.enabled: false` 关）认领到点的行（`FOR UPDATE SKIP LOCKED`，多副本分摊）并执行，延迟不超过一个轮询间隔（1s）。`rt.Delay.Cancel(ctx, tx, kind, key)` 撤掉还没执行的任务（订单付了）。至少一次（执行中崩溃会重跑），所以 handler 要幂等：先重读状态（"订单还没付吗？"），没事可做就返回 nil。返回错误的 handler 按退避重试（1m、2m、4m…1h）直到 `delay.max_attempts`（5 次），然后任务标 `failed`、记 `last_error`、计入 `delay_tasks_failed`（按它告警）；`delay_tasks_overdue_seconds` 是最早到点未执行的任务晚了多久，`delay_tasks_run_total{kind,result}` 是结果计数。已完成的行保留 `delay.retention`（7 天）。部署后检查 `delay`：有任务超时两分钟未执行或已彻底失败就不通过。`devkit lint` 的 `delay` 规则拒绝服务代码里的 `time.AfterFunc` / `time.NewTimer`。周期性的工作（每晚报表）是 job（`jobx`），不是延时任务。
 
-#### 死信与积压
+### 唯一号 `idx`
 
-handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<二进制> --dlq list` 列出本服务订阅的每个主题的死信队列里待处理的消息（offset、时间、key、事件类型和 id、错误）；`--dlq show <主题> <offset>` 看一条的全文；`--dlq replay <主题>` 把待处理的全部重发回原主题——原始记录加一个 `replayed-from` 头，修好的 handler 像第一次一样处理——然后标记完成；`--dlq replay <主题> <offset>` 只重发一条；`--dlq drop <主题>` 不重发直接标记完成。"待处理"是工具自己的消费组（`<服务>-dlq`）还没提交过去的部分，队列本身只追加。线上在服务自己的 Pod 里跑：`kubectl -n <ns> exec deploy/<服务> -- /app/<服务> --dlq list`；本机 `make dlq ARGS="list"`。先把修复发上去再回放。消费者还会上报 `kafka_consumer_lag{topic}`（每次拉取后离主题末尾还差多少条），`kafka_events_handled_total{result="dlq"}` 计被放进死信的数量；部署按这两个告警。
+注单号、订单号、流水号用 `rt.ID.Next()`：53 位整数，跨服务所有副本唯一、按毫秒有序、看不出数量。选 53 位是为了它到哪都精确：JSON 数字、JavaScript 的 Number（整数到 2^53 为止）、Go 的 int64、BIGINT 列；64 位雪花过了网关必须转字串，哪里忘了就丢精度，而我们的规模用不着那几位。高 41 位是 2026-01-01 起的毫秒（够到 2095），低 12 位按 `id.instance_bits` 分给副本数和每毫秒的号数（默认 5 + 7：每服务 32 副本，每副本每毫秒 128 个、每秒 12.8 万；副本少单量大的项目设 3 + 9；以后改分配也不会和旧号冲突，高位的时间把它们分开）。实例号在 Redis 里租（`idx:<服务>:<n>`，后台续租、退出释放），副本之间不会重；没有 Redis 用 `INSTANCE_ID`；两者都没有只有本机运行会退到主机名哈希（并告警），线上 `Next` 会报 `idx.ErrNoInstance`（panic，由 Recovery 变成一次失败请求），宁可失败也不发重号。网关 IDL 和 RPC IDL 一样写 `i64 bet_no`。`idx.Time(id)` 是生成时刻。号不是秘密：读注单的 handler 要校验它属于登录的 uid。没人引用的行（会员、角色）继续自增；生成器给会离开系统的号用。
 
 ### 用 `centrifugox` 推送
 
@@ -394,6 +391,14 @@ handler 仍要幂等：厂商可能用两个 id 发同一件事。
 至少 200 次调用里错误超过一半就立刻以 `kerrors.ErrCircuitBreak` 失败，直到下游恢复。写操作要重试的话由调用方自己带同一个
 request_id 再调，幂等中间件会回放结果。
 
+### RPC 服务过载保护（`limits:`）
+
+Kitex 服务的一个实例拒绝超出能力的请求，让过载变成快速的"忙"而不是一堆慢请求：同时处理不超过 `limits.max_in_flight`（默认 1000），每秒不超过 `limits.max_qps`（默认关，服务知道自己容量后再开；按 100ms 窗口计）, 连接不超过 `limits.max_connections`（10000）。被拒的请求不执行，回业务码 5003（`kitexx.CodeBusy`），网关像别的码一样透传，调用方稍后重试；指标 `rpc_server_rejected_total{rpc_method,reason}`，日志每分钟一条 WARN。Kitex 自带的限流器只用来限连接：限 QPS 时它直接断连接，客户端分不出是过载还是崩了（`devkit lint` 拦 `server.WithLimit`）。中间件排在链的最前面，拒绝一次不花别的代价。
+
+### 网关防护（`guard:`）
+
+API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 取代理转发的（X-Forwarded-For），即 Hertz 的 ClientIP。
+
 ### 接口文档（`cmd/apidoc`、`hertzx.ServeDocs`）
 
 API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 `go run github.com/sezznaw/devkit-common/cmd/apidoc`：
@@ -438,6 +443,10 @@ auth:
 `{code: 1004}`，会话已失效回 `{code: 1005}`。身份随上下文走：网关 handler 和它调用的每个 RPC 服务里 `kitexx.UID(ctx)`
 都能拿到，`uid` 永远不再是请求字段。授权（能做什么）不在这里。
 
+### 后台操作审计 `hertzx.Audit`
+
+后台网关记录谁做了什么：`hertzx.Audit(h, openAPI, sink)`（app.Setup 里装在 RequireLogin 之后）对每个被审计的接口每次调用记一条 `AuditEntry`，不论成功失败：时间、realm 与 uid、IDL 里的接口标题、方法、路径、权限点、请求体（password、token、key 等键的值打码）、HTTP 状态与业务码、trace id、来源 IP 与 User-Agent、耗时。哪些接口记：IDL 方法注释 `// @audit` 一定记（登录），`// @noaudit` 不记，其余看权限点——有且不以 `.view` 结尾就记。handler 不写任何东西。sink 决定记到哪；`hertzx.NewAsyncSink(store)` 把"存一批"的函数（调账号服务的 RPC、写表）变成不阻塞请求的 sink：队列 1000、每秒或满 100 条刷一次、失败重试一次、丢弃计入日志；用 kitexx.OnShutdown 注册 Close 以便退出前刷完。
+
 ### 用 `metricsx` 出指标
 
 ```yaml
@@ -460,6 +469,14 @@ metrics:
 
 服务自己的指标：包顶层 `promauto.With(metricsx.Registry).NewCounter(...)`；Prometheus 默认注册表不会被提供。
 端口被占用是启动时的一条告警，不是启动失败。
+
+### 部署后验证 `verifyx`
+
+每次发布后，部署用新镜像再起一次 `<二进制> --verify`（ArgoCD 的 PostSync Job）：框架的检查和服务自己的检查对刚上线的部署跑一遍，失败就是 Job 失败，几分钟内触发告警。框架按配置检查：MySQL 能应答且迁移不是 dirty、Redis 能应答、outbox 没有超过两分钟还没发出的事件、Nacos 里至少有一个本服务实例、网关的 `VERIFY_BASE_URL/ping` 能应答。服务在 `app/verify.go`（`Checks(cfg, rt) []verifyx.Check`）加自己的几条：用测试账号登录读一条、调一个 RPC。检查必须对线上无害：只读，或对测试账号自己数据的幂等写。`verifyx.NewGateway(rt.GatewayURL())` 是网关调自己接口的客户端（`Get`、带响应壳的 `Post`、登录后带 Bearer）。`make verify` 在本机对本地环境跑同一套。
+
+### 用 `testx` 写测试
+
+handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL("../../infra/db/migrations/tenant"), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
 
 ### 用 `jobx` 写定时任务
 
@@ -528,16 +545,3 @@ log_level_data_id: order.log-level              # kitexx：日志级别跟随这
 ```sh
 go test ./...
 ```
-
-#### 事务里的事件：outbox
-
-和数据库变更同属一件事的事件走 outbox，不走 `Publish`：在事务里 `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` 把事件写进本服务的 `outbox` 表（项目迁移建表，`kafkax.OutboxDDL` 是表结构）。事务提交则变更和事件都落地，回滚则都没有；同一进程里的转发器（服务同时有 Kafka 和 MySQL 时自动开，`kafka.outbox.enabled: false` 关）随后把行发出去，信封和 `Publish` 一样，trace 是发起请求的那条。至少一次投递、event id 不变，消费者照旧按 `ev.ID` 去重。发不出去的行按退避重试（1s、2s…5 分钟；表里有 `attempts`、`last_error`、`next_attempt_at`），一个坏主题不会挡住别的；多副本分摊（`FOR UPDATE SKIP LOCKED`）。已发的行保留 `kafka.outbox.retention`（7 天）后删除。指标 `kafka_outbox_pending`、`kafka_outbox_oldest_age_seconds`（按它告警）、`kafka_outbox_published_total{topic,status}`。`devkit lint` 的 `outbox` 规则拒绝在跑事务的代码里直接 `Publish`。
-
-### 部署后验证 `verifyx`
-
-每次发布后，部署用新镜像再起一次 `<二进制> --verify`（ArgoCD 的 PostSync Job）：框架的检查和服务自己的检查对刚上线的部署跑一遍，失败就是 Job 失败，几分钟内触发告警。框架按配置检查：MySQL 能应答且迁移不是 dirty、Redis 能应答、outbox 没有超过两分钟还没发出的事件、Nacos 里至少有一个本服务实例、网关的 `VERIFY_BASE_URL/ping` 能应答。服务在 `app/verify.go`（`Checks(cfg, rt) []verifyx.Check`）加自己的几条：用测试账号登录读一条、调一个 RPC。检查必须对线上无害：只读，或对测试账号自己数据的幂等写。`verifyx.NewGateway(rt.GatewayURL())` 是网关调自己接口的客户端（`Get`、带响应壳的 `Post`、登录后带 Bearer）。`make verify` 在本机对本地环境跑同一套。
-
-### 后台操作审计 `hertzx.Audit`
-
-后台网关记录谁做了什么：`hertzx.Audit(h, openAPI, sink)`（app.Setup 里装在 RequireLogin 之后）对每个被审计的接口每次调用记一条 `AuditEntry`，不论成功失败：时间、realm 与 uid、IDL 里的接口标题、方法、路径、权限点、请求体（password、token、key 等键的值打码）、HTTP 状态与业务码、trace id、来源 IP 与 User-Agent、耗时。哪些接口记：IDL 方法注释 `// @audit` 一定记（登录），`// @noaudit` 不记，其余看权限点——有且不以 `.view` 结尾就记。handler 不写任何东西。sink 决定记到哪；`hertzx.NewAsyncSink(store)` 把"存一批"的函数（调账号服务的 RPC、写表）变成不阻塞请求的 sink：队列 1000、每秒或满 100 条刷一次、失败重试一次、丢弃计入日志；用 kitexx.OnShutdown 注册 Close 以便退出前刷完。
-
