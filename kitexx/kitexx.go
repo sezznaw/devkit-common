@@ -27,6 +27,7 @@ import (
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/httpx"
+	"github.com/sezznaw/devkit-common/idx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/mysqlx"
@@ -108,6 +109,9 @@ type Config struct {
 	// limits per client IP (429, code 1008), service-wide and per route
 	// (`// @limit` in the IDL). Defaults apply without the section.
 	Guard GuardConfig `yaml:"guard"`
+	// ID: the unique-number generator (rt.ID). id.instance_bits splits the
+	// low 12 bits between replicas and ids per millisecond (default 5 + 7).
+	ID idx.Config `yaml:"id"`
 	// RPCClient: timeout, retry and circuit breaker of the calls this
 	// service makes to other services (ClientOptions). Defaults suit the
 	// cluster; the section is only for changing them.

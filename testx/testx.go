@@ -43,6 +43,7 @@ import (
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/delayx"
+	"github.com/sezznaw/devkit-common/idx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/kitexx"
 	"github.com/sezznaw/devkit-common/mysqlx"
@@ -136,6 +137,12 @@ func New(t testing.TB, service string, opts ...Option) *Runtime {
 	t.Cleanup(func() { _ = rdb.Close() })
 	rt.Redis = rdb
 	rt.Config.Redis.Enabled = true
+	gen, err := idx.New(ctx, rdb, service, idx.Config{}, idx.Options{})
+	if err != nil {
+		t.Fatalf("testx: id generator: %v", err)
+	}
+	t.Cleanup(func() { _ = gen.Close() })
+	rt.ID = gen
 
 	// MySQL
 	if o.migrations != "" {

@@ -227,6 +227,10 @@ mysql:
 
 事件命名、主题命名在 idl 仓库的 README。
 
+### 唯一号 `idx`
+
+注单号、订单号、流水号用 `rt.ID.Next()`：53 位整数，跨服务所有副本唯一、按毫秒有序、看不出数量。选 53 位是为了它到哪都精确：JSON 数字、JavaScript 的 Number（整数到 2^53 为止）、Go 的 int64、BIGINT 列；64 位雪花过了网关必须转字串，哪里忘了就丢精度，而我们的规模用不着那几位。高 41 位是 2026-01-01 起的毫秒（够到 2095），低 12 位按 `id.instance_bits` 分给副本数和每毫秒的号数（默认 5 + 7：每服务 32 副本，每副本每毫秒 128 个、每秒 12.8 万；副本少单量大的项目设 3 + 9；以后改分配也不会和旧号冲突，高位的时间把它们分开）。实例号在 Redis 里租（`idx:<服务>:<n>`，后台续租、退出释放），副本之间不会重；没有 Redis 用 `INSTANCE_ID`；两者都没有只有本机运行会退到主机名哈希（并告警），线上 `Next` 会报 `idx.ErrNoInstance`（panic，由 Recovery 变成一次失败请求），宁可失败也不发重号。网关 IDL 和 RPC IDL 一样写 `i64 bet_no`。`idx.Time(id)` 是生成时刻。号不是秘密：读注单的 handler 要校验它属于登录的 uid。没人引用的行（会员、角色）继续自增；生成器给会离开系统的号用。
+
 ### 用 `testx` 写测试
 
 handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL("../../infra/db/migrations/tenant"), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。

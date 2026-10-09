@@ -326,6 +326,18 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `idx`: 53-bit snowflake: 41 time bits from Epoch 2026-01-01 above 12 low
+  bits split by `id.instance_bits` (default 5 + 7; `Instance(id, bits)` to
+  decode). 53 so the id is exact as a JSON / JavaScript number: no string form
+  at the gateway (the user asked for this over 64 + string after weighing the
+  trade-offs; capacity is 32 replicas x 128/ms per service by default). `Next`
+  under a mutex, waits out a backwards clock and a full sequence. Instance
+  lease in Redis (`idx:<svc>:<n>`, SET NX scan from 0, TTL 90s, renew 30s with
+  a token-matching script; a lost lease is re-taken or a new number leased).
+  No Redis: INSTANCE_ID; else only `Options{Local}` (Log.Env local/empty)
+  allows the fnv(hostname) fallback, a deployment gets a generator whose Next
+  panics with ErrNoInstance. Runtime.ID is made in NewRuntime after Redis;
+  testx makes one too.
 - `testx`: builds `kitexx.Runtime` by hand (exported fields) on miniredis,
   kfake, an httptest Centrifugo API (`/api/<method>`, records publish), and
   for `WithMySQL(dir)` a `test_<svc>_<n>` database on MYSQL_TEST_DSN_ROOT

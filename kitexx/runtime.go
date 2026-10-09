@@ -18,6 +18,7 @@ import (
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/httpx"
+	"github.com/sezznaw/devkit-common/idx"
 	"github.com/sezznaw/devkit-common/jobx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
@@ -52,6 +53,11 @@ type Runtime struct {
 	// S3 is the object storage, nil when s3.enabled is false: Put, Get,
 	// Stat, List, Delete and presigned URLs, all under the service's prefix.
 	S3 *s3x.Client
+	// ID makes the business's unique numbers (bet, order, statement
+	// numbers): rt.ID.Next() is a 53-bit, time-ordered id unique across the
+	// replicas (the instance number is leased in Redis), exact as a JSON
+	// number and a JavaScript Number; in the database a BIGINT.
+	ID *idx.Generator
 	// Delay runs a function once at a chosen time, nil when mysql is off or
 	// delay.enabled is false: Handle(kind, fn) in app.Setup, Schedule in the
 	// transaction of the change that needs it, Cancel while still pending.
@@ -90,6 +96,9 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	}
 	rt.openDelay()
 	if err := rt.openRedis(); err != nil {
+		return nil, err
+	}
+	if err := rt.openID(); err != nil {
 		return nil, err
 	}
 	if err := rt.openKafka(); err != nil {
@@ -251,6 +260,20 @@ func centrifugoTarget(cfg Config) (centrifugox.Target, error) {
 		secret = os.Getenv(c.TokenHMACEnv)
 	}
 	return centrifugox.Target{APIAddr: c.APIAddr, APIKey: key, TokenSecret: secret}, nil
+}
+
+// openID makes the id generator: an instance number leased in Redis when
+// the service has it, else INSTANCE_ID or a hostname hash (with a warning).
+func (rt *Runtime) openID() error {
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	g, err := idx.New(ctx, rt.Redis, rt.Config.Service.Name, rt.Config.ID, idx.Options{Local: rt.Config.Log.Env == "local" || rt.Config.Log.Env == ""})
+	if err != nil {
+		return err
+	}
+	rt.ID = g
+	OnShutdown("id lease release", g.Close)
+	return nil
 }
 
 // openDelay makes the delayed-task scheduler on the service's MySQL. The
