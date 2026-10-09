@@ -326,6 +326,14 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `starrocksx`: database/sql on the go-sql-driver connector (StarRocks is
+  MySQL-protocol), `prepare` rewrites `:tenant` to `?` inserting the tenant at
+  the right argument position (string literals skipped) and refuses non-SELECT
+  or tenant-less statements; `scanRows` maps columns to struct fields by `db`
+  tag / snake_case (error on an unmapped column) or scalars; MaxRows cap.
+  Runtime.Report via `openReport` (infra.yaml `starrocks` block for source
+  platform; static assumes tenant_a when TENANT_CODE is empty). Tests run
+  against MySQL (MYSQL_TEST_DSN_ROOT).
 - `kafkax.DLQ` (the `--dlq` tool, `kitexx.DLQFlag` / `RunDLQ`, run after
   app.Setup so `c.subs` names the dlq topics): kadm on the producer client
   for ListEndOffsets / FetchOffsets (GroupIDNotFound = never committed) /

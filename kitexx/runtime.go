@@ -19,6 +19,7 @@ import (
 	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/idx"
+	"github.com/sezznaw/devkit-common/starrocksx"
 	"github.com/sezznaw/devkit-common/jobx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
@@ -53,6 +54,11 @@ type Runtime struct {
 	// S3 is the object storage, nil when s3.enabled is false: Put, Get,
 	// Stat, List, Delete and presigned URLs, all under the service's prefix.
 	S3 *s3x.Client
+	// Report is the report database (StarRocks, a copy of the business
+	// tables a few seconds behind), nil unless report.enabled: Query and
+	// QueryRow, every query filtered by `tenant_id = :tenant`. Reports and
+	// statistics only; nothing that decides anything reads it.
+	Report *starrocksx.Client
 	// ID makes the business's unique numbers (bet, order, statement
 	// numbers): rt.ID.Next() is a 53-bit, time-ordered id unique across the
 	// replicas (the instance number is leased in Redis), exact as a JSON
@@ -105,6 +111,9 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 		return nil, err
 	}
 	if err := rt.openCentrifugo(); err != nil {
+		return nil, err
+	}
+	if err := rt.openReport(); err != nil {
 		return nil, err
 	}
 	if err := rt.openS3(); err != nil {
@@ -273,6 +282,54 @@ func (rt *Runtime) openID() error {
 	}
 	rt.ID = g
 	OnShutdown("id lease release", g.Close)
+	return nil
+}
+
+// openReport opens the report database when report.enabled: source static
+// from the section, source platform from the starrocks section of
+// infra.yaml in Nacos (addr, db, user, the password's environment variable).
+func (rt *Runtime) openReport() error {
+	cfg := rt.Config
+	if !cfg.Report.Enabled {
+		return nil
+	}
+	if err := cfg.Report.Validate(); err != nil {
+		return err
+	}
+	var target starrocksx.Target
+	if cfg.Report.SourceName() == starrocksx.SourceStatic {
+		target = cfg.Report.Static()
+	} else {
+		doc, err := infraDocument(cfg, "report.source platform")
+		if err != nil {
+			return err
+		}
+		sr := doc.StarRocks
+		if sr.Addr == "" || sr.DB == "" || sr.User == "" {
+			return fmt.Errorf("report.source platform: %s in Nacos must have starrocks.{addr, db, user, password_env}; got addr=%q db=%q user=%q", infraDataID, sr.Addr, sr.DB, sr.User)
+		}
+		pw := ""
+		if sr.PasswordEnv != "" {
+			pw = os.Getenv(sr.PasswordEnv)
+			if pw == "" {
+				return fmt.Errorf("report.source platform: the password is to come from the environment variable %q (infra.yaml starrocks.password_env), which is not set", sr.PasswordEnv)
+			}
+		}
+		target = starrocksx.Target{Addr: sr.Addr, DB: sr.DB, User: sr.User, Password: pw}
+	}
+	tenant := strings.TrimSpace(os.Getenv(TenantEnv))
+	if tenant == "" && cfg.Report.SourceName() == starrocksx.SourceStatic {
+		tenant = "tenant_a" // a laptop: the local stack's tenant
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cli, err := starrocksx.Open(ctx, target, cfg.Report, tenant)
+	if err != nil {
+		return err
+	}
+	rt.Report = cli
+	OnShutdown("report close", cli.Close)
+	zlog.Info("report database connected", zlog.Str("addr", target.Addr), zlog.Str("db", target.DB), zlog.Str("tenant", tenant), zlog.Str("source", cfg.Report.SourceName()))
 	return nil
 }
 
@@ -454,6 +511,12 @@ type infraDoc struct {
 		APIKeyEnv    string `yaml:"api_key_env"`
 		TokenHMACEnv string `yaml:"token_hmac_env"`
 	} `yaml:"centrifugo"`
+	StarRocks struct {
+		Addr        string `yaml:"addr"`
+		DB          string `yaml:"db"`
+		User        string `yaml:"user"`
+		PasswordEnv string `yaml:"password_env"`
+	} `yaml:"starrocks"`
 }
 
 // infraDocument reads infra.yaml from Nacos. what says which setting needs

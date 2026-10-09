@@ -169,6 +169,12 @@ var (
 	CacheRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "cache_requests_total", Help: "Read-through cache lookups (redisx.Cache), by cache name and result: hit, miss, negative, error.",
 	}, []string{"name", "result"})
+	ReportQueries = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "report_queries_total", Help: "Queries on the report database (starrocksx), by result: ok, error.",
+	}, []string{"status"})
+	ReportQueryDuration = promauto.With(Registry).NewHistogram(prometheus.HistogramOpts{
+		Name: "report_query_duration_seconds", Help: "Time a report query took.", Buckets: []float64{.01, .05, .1, .25, .5, 1, 2.5, 5, 10, 30},
+	})
 	RedisCommands = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "redis_commands_total", Help: "Redis commands sent, by command and result.",
 	}, []string{"cmd", "status"})

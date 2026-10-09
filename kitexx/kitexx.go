@@ -28,6 +28,7 @@ import (
 	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/idx"
+	"github.com/sezznaw/devkit-common/starrocksx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/mysqlx"
@@ -112,6 +113,10 @@ type Config struct {
 	// Limits: what one instance of an RPC service refuses with code 5003
 	// (max_in_flight, default 1000; max_qps, off; max_connections, 10000).
 	Limits LimitsConfig `yaml:"limits"`
+	// Report: report.enabled opens the StarRocks report database (a CDC copy
+	// of the business tables, seconds behind) as rt.Report, query only, for
+	// the report service alone (devkit lint, rule report-only).
+	Report starrocksx.Config `yaml:"report"`
 	// ID: the unique-number generator (rt.ID). id.instance_bits splits the
 	// low 12 bits between replicas and ids per millisecond (default 5 + 7).
 	ID idx.Config `yaml:"id"`

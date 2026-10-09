@@ -26,6 +26,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
 | `redisx`  | 按 `redis:` 段连 Redis / Valkey，规则同 `mysqlx`（enabled、source static 或 platform），每条命令一个 span；`WithLock`（跨副本锁）、`Cache[T]`（读穿缓存）；幂等中间件用它；见下文 |
 | `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
+| `starrocksx` | 报表库（StarRocks，业务表的 CDC 副本）：`rt.Report.Query` / `QueryRow`，必须带 `:tenant`，只读，只给报表服务；见下文 |
 | `delayx`  | 到某一刻执行一次（取消未支付订单、开赛封盘）：业务事务里 `rt.Delay.Schedule`，app.Setup 里 `rt.Delay.Handle`；至少一次、退避重试、failed 状态、指标；见下文 |
 | `idx`     | 业务唯一号（`rt.ID.Next()`）：53 位、按时间有序、跨副本唯一（实例号在 Redis 租）、JSON 数字装得下；见下文 |
 | `moneyx`  | 金额 = 小数 amount + 货币码，底层 shopspring/decimal，舍入模式、分账、`common.Money` 传输形式；见下文 |
@@ -253,6 +254,10 @@ handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<�
 ### 唯一号 `idx`
 
 注单号、订单号、流水号用 `rt.ID.Next()`：53 位整数，跨服务所有副本唯一、按毫秒有序、看不出数量。选 53 位是为了它到哪都精确：JSON 数字、JavaScript 的 Number（整数到 2^53 为止）、Go 的 int64、BIGINT 列；64 位雪花过了网关必须转字串，哪里忘了就丢精度，而我们的规模用不着那几位。高 41 位是 2026-01-01 起的毫秒（够到 2095），低 12 位按 `id.instance_bits` 分给副本数和每毫秒的号数（默认 5 + 7：每服务 32 副本，每副本每毫秒 128 个、每秒 12.8 万；副本少单量大的项目设 3 + 9；以后改分配也不会和旧号冲突，高位的时间把它们分开）。实例号在 Redis 里租（`idx:<服务>:<n>`，后台续租、退出释放），副本之间不会重；没有 Redis 用 `INSTANCE_ID`；两者都没有只有本机运行会退到主机名哈希（并告警），线上 `Next` 会报 `idx.ErrNoInstance`（panic，由 Recovery 变成一次失败请求），宁可失败也不发重号。网关 IDL 和 RPC IDL 一样写 `i64 bet_no`。`idx.Time(id)` 是生成时刻。号不是秘密：读注单的 handler 要校验它属于登录的 uid。没人引用的行（会员、角色）继续自增；生成器给会离开系统的号用。
+
+### 报表 `starrocksx`
+
+`report.enabled` 把 StarRocks 的 `report` 库打开为 `rt.Report`：业务表的 CDC 副本（MySQL binlog → Canal → Redpanda → Routine Load），延迟几秒，给报表、统计、大范围的后台列表和导出用。只有报表服务开它（`devkit lint` 的 `report-only` 规则，devkit.yaml 里 `report_service`）：它是副本，任何要据此做判断的读都不走它，那些读经拥有该表的服务查 MySQL。句柄只能查：`rt.Report.Query(ctx, &rows, "SELECT status, COUNT(*) AS n FROM member WHERE tenant_id = :tenant GROUP BY status")` 扫进结构体切片（列按 `db` 标签或字段名的 snake_case 对上）或标量切片，`QueryRow` 一行（没有是 `sql.ErrNoRows`）。每条查询必须用 `:tenant` 写租户，句柄填本部署的租户，没写的拒绝执行；有 `report.timeout`（30s）和 `report.max_rows`（10000，超了分页或聚合）。source platform 读 Nacos 里 infra.yaml 的 `starrocks` 段（只读账号 `report` 的密码来自那里指明的环境变量）。StarRocks 走 MySQL 协议，所以用 MySQL 驱动，测试也用 MySQL 顶替。指标 `report_queries_total{status}`、`report_query_duration_seconds`。
 
 ### 用 `centrifugox` 推送
 
