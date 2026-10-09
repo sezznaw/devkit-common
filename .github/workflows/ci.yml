@@ -69,3 +69,7 @@ jobs:
       - run: go test ./kafkax/ -run TestOutbox -v -count=1
         env:
           MYSQL_TEST_DSN_ROOT: root:root@tcp(127.0.0.1:13306)/
+      # the delayed-task scheduler against the same MySQL
+      - run: go test ./delayx/ -run TestScheduler -v -count=1
+        env:
+          MYSQL_TEST_DSN_ROOT: root:root@tcp(127.0.0.1:13306)/

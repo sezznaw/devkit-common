@@ -326,6 +326,19 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `delayx`: run-once-at-a-time tasks in the service's MySQL (`delayed_task`,
+  `delayx.DDL`), the same shape as the outbox: `Schedule` inside the business
+  transaction, a poller per process (`Start` from the runtime's OnStart, only
+  when `Handlers() > 0`, so a service that schedules nothing never polls a
+  table it does not have) claims due rows with `FOR UPDATE SKIP LOCKED`, marks
+  them `running`, runs the handler with `delay.timeout`, then `done` /
+  `pending` with backoff (1m << n, cap 1h) / `failed` after `max_attempts`. A
+  `running` row older than timeout + 1m (the process died) is claimed again:
+  at least once, handlers must be idempotent. `Cancel` flips pending rows of
+  kind + key. Gauges `delay_tasks_pending/failed/overdue_seconds`, counter
+  `delay_tasks_run_total{kind,result}`. The post-deploy `delay` check uses
+  `Overdue` and `FailedCount`. Integration test `TestScheduler` needs
+  `MYSQL_TEST_DSN_ROOT` (CI's mysql job runs it).
 - `kafkax`: franz-go (Redpanda's recommendation), tracing through
   `kotel` (`kgo.WithHooks`; the produce span's parent is `Record.Context`, the
   consumer side `tracer.WithProcessSpan(r)` extracts the parent from the

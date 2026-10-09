@@ -92,6 +92,25 @@ func (rt *Runtime) frameworkChecks() []verifyx.Check {
 			return nil
 		}})
 	}
+	if rt.Delay != nil && rt.Delay.Handlers() > 0 {
+		out = append(out, verifyx.Check{Name: "delay", Description: "no delayed task is more than two minutes overdue or failed for good", Run: func(ctx context.Context) error {
+			late, err := rt.Delay.Overdue(ctx)
+			if err != nil {
+				return err
+			}
+			if late > 2*time.Minute {
+				return fmt.Errorf("the oldest due task has waited %s", late.Round(time.Second))
+			}
+			n, err := rt.Delay.FailedCount(ctx)
+			if err != nil {
+				return err
+			}
+			if n > 0 {
+				return fmt.Errorf("%d delayed tasks failed for good (status failed): fix and reschedule", n)
+			}
+			return nil
+		}})
+	}
 	if !cfg.RegistryDisabled && cfg.Nacos.Registers() {
 		out = append(out, verifyx.Check{Name: "nacos", Description: "this release is registered and serving", Run: func(ctx context.Context) error {
 			cli, err := nacosx.Shared(cfg.Nacos)

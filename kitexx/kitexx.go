@@ -25,6 +25,7 @@ import (
 	"github.com/sezznaw/devkit-common/authx"
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
@@ -68,6 +69,11 @@ type Config struct {
 	Redis redisx.Config `yaml:"redis"`
 	// Kafka (Redpanda), when enabled, is Runtime.Kafka: Publish and Subscribe.
 	Kafka kafkax.Config `yaml:"kafka"`
+	// Delay: run a function once at a chosen time (unpaid order cancel,
+	// closing bets at kick-off): rt.Delay.Schedule in the business change's
+	// transaction, rt.Delay.Handle(kind, fn) in app.Setup. On by default
+	// when the service has MySQL (table delayed_task from the migrations).
+	Delay delayx.Config `yaml:"delay"`
 	// Centrifugo, when enabled, is Runtime.Centrifugo: Publish to channels,
 	// ConnectionToken for clients.
 	Centrifugo centrifugox.Config `yaml:"centrifugo"`

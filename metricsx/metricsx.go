@@ -124,6 +124,18 @@ var (
 	KafkaOutboxOldestAge = promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
 		Name: "kafka_outbox_oldest_age_seconds", Help: "Age of the oldest unpublished outbox row; 0 when none.",
 	})
+	DelayTasksRun = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "delay_tasks_run_total", Help: "Delayed tasks run (delayx), by kind and result: ok, retry, failed, no_handler.",
+	}, []string{"kind", "result"})
+	DelayTasksPending = promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
+		Name: "delay_tasks_pending", Help: "Delayed tasks waiting for their time (or a retry).",
+	})
+	DelayTasksFailed = promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
+		Name: "delay_tasks_failed", Help: "Delayed tasks that used up their attempts and need a person; alert when above 0.",
+	})
+	DelayTasksOverdue = promauto.With(Registry).NewGauge(prometheus.GaugeOpts{
+		Name: "delay_tasks_overdue_seconds", Help: "How late the oldest due-but-not-run delayed task is; 0 when none.",
+	})
 	KafkaEventsHandled = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_handled_total", Help: "Events consumed by kafkax, by topic and outcome: ok, retried, dlq.",
 	}, []string{"topic", "result"})

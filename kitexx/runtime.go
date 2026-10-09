@@ -16,6 +16,7 @@ import (
 
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/jobx"
 	"github.com/sezznaw/devkit-common/kafkax"
@@ -51,6 +52,10 @@ type Runtime struct {
 	// S3 is the object storage, nil when s3.enabled is false: Put, Get,
 	// Stat, List, Delete and presigned URLs, all under the service's prefix.
 	S3 *s3x.Client
+	// Delay runs a function once at a chosen time, nil when mysql is off or
+	// delay.enabled is false: Handle(kind, fn) in app.Setup, Schedule in the
+	// transaction of the change that needs it, Cancel while still pending.
+	Delay *delayx.Scheduler
 
 	jobs      []jobx.Job
 	providers map[string]*httpx.Client
@@ -83,6 +88,7 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	if err := rt.openMySQL(); err != nil {
 		return nil, err
 	}
+	rt.openDelay()
 	if err := rt.openRedis(); err != nil {
 		return nil, err
 	}
@@ -245,6 +251,27 @@ func centrifugoTarget(cfg Config) (centrifugox.Target, error) {
 		secret = os.Getenv(c.TokenHMACEnv)
 	}
 	return centrifugox.Target{APIAddr: c.APIAddr, APIKey: key, TokenSecret: secret}, nil
+}
+
+// openDelay makes the delayed-task scheduler on the service's MySQL. The
+// poller starts with the server only when app.Setup registered a handler:
+// a service that schedules nothing has no delayed_task table to poll.
+func (rt *Runtime) openDelay() {
+	cfg := rt.Config
+	if rt.DB == nil || !cfg.Delay.EnabledOrDefault() {
+		return
+	}
+	s := delayx.New(rt.DB, cfg.Delay, cfg.Service.Name)
+	rt.Delay = s
+	rt.OnStart("delayed tasks", func() error {
+		if s.Handlers() == 0 {
+			zlog.Debug("delayed tasks off", zlog.Str("hint", "rt.Delay.Handle(kind, fn) in app.Setup starts the scheduler"))
+			return nil
+		}
+		s.Start(context.Background())
+		return nil
+	})
+	OnShutdown("delayed tasks stop", func() error { s.Stop(); return nil })
 }
 
 func (rt *Runtime) openKafka() error {
