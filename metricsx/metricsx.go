@@ -143,7 +143,7 @@ var (
 		Name: "delay_tasks_overdue_seconds", Help: "How late the oldest due-but-not-run delayed task is; 0 when none.",
 	})
 	KafkaEventsHandled = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
-		Name: "kafka_events_handled_total", Help: "Events consumed by kafkax, by topic and outcome: ok, retried, dlq.",
+		Name: "kafka_events_handled_total", Help: "Events consumed by kafkax, by topic and outcome: ok, retried, dlq, duplicate (already handled, skipped).",
 	}, []string{"topic", "result"})
 	KafkaConsumerLag = promauto.With(Registry).NewGaugeVec(prometheus.GaugeOpts{
 		Name: "kafka_consumer_lag", Help: "Records not yet consumed behind the end of the topic (largest partition), after each poll.",

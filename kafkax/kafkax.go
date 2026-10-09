@@ -18,12 +18,14 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/redis/go-redis/v9"
 	"github.com/twmb/franz-go/pkg/kgo"
 	"github.com/twmb/franz-go/pkg/sasl/scram"
 	"github.com/twmb/franz-go/plugin/kotel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 
+	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
@@ -48,7 +50,27 @@ type Config struct {
 	// database (events written in the same transaction as the change). On
 	// by default when the service has MySQL too; see OutboxConfig.
 	Outbox OutboxConfig `yaml:"outbox"`
+
+	// Dedupe: a consumer skips an event id it already handled (Redis, 24h),
+	// so the at-least-once delivery of Kafka and the outbox does not reach
+	// the handler twice. On by default when the service has Redis.
+	Dedupe DedupeConfig `yaml:"dedupe"`
 }
+
+// DedupeConfig is the `kafka.dedupe` section.
+type DedupeConfig struct {
+	// Enabled: false turns the consumer-side dedupe off (a handler that is
+	// idempotent by nature and wants the Redis round trip saved).
+	Enabled *bool `yaml:"enabled"`
+	// TTL is how long a handled event id is remembered. Default 24h: longer
+	// than any redelivery (a rebalance, a replay from the outbox) takes.
+	TTL config.Duration `yaml:"ttl"`
+}
+
+// EnabledOrDefault reports whether dedupe should run: on unless
+// kafka.dedupe.enabled is false.
+func (c DedupeConfig) EnabledOrDefault() bool { return c.Enabled == nil || *c.Enabled }
+func (c DedupeConfig) ttl() time.Duration     { return c.TTL.Or(24 * time.Hour) }
 
 const (
 	SourceStatic   = "static"
@@ -155,7 +177,39 @@ type Client struct {
 	stop context.CancelFunc
 	wg   sync.WaitGroup
 
+	dedupe *redis.Client // nil: no consumer-side dedupe
+
 	outboxState
+}
+
+// SetDedupe gives the consumers the Redis their dedupe keys live in
+// ("dedupe:<service>:<topic>:<event id>", kafka.dedupe.ttl). The runtime
+// calls it when the service has Redis and kafka.dedupe.enabled is not
+// false; a handler then sees each event id once even when Kafka delivers
+// it twice. A handler that fails (and parks the event in the dlq) forgets
+// the id, so a replay runs it again.
+func (c *Client) SetDedupe(rdb *redis.Client) { c.dedupe = rdb }
+
+// seen claims the event id for this consumer; false when it was handled
+// before. A Redis error lets the event through (at least once, as without
+// dedupe) and is logged.
+func (c *Client) seen(ctx context.Context, topic, id string) (dup bool, key string) {
+	if c.dedupe == nil || id == "" {
+		return false, ""
+	}
+	key = "dedupe:" + c.service + ":" + topic + ":" + id
+	ok, err := c.dedupe.SetNX(ctx, key, 1, c.cfg.Dedupe.ttl()).Result()
+	if err != nil {
+		zlog.Ctx(ctx).Warn("dedupe check failed; handling the event anyway", zlog.Err(err))
+		return false, ""
+	}
+	return !ok, key
+}
+
+func (c *Client) forget(ctx context.Context, key string) {
+	if key != "" {
+		_ = c.dedupe.Del(context.WithoutCancel(ctx), key).Err()
+	}
 }
 
 type subscription struct {
@@ -330,6 +384,12 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 	defer func() { metricsx.KafkaHandleDuration.WithLabelValues(r.Topic).Observe(time.Since(start).Seconds()) }()
 	log = log.With(zlog.Str("type", ev.Type), zlog.Str("event_id", ev.ID))
 	span.SetAttributes(attribute.String("event.type", ev.Type), attribute.String("event.id", ev.ID))
+	dup, dedupeKey := c.seen(ctx, r.Topic, ev.ID)
+	if dup {
+		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "duplicate").Inc()
+		log.Info("duplicate event skipped (already handled)")
+		return
+	}
 
 	var err error
 	for attempt := 1; attempt <= c.cfg.retries(); attempt++ {
@@ -339,6 +399,7 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 			return
 		}
 		if ctx.Err() != nil {
+			c.forget(ctx, dedupeKey) // shutting down: the event is redelivered and must run
 			return
 		}
 		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "retried").Inc()
@@ -349,6 +410,7 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 	span.SetStatus(codes.Error, err.Error())
 	log.Error("event parked in dlq after retries", zlog.Err(err))
 	metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "dlq").Inc()
+	c.forget(ctx, dedupeKey) // a replay from the dlq must run
 	c.park(ctx, r, err)
 }
 

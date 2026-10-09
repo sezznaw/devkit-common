@@ -334,6 +334,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   Runtime.Report via `openReport` (infra.yaml `starrocks` block for source
   platform; static assumes tenant_a when TENANT_CODE is empty). Tests run
   against MySQL (MYSQL_TEST_DSN_ROOT).
+- `kafkax` dedupe: `SetDedupe(rdb)` (runtime: when rt.Redis and
+  kafka.dedupe.enabled != false; testx too). In `handle`, after the envelope
+  decodes: SETNX `dedupe:<svc>:<topic>:<id>` EX ttl; dup -> result
+  "duplicate", return (offset committed). On dlq park or ctx cancel the key is
+  DEL'd so a redelivery / replay runs. Redis error -> handle anyway (warn).
 - `kafkax.DLQ` (the `--dlq` tool, `kitexx.DLQFlag` / `RunDLQ`, run after
   app.Setup so `c.subs` names the dlq topics): kadm on the producer client
   for ListEndOffsets / FetchOffsets (GroupIDNotFound = never committed) /

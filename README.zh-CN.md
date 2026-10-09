@@ -239,6 +239,10 @@ mysql:
 
 事件命名、主题命名在 idl 仓库的 README。
 
+#### 消费者只看到一次
+
+Kafka 和 outbox 都是至少一次投递，同一条事件可能到消费者两次（重平衡、回放、转发器重试）。有 Redis 时框架替你去重：handler 跑之前先占 `dedupe:<服务>:<主题>:<事件 id>`（`kafka.dedupe.ttl`，24h），第二次投递记日志、计数（`kafka_events_handled_total{result="duplicate"}`）、提交位移但不跑 handler。handler 失败进死信时会忘掉这个 id，所以从死信回放还会执行。`kafka.dedupe.enabled: false` 关掉；没有 Redis 就不去重并告警。handler 仍要幂等，覆盖去重管不到的情形（两个生产者用不同 id 发同一件事）。
+
 #### 事务里的事件：outbox
 
 和数据库变更同属一件事的事件走 outbox，不走 `Publish`：在事务里 `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` 把事件写进本服务的 `outbox` 表（项目迁移建表，`kafkax.OutboxDDL` 是表结构）。事务提交则变更和事件都落地，回滚则都没有；同一进程里的转发器（服务同时有 Kafka 和 MySQL 时自动开，`kafka.outbox.enabled: false` 关）随后把行发出去，信封和 `Publish` 一样，trace 是发起请求的那条。至少一次投递、event id 不变，消费者照旧按 `ev.ID` 去重。发不出去的行按退避重试（1s、2s…5 分钟；表里有 `attempts`、`last_error`、`next_attempt_at`），一个坏主题不会挡住别的；多副本分摊（`FOR UPDATE SKIP LOCKED`）。已发的行保留 `kafka.outbox.retention`（7 天）后删除。指标 `kafka_outbox_pending`、`kafka_outbox_oldest_age_seconds`（按它告警）、`kafka_outbox_published_total{topic,status}`。`devkit lint` 的 `outbox` 规则拒绝在跑事务的代码里直接 `Publish`。

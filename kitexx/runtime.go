@@ -374,6 +374,11 @@ func (rt *Runtime) openKafka() error {
 		return err
 	}
 	rt.Kafka = cli
+	if rt.Redis != nil && cfg.Kafka.Dedupe.EnabledOrDefault() {
+		cli.SetDedupe(rt.Redis)
+	} else if rt.Redis == nil {
+		zlog.Warn("kafka consumers run without dedupe (no redis): a redelivered event reaches the handler again; handlers must be idempotent")
+	}
 	zlog.Info("kafka connected", zlog.Any("brokers", target.Brokers), zlog.Bool("sasl", target.Username != ""),
 		zlog.Str("source", cfg.Kafka.SourceName()), zlog.Str("role", cfg.Kafka.RoleName()))
 	// The outbox relay: events queued in the database (PublishTx) go out

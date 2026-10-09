@@ -164,6 +164,7 @@ func New(t testing.TB, service string, opts ...Option) *Runtime {
 		t.Fatalf("testx: kafka client: %v", err)
 	}
 	t.Cleanup(func() { _ = kc.Close() })
+	kc.SetDedupe(rdb)
 	rt.Kafka = kc
 	rt.Config.Kafka = kcfg
 
