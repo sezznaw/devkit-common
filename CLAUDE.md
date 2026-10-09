@@ -326,6 +326,16 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `redisx` lock and cache: `Open` takes an optional service name kept as the
+  connection's ClientName; `Namespace(rdb)` reads it back and `keyOf` builds
+  `lock:<svc>:<name>` / `cache:<svc>:<name>:<id>`. `WithLock`: SET NX PX with a
+  random token, a keeper goroutine extends every ttl/3 with a compare-and-
+  pexpire script and cancels fn's ctx (ErrLockLost) when the key is gone,
+  release is compare-and-del; `Wait` retries every 50ms. `Cache[T]`: GET /
+  JSON, per-process singleflight (sync.Map of calls), SET with ±10% jitter,
+  `Negative` stores a tombstone ("\x00nf") for the not-found error, Redis
+  errors fall back to the loader (warned once a minute), nil client = loader
+  only. Tests on miniredis (it supports CLIENT SETNAME).
 - `delayx`: run-once-at-a-time tasks in the service's MySQL (`delayed_task`,
   `delayx.DDL`), the same shape as the outbox: `Schedule` inside the business
   transaction, a poller per process (`Start` from the runtime's OnStart, only

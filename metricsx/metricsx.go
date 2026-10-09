@@ -151,6 +151,15 @@ var (
 	KafkaBrokerConnects = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_broker_connects_total", Help: "Connections opened to brokers, by result.",
 	}, []string{"status"})
+	Locks = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "locks_total", Help: "Distributed locks (redisx.WithLock), by name and result: acquired, busy, lost, error.",
+	}, []string{"name", "result"})
+	LockWait = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
+		Name: "lock_wait_seconds", Help: "Time spent waiting for a distributed lock before acquiring it.", Buckets: DurationBuckets,
+	}, []string{"name"})
+	CacheRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "cache_requests_total", Help: "Read-through cache lookups (redisx.Cache), by cache name and result: hit, miss, negative, error.",
+	}, []string{"name", "result"})
 	RedisCommands = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "redis_commands_total", Help: "Redis commands sent, by command and result.",
 	}, []string{"cmd", "status"})

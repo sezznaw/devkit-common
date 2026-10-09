@@ -354,7 +354,7 @@ func (rt *Runtime) openRedis() error {
 		zlog.Warn("redis: this machine is using a server that is not on it; everybody who shares it sees what you write",
 			zlog.Str("addr", target.Addr), zlog.Int("db", target.DB))
 	}
-	cli, err := redisx.Open(ctx, target, cfg.Redis)
+	cli, err := redisx.Open(ctx, target, cfg.Redis, cfg.Service.Name)
 	if err != nil {
 		return err
 	}

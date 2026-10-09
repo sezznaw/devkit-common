@@ -227,6 +227,12 @@ mysql:
 
 事件命名、主题命名在 idl 仓库的 README。
 
+### 锁与缓存 `redisx`
+
+**跨副本的锁。** `redisx.WithLock(ctx, rt.Redis, "settle:"+matchID, 30*time.Second, func(ctx context.Context) error {...})` 在服务所有副本范围内持锁执行函数（key `lock:<服务>:<名字>`）：结算一场比赛、改一个会员的余额、同步一个厂商。第二个调用方立刻得到 `redisx.ErrLocked`，或 `redisx.Wait(2*time.Second)` 等一会再放弃。函数运行期间锁在后台自动续期，所以 TTL 是"进程死掉多久后别人能接手"，不是工作时限；中途锁丢了（Redis 不可用、key 被删）函数的 ctx 被取消，WithLock 返回 `redisx.ErrLockLost`。handler 里的 `sync.Mutex` 只锁本副本，所以 `devkit lint` 的 `mutex` 规则在 handler、repo 里拦它，自己写 `SetNX` 也拦（规则 `lock`）。指标 `locks_total{name,result}`、`lock_wait_seconds`。
+
+**读穿缓存。** `members := redisx.NewCache[repo.Member](rt.Redis, "member", 5*time.Minute).Negative(repo.ErrMemberNotFound, 30*time.Second)`，然后 `m, err := members.Get(ctx, id, func(ctx) (repo.Member, error) { return r.load(ctx, id) })`：有缓存给缓存（key `cache:<服务>:member:<id>`，JSON），没有就跑 loader——同一个 key 同一进程同时只跑一次，热 key 不会打穿数据库——结果按 TTL ±10% 存起来。`Negative` 把"查无此物"也记一小段时间。写方在事务**提交之后**调 `members.Del(ctx, id)`（提交前删，并发的读会把旧值填回去）。Redis 不可用时 Get 就是直接调 loader，每分钟告警一条：缓存是优化，不是真相来源；`rt.Redis` 为 nil（没开 redis）同理。类型结构变了就换个缓存名。指标 `cache_requests_total{name,result}`（hit、miss、negative、error）。
+
 ### 到某一刻执行一次：`delayx`
 
 必须在某个时刻执行的函数（15 分钟后取消未支付订单、开赛封盘、一小时后重试派彩）是延时任务，不是 `time.AfterFunc`（进程重启就丢），也不是定时扫表（一分钟延迟、全表扫）。在需要它的那次业务变更的事务里 `rt.Delay.Schedule(ctx, tx, "order.cancel-unpaid", orderNo, time.Now().Add(15*time.Minute), payload)` 往本服务的 `delayed_task` 表写一行（项目迁移建表，`delayx.DDL` 是表结构）：订单和它的取消任务要么一起存在，要么都不存在。`app.Setup` 里每种 kind 注册一次函数 `rt.Delay.Handle("order.cancel-unpaid", func(ctx, t *delayx.Task) error {...})`；同一进程里的调度器（服务有 MySQL 且注册了 handler 时自动开，`delay.enabled: false` 关）认领到点的行（`FOR UPDATE SKIP LOCKED`，多副本分摊）并执行，延迟不超过一个轮询间隔（1s）。`rt.Delay.Cancel(ctx, tx, kind, key)` 撤掉还没执行的任务（订单付了）。至少一次（执行中崩溃会重跑），所以 handler 要幂等：先重读状态（"订单还没付吗？"），没事可做就返回 nil。返回错误的 handler 按退避重试（1m、2m、4m…1h）直到 `delay.max_attempts`（5 次），然后任务标 `failed`、记 `last_error`、计入 `delay_tasks_failed`（按它告警）；`delay_tasks_overdue_seconds` 是最早到点未执行的任务晚了多久，`delay_tasks_run_total{kind,result}` 是结果计数。已完成的行保留 `delay.retention`（7 天）。部署后检查 `delay`：有任务超时两分钟未执行或已彻底失败就不通过。`devkit lint` 的 `delay` 规则拒绝服务代码里的 `time.AfterFunc` / `time.NewTimer`。周期性的工作（每晚报表）是 job（`jobx`），不是延时任务。

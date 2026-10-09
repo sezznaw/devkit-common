@@ -112,8 +112,10 @@ func TargetFromRow(addr, dbName, password string) (Target, error) {
 }
 
 // Open connects to the target, pings it and returns the client, with every
-// command a span of the request's trace.
-func Open(ctx context.Context, t Target, cfg Config) (*redis.Client, error) {
+// command a span of the request's trace. service, when given, names the
+// connection (CLIENT SETNAME, visible in CLIENT LIST) and is the namespace
+// of the keys WithLock and Cache make ("lock:<service>:...").
+func Open(ctx context.Context, t Target, cfg Config, service ...string) (*redis.Client, error) {
 	if t.Addr == "" {
 		return nil, fmt.Errorf("redisx: addr is required")
 	}
@@ -121,12 +123,17 @@ func Open(ctx context.Context, t Target, cfg Config) (*redis.Client, error) {
 	if timeout == 0 {
 		timeout = 5 * time.Second
 	}
+	name := ""
+	if len(service) > 0 {
+		name = service[0]
+	}
 	cli := redis.NewClient(&redis.Options{
 		Addr:        t.Addr,
 		Password:    t.Password,
 		DB:          t.DB,
 		PoolSize:    cfg.PoolSize,
 		DialTimeout: timeout,
+		ClientName:  name,
 	})
 	pingCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -146,4 +153,21 @@ func Open(ctx context.Context, t Target, cfg Config) (*redis.Client, error) {
 // a service (a tool, a test) uses. Callers own Close().
 func New(ctx context.Context, c Config) (*redis.Client, error) {
 	return Open(ctx, c.Static(), c)
+}
+
+// Namespace is the key prefix of a client: the service it was opened for
+// (Open's service argument, kept as the connection name), or "" for a
+// client opened without one.
+func Namespace(rdb *redis.Client) string {
+	if rdb == nil {
+		return ""
+	}
+	return rdb.Options().ClientName
+}
+
+func keyOf(rdb *redis.Client, kind, name string) string {
+	if ns := Namespace(rdb); ns != "" {
+		return kind + ":" + ns + ":" + name
+	}
+	return kind + ":" + name
 }
