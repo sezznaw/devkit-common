@@ -13,8 +13,8 @@ go get github.com/sezznaw/devkit-common@latest
 |-----------|------|
 | `zlog`    | 公司统一日志，基于 zap：由编译器检查的强类型字段；给人看的控制台格式（颜色、可点击的 `文件:行号`）和给采集系统的 JSON 格式；带 `trace_id` 的请求级 logger；详见下文 |
 | `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开（`${VAR:-默认值}` 未设时取默认）；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
-| `kitexx`  | Kitex 服务端/客户端选项：Nacos 注册与发现、优雅退出、统一日志与跨服务的 `trace_id`、`OnShutdown`、`Run` |
-| `hertzx`  | 基于 Hertz 的 API（HTTP）服务用的同一套东西：与 `kitexx` 共用一份配置，请求日志带 `trace_id` 并继续传给 RPC 服务，panic 恢复，同样的 Nacos 规则和优雅退出；详见下文 |
+| `kitexx`  | 服务的 Runtime：配置里开了什么就在注册前打开（`rt.DB`、`rt.Redis`、`rt.Kafka`、`rt.Centrifugo`、`rt.S3`、`rt.Delay`、`rt.ID`），Kitex 服务端/客户端选项（Nacos 注册发现、trace、指标、请求日志、参数校验、幂等、`limits:`），优雅停机，`--job`、`--verify`、`--dlq`；见下文 |
+| `hertzx`  | API（HTTP）服务的同一套：和 `kitexx` 共用配置，带 trace_id 的请求日志一路传到 RPC 服务，recovery、CORS、网关防护（`guard:` 请求体、时限、限流）、按 IDL 注解的 `RequireLogin` / `RequirePermission` / `Audit`、`Bind` 校验、`/docs`；见下文 |
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
@@ -24,7 +24,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `webhookx` | 厂商回调我们（支付结果、赛果结算），在 provider namespace 的 Hertz 服务上：`webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`；来源 IP、验签（hmac-sha256、basic 或厂商私有 Verifier）、原始报文留档到 Kafka、按事件 id 用 Redis 去重、handler 出错回 500 让厂商重试、指标；详见下文 |
 | `metricsx` | Prometheus 指标，单独端口（`metrics.enabled`，默认 9091）：Kitex/Hertz 每个方法的请求数、结果码、耗时直方图，对外 RPC 调用，Go 运行时，MySQL 连接池，Redis 命令，Kafka 事件；由部署抓取；详见下文 |
 | `jobx`    | 定时任务：服务在 `app/jobs.go` 里列出任务（名字、cron 时间表、超时、函数），框架按 `--job=<名>` 跑一个任务——根 span、日志带 run_id、锁、超时、退出码；`--list-jobs` 的输出由部署变成 CronJob；详见下文 |
-| `redisx`  | 按 `redis:` 配置打开 Redis / Valkey：和 `mysqlx` 同一套规则（enabled、source static 或 platform），每条命令一个 span；幂等中间件用它 |
+| `redisx`  | 按 `redis:` 段连 Redis / Valkey，规则同 `mysqlx`（enabled、source static 或 platform），每条命令一个 span；`WithLock`（跨副本锁）、`Cache[T]`（读穿缓存）；幂等中间件用它；见下文 |
 | `mysqlx`  | 按 `mysql:` 配置打开 MySQL（GORM）：连接池、每条 SQL 一个 span 和一条带 trace_id 的日志、慢查询告警；地址来自配置或平台的数据源表；详见下文 |
 | `delayx`  | 到某一刻执行一次（取消未支付订单、开赛封盘）：业务事务里 `rt.Delay.Schedule`，app.Setup 里 `rt.Delay.Handle`；至少一次、退避重试、failed 状态、指标；见下文 |
 | `idx`     | 业务唯一号（`rt.ID.Next()`）：53 位、按时间有序、跨副本唯一（实例号在 Redis 租）、JSON 数字装得下；见下文 |
