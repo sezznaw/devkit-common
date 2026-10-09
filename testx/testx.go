@@ -54,6 +54,19 @@ import (
 // "root:root@tcp(127.0.0.1:3306)/". Databases are created and dropped on it.
 const DSNEnv = "MYSQL_TEST_DSN_ROOT"
 
+// MigrationsEnv names the directory of the project's `*.up.sql` files; the
+// template's Makefile sets it (MIGRATIONS_DIR, absolute), so a test writes
+// testx.WithMySQL(testx.MigrationsDir()) wherever the migrations live.
+const MigrationsEnv = "MIGRATIONS_DIR"
+
+// RequireEnv set to 1 (CI does) turns "no MySQL answers" from a skip into a
+// failure, after waiting up to a minute for the service container.
+const RequireEnv = "TESTX_REQUIRE_MYSQL"
+
+// MigrationsDir is $MIGRATIONS_DIR, the project's migrations as make test
+// passes them; "" when run outside make (WithMySQL then says what to set).
+func MigrationsDir() string { return os.Getenv(MigrationsEnv) }
+
 // Runtime is the framework Runtime plus what a test wants to look at.
 type Runtime struct {
 	*kitexx.Runtime
@@ -295,8 +308,15 @@ func CtxAs(realm authx.Realm, uid int64) context.Context {
 // the end of the test. No server: the test is skipped.
 func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 	t.Helper()
+	if migrationsDir == "" {
+		t.Fatalf("testx: WithMySQL needs the migrations directory: run the test through `make test` (it sets %s), or pass the path", MigrationsEnv)
+	}
+	require := os.Getenv(RequireEnv) == "1"
 	root := os.Getenv(DSNEnv)
 	if root == "" {
+		if require {
+			t.Fatalf("testx: %s=1 but %s is not set", RequireEnv, DSNEnv)
+		}
 		t.Skipf("testx: %s not set; a database test needs a MySQL (make test sets it for the local stack)", DSNEnv)
 	}
 	dsn, err := gomysql.ParseDSN(root)
@@ -307,11 +327,27 @@ func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 	if err != nil {
 		t.Fatalf("testx: open %s: %v", DSNEnv, err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
-	defer cancel()
-	if err := admin.PingContext(ctx); err != nil {
+	wait := 3 * time.Second
+	if require {
+		wait = 60 * time.Second // a CI service container is still starting
+	}
+	deadline := time.Now().Add(wait)
+	var pingErr error
+	for {
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		pingErr = admin.PingContext(ctx)
+		cancel()
+		if pingErr == nil || time.Now().After(deadline) {
+			break
+		}
+		time.Sleep(time.Second)
+	}
+	if pingErr != nil {
 		_ = admin.Close()
-		t.Skipf("testx: no MySQL at %s (%v); start the local stack (infra/local/local.sh up) to run database tests", dsn.Addr, err)
+		if require {
+			t.Fatalf("testx: no MySQL at %s after %s: %v", dsn.Addr, wait, pingErr)
+		}
+		t.Skipf("testx: no MySQL at %s (%v); start the local stack (infra/local/local.sh up) to run database tests", dsn.Addr, pingErr)
 	}
 	name := fmt.Sprintf("test_%s_%d", strings.ReplaceAll(service, "-", "_"), time.Now().UnixNano()%1_000_000_000)
 	if _, err := admin.Exec("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4"); err != nil {

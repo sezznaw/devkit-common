@@ -92,6 +92,25 @@ func TestRuntimeMySQL(t *testing.T) {
 	}
 }
 
+func TestWithMySQLNeedsDir(t *testing.T) {
+	// a WithMySQL("") is a mistake worth a clear message, not a skip
+	ft := &fakeT{T: t}
+	func() {
+		defer func() { recover() }()
+		openMySQL(ft, "x", "")
+	}()
+	if !ft.fatal {
+		t.Fatal("empty migrations dir accepted")
+	}
+}
+
+type fakeT struct {
+	*testing.T
+	fatal bool
+}
+
+func (f *fakeT) Fatalf(format string, args ...any) { f.fatal = true; panic("fatal") }
+
 func TestGatewayHelpers(t *testing.T) {
 	h := server.New(server.WithDisablePrintRoute(true))
 	h.POST("/v1/echo", func(ctx context.Context, c *app.RequestContext) {
