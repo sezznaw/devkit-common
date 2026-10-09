@@ -28,7 +28,6 @@ import (
 	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/idx"
-	"github.com/sezznaw/devkit-common/starrocksx"
 	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/mysqlx"
@@ -36,6 +35,7 @@ import (
 	"github.com/sezznaw/devkit-common/otelx"
 	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/s3x"
+	"github.com/sezznaw/devkit-common/starrocksx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
