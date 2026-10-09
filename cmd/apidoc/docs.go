@@ -82,6 +82,68 @@ func PublicMethods(src []byte) map[string]bool {
 
 var methodLine = regexp.MustCompile(`^\s*\w+\s+(\w+)\s*\(`)
 
+var auditLine = regexp.MustCompile(`@(audit|noaudit)\b`)
+
+// AuditMethods are the service methods whose comment block says
+// `// @audit` (true) or `// @noaudit` (false): hertzx.Audit records them
+// (or not) regardless of their permission point.
+func AuditMethods(src []byte) map[string]bool {
+	out := map[string]bool{}
+	var pending *bool
+	for _, line := range strings.Split(string(src), "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case t == "":
+			continue
+		case strings.HasPrefix(t, "//"):
+			if m := auditLine.FindStringSubmatch(t); m != nil {
+				v := m[1] == "audit"
+				pending = &v
+			}
+		default:
+			if pending != nil {
+				if m := methodLine.FindStringSubmatch(line); m != nil {
+					out[m[1]] = *pending
+				}
+			}
+			pending = nil
+		}
+	}
+	return out
+}
+
+// Audits writes x-audit for the methods that said so.
+func Audits(top *yaml.Node, audits map[string]bool) {
+	paths := mapGet(top, "paths")
+	if paths == nil || len(audits) == 0 {
+		return
+	}
+	for i := 0; i+1 < len(paths.Content); i += 2 {
+		item := paths.Content[i+1]
+		for j := 0; j+1 < len(item.Content); j += 2 {
+			op := item.Content[j+1]
+			if op.Kind != yaml.MappingNode {
+				continue
+			}
+			method := ""
+			if n := mapGet(op, "operationId"); n != nil {
+				method = n.Value
+				if k := strings.LastIndex(method, "_"); k >= 0 {
+					method = method[k+1:]
+				}
+			}
+			mapDel(op, "x-audit")
+			if v, ok := audits[method]; ok {
+				if v {
+					mapSet(op, "x-audit", "true")
+				} else {
+					mapSet(op, "x-audit", "false")
+				}
+			}
+		}
+	}
+}
+
 var permLine = regexp.MustCompile(`@perm\s+([A-Za-z0-9_.:*-]+)`)
 
 // PermMethods are the service methods whose comment block carries a

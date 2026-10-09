@@ -604,6 +604,10 @@ A request without a token is HTTP 401 `{code: 1004}`, a revoked session
 the gateway handler and in every RPC service it calls, so `uid` is never a
 request field. Authorization (what a principal may do) is not here.
 
+### Audit log of a back office with `hertzx.Audit`
+
+A back-office gateway records who did what: `hertzx.Audit(h, openAPI, sink)` (installed after RequireLogin in app.Setup) produces one `AuditEntry` per audited operation, whatever its outcome: time, realm and uid, the operation's title from the IDL, method, path, permission point, the request body with secret-looking keys redacted (password, token, key...), HTTP status and business code, trace id, client IP and user agent, duration. Which operations: `// @audit` on the IDL method always (a login), `// @noaudit` never, otherwise every operation with a permission point that is not a `.view`. Handlers write nothing. The sink decides where entries go; `hertzx.NewAsyncSink(store)` turns a batch store (an RPC to the account service, a table) into a sink that never blocks a request: a queue of 1000, flushed every second or 100 entries, one retry, drops counted in the log; close it with kitexx.OnShutdown so the queue is flushed.
+
 ### Metrics with `metricsx`
 
 ```yaml
