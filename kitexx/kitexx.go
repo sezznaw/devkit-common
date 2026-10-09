@@ -109,6 +109,9 @@ type Config struct {
 	// limits per client IP (429, code 1008), service-wide and per route
 	// (`// @limit` in the IDL). Defaults apply without the section.
 	Guard GuardConfig `yaml:"guard"`
+	// Limits: what one instance of an RPC service refuses with code 5003
+	// (max_in_flight, default 1000; max_qps, off; max_connections, 10000).
+	Limits LimitsConfig `yaml:"limits"`
 	// ID: the unique-number generator (rt.ID). id.instance_bits splits the
 	// low 12 bits between replicas and ids per millisecond (default 5 + 7).
 	ID idx.Config `yaml:"id"`
@@ -177,6 +180,9 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 	opts := []server.Option{
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
 		server.WithServiceAddr(addr),
+		// the limits first: a refused request costs no tracing, no log line
+		// beyond the once-a-minute warning
+		server.WithMiddleware(Limits(cfg.Limits)),
 		server.WithMiddleware(ServerTracing()),
 		server.WithMiddleware(ServerMetrics()),
 		server.WithMiddleware(LoggingMiddleware()),
@@ -185,6 +191,8 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
 		server.WithExitWaitTime(DrainTimeout(cfg)),
 	}
+	opts = append(opts, connectionLimit(cfg.Limits)...)
+	zlog.Info("limits on", zlog.Int("max_in_flight", int64(cfg.Limits.inFlight())), zlog.Int("max_qps", int64(cfg.Limits.MaxQPS)), zlog.Int("max_connections", int64(cfg.Limits.connections())))
 	if !cfg.RegistryDisabled {
 		cli, advertise, err := Registration(cfg, addr.Port)
 		if err != nil {

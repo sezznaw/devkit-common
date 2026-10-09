@@ -227,6 +227,10 @@ mysql:
 
 事件命名、主题命名在 idl 仓库的 README。
 
+### RPC 服务过载保护（`limits:`）
+
+Kitex 服务的一个实例拒绝超出能力的请求，让过载变成快速的"忙"而不是一堆慢请求：同时处理不超过 `limits.max_in_flight`（默认 1000），每秒不超过 `limits.max_qps`（默认关，服务知道自己容量后再开；按 100ms 窗口计）, 连接不超过 `limits.max_connections`（10000）。被拒的请求不执行，回业务码 5003（`kitexx.CodeBusy`），网关像别的码一样透传，调用方稍后重试；指标 `rpc_server_rejected_total{rpc_method,reason}`，日志每分钟一条 WARN。Kitex 自带的限流器只用来限连接：限 QPS 时它直接断连接，客户端分不出是过载还是崩了（`devkit lint` 拦 `server.WithLimit`）。中间件排在链的最前面，拒绝一次不花别的代价。
+
 ### 唯一号 `idx`
 
 注单号、订单号、流水号用 `rt.ID.Next()`：53 位整数，跨服务所有副本唯一、按毫秒有序、看不出数量。选 53 位是为了它到哪都精确：JSON 数字、JavaScript 的 Number（整数到 2^53 为止）、Go 的 int64、BIGINT 列；64 位雪花过了网关必须转字串，哪里忘了就丢精度，而我们的规模用不着那几位。高 41 位是 2026-01-01 起的毫秒（够到 2095），低 12 位按 `id.instance_bits` 分给副本数和每毫秒的号数（默认 5 + 7：每服务 32 副本，每副本每毫秒 128 个、每秒 12.8 万；副本少单量大的项目设 3 + 9；以后改分配也不会和旧号冲突，高位的时间把它们分开）。实例号在 Redis 里租（`idx:<服务>:<n>`，后台续租、退出释放），副本之间不会重；没有 Redis 用 `INSTANCE_ID`；两者都没有只有本机运行会退到主机名哈希（并告警），线上 `Next` 会报 `idx.ErrNoInstance`（panic，由 Recovery 变成一次失败请求），宁可失败也不发重号。网关 IDL 和 RPC IDL 一样写 `i64 bet_no`。`idx.Time(id)` 是生成时刻。号不是秘密：读注单的 handler 要校验它属于登录的 uid。没人引用的行（会员、角色）继续自增；生成器给会离开系统的号用。

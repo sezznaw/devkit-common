@@ -326,6 +326,12 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `kitexx.Limits` (first middleware in Options): in-flight counter (atomic)
+  and a fixed 100ms-window QPS counter, refusing through `BizError(ctx,
+  NewBizStatusError(CodeBusy 5003))`; `connectionLimit` adds Kitex's
+  `WithLimit{MaxConnections}` + a reporter for the metric. Probed: Kitex's
+  QPS limiter closes the connection ("EOF peer close" at the client, not an
+  ErrOverlimit), which is why QPS is ours. Metric rpc_server_rejected_total.
 - `idx`: 53-bit snowflake: 41 time bits from Epoch 2026-01-01 above 12 low
   bits split by `id.instance_bits` (default 5 + 7; `Instance(id, bits)` to
   decode). 53 so the id is exact as a JSON / JavaScript number: no string form

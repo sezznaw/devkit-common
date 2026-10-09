@@ -76,6 +76,9 @@ var (
 	RPCServerRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_server_requests_total", Help: "RPC requests handled, by method and result code.",
 	}, []string{"rpc_service", "rpc_method", "code"})
+	RPCServerRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_server_rejected_total", Help: "Requests an instance refused for its limits (code 5003), by method and reason: in_flight, qps, connections.",
+	}, []string{"rpc_method", "reason"})
 	RPCServerDuration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
 		Name: "rpc_server_duration_seconds", Help: "Time to handle an RPC request.", Buckets: DurationBuckets,
 	}, []string{"rpc_service", "rpc_method"})
