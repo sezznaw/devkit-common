@@ -502,3 +502,8 @@ go test ./...
 #### 事务里的事件：outbox
 
 和数据库变更同属一件事的事件走 outbox，不走 `Publish`：在事务里 `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` 把事件写进本服务的 `outbox` 表（项目迁移建表，`kafkax.OutboxDDL` 是表结构）。事务提交则变更和事件都落地，回滚则都没有；同一进程里的转发器（服务同时有 Kafka 和 MySQL 时自动开，`kafka.outbox.enabled: false` 关）随后把行发出去，信封和 `Publish` 一样，trace 是发起请求的那条。至少一次投递、event id 不变，消费者照旧按 `ev.ID` 去重。发不出去的行按退避重试（1s、2s…5 分钟；表里有 `attempts`、`last_error`、`next_attempt_at`），一个坏主题不会挡住别的；多副本分摊（`FOR UPDATE SKIP LOCKED`）。已发的行保留 `kafka.outbox.retention`（7 天）后删除。指标 `kafka_outbox_pending`、`kafka_outbox_oldest_age_seconds`（按它告警）、`kafka_outbox_published_total{topic,status}`。`devkit lint` 的 `outbox` 规则拒绝在跑事务的代码里直接 `Publish`。
+
+### 部署后验证 `verifyx`
+
+每次发布后，部署用新镜像再起一次 `<二进制> --verify`（ArgoCD 的 PostSync Job）：框架的检查和服务自己的检查对刚上线的部署跑一遍，失败就是 Job 失败，几分钟内触发告警。框架按配置检查：MySQL 能应答且迁移不是 dirty、Redis 能应答、outbox 没有超过两分钟还没发出的事件、Nacos 里至少有一个本服务实例、网关的 `VERIFY_BASE_URL/ping` 能应答。服务在 `app/verify.go`（`Checks(cfg, rt) []verifyx.Check`）加自己的几条：用测试账号登录读一条、调一个 RPC。检查必须对线上无害：只读，或对测试账号自己数据的幂等写。`verifyx.NewGateway(rt.GatewayURL())` 是网关调自己接口的客户端（`Get`、带响应壳的 `Post`、登录后带 Bearer）。`make verify` 在本机对本地环境跑同一套。
+

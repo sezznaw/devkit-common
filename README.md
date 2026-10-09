@@ -635,6 +635,10 @@ A metric of the service's own: `promauto.With(metricsx.Registry).NewCounter(...)
 at package level; the default Prometheus registry is not served. A port that
 is taken is a warning at start, not a failure.
 
+### Post-deploy verification with `verifyx`
+
+After every release the deployment runs the new image once more as `<binary> --verify` (an ArgoCD PostSync Job): the framework's checks and the service's own run against the live deployment, and a failure fails the Job and raises the failed-Job alert within minutes. The framework checks what the configuration enables: MySQL answers and the migrations are not dirty, Redis answers, the outbox has no event older than two minutes still unpublished, at least one instance of this service is registered in Nacos, and for a gateway `VERIFY_BASE_URL/ping` answers. A service adds its own few in `app/verify.go` (`Checks(cfg, rt) []verifyx.Check`): log in with a test account and read something, call one RPC. Checks must be harmless on a live system: read only, or an idempotent write to a test account's own data. `verifyx.NewGateway(rt.GatewayURL())` is an HTTP client for a gateway's own endpoints (`Get`, `Post` with the envelope, a bearer token after a login). `make verify` runs the same checks on a developer's machine against the local stack.
+
 ### Scheduled jobs with `jobx`
 
 A job is a function with a name and a cron schedule, listed in the service's
