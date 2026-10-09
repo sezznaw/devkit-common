@@ -228,7 +228,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 		zlog.Info("delayed tasks on", zlog.Int("handlers", int64(n)), zlog.Dur("poll_interval", s.cfg.interval()), zlog.Int("max_attempts", int64(s.cfg.maxAttempts())))
 		for {
 			for {
-				ran, err := s.runOnce(ctx)
+				ran, err := s.RunOnce(ctx)
 				if err != nil && ctx.Err() == nil {
 					zlog.Error("delayed tasks round", zlog.Err(err))
 				}
@@ -260,9 +260,10 @@ func (s *Scheduler) Stop() {
 	s.wg.Wait()
 }
 
-// runOnce claims a batch of due tasks (one transaction, SKIP LOCKED, marked
-// running) and runs them; returns how many it claimed.
-func (s *Scheduler) runOnce(ctx context.Context) (int, error) {
+// RunOnce claims one batch of due tasks (one transaction, SKIP LOCKED,
+// marked running) and runs them; returns how many it claimed. The poller
+// calls it; a test calls it to run what is due without waiting.
+func (s *Scheduler) RunOnce(ctx context.Context) (int, error) {
 	var claimed []Task
 	now := time.Now()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {

@@ -326,6 +326,15 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `testx`: builds `kitexx.Runtime` by hand (exported fields) on miniredis,
+  kfake, an httptest Centrifugo API (`/api/<method>`, records publish), and
+  for `WithMySQL(dir)` a `test_<svc>_<n>` database on MYSQL_TEST_DSN_ROOT
+  (go-sql-driver ParseDSN; multiStatements for the `*.up.sql` files; dropped
+  in Cleanup; t.Skip when the server does not answer) opened with
+  mysqlx.Open, plus `delayx.New` (poll 50ms). `Start` = Kafka.Start +
+  StartOutbox + Delay.Start (if handlers); `RunDue` = Delay.RunOnce
+  (exported for this). Gateway helpers wrap ut.PerformRequest. Its MySQL
+  test runs in CI's mysql job like the outbox's.
 - `hertzx.Guard` (installed by New after the request log, before
   RequireLogin): `kitexx.GuardConfig` (`guard:`), `Rate` parses "N/s|m|h" /
   "off" (YAML unmarshal). Fixed-window counters: Redis INCR+PEXPIRE pipeline

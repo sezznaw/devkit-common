@@ -227,6 +227,10 @@ mysql:
 
 事件命名、主题命名在 idl 仓库的 README。
 
+### 用 `testx` 写测试
+
+handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL("../../infra/db/migrations/tenant"), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
+
 ### 网关防护（`guard:`）
 
 API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 取代理转发的（X-Forwarded-For），即 Hertz 的 ClientIP。
