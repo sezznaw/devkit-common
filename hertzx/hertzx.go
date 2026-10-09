@@ -69,6 +69,8 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 	all := append([]hconfig.Option{
 		server.WithHostPorts(addr.String()),
 		server.WithExitWaitTime(kitexx.DrainTimeout(cfg)),
+		// guard.max_body_bytes: a bigger body is 413 before it is read.
+		server.WithMaxRequestBodySize(cfg.Guard.MaxBody()),
 		// Hertz prints the routes as debug records of its own; one per route
 		// at every start is noise next to the request log.
 		server.WithDisablePrintRoute(true),
@@ -80,6 +82,10 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 		zlog.Info("cors on", zlog.Any("allowed_origins", cfg.CORS.AllowedOrigins))
 	}
 	h.Use(Tracing(), Metrics(), RequestLog(), Recovery())
+	// The guard after the request log, so a refused request is a record
+	// too; before the login check, so guessing passwords is limited.
+	h.Use(Guard(h, cfg.Guard, rt.Redis, cfg.Service.Name))
+	zlog.Info("guard on", zlog.Int("max_body_bytes", int64(cfg.Guard.MaxBody())), zlog.Dur("timeout", cfg.Guard.RequestTimeout()), zlog.Str("rate_per_ip", cfg.Guard.PerIP().String()))
 	return h, nil
 }
 

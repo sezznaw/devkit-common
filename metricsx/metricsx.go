@@ -91,6 +91,9 @@ var (
 	HTTPServerDuration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
 		Name: "http_server_duration_seconds", Help: "Time to handle an HTTP request.", Buckets: DurationBuckets,
 	}, []string{"http_method", "http_route"})
+	HTTPRequestsRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "http_requests_rejected_total", Help: "Requests the gateway's guard refused, by reason: rate_limit (429), timeout (504).",
+	}, []string{"reason"})
 	HTTPClientRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "http_client_requests_total", Help: "Calls to external HTTP APIs (httpx), by provider, method and status (\"error\": no response).",
 	}, []string{"provider", "http_method", "status"})

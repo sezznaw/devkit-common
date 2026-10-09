@@ -146,6 +146,75 @@ func Audits(top *yaml.Node, audits map[string]bool) {
 
 var permLine = regexp.MustCompile(`@perm\s+([A-Za-z0-9_.:*-]+)`)
 
+var limitLine = regexp.MustCompile(`@limit\s+(\d+\s*/\s*[a-z]+|off)`)
+
+// LimitMethods are the service methods whose comment block carries a
+// `// @limit <count>/<s|m|h>` line: a request-rate limit per client IP on
+// that route alone (hertzx.Guard), on top of the service-wide one.
+func LimitMethods(src []byte) map[string]string {
+	return taggedMethods(src, limitLine)
+}
+
+// taggedMethods maps each method to the capture of the last matching
+// comment line in the block right above it.
+func taggedMethods(src []byte, re *regexp.Regexp) map[string]string {
+	out := map[string]string{}
+	pending := ""
+	for _, line := range strings.Split(string(src), "\n") {
+		t := strings.TrimSpace(line)
+		switch {
+		case t == "":
+			continue
+		case strings.HasPrefix(t, "//"):
+			if m := re.FindStringSubmatch(t); m != nil {
+				pending = strings.ReplaceAll(m[1], " ", "")
+			}
+		default:
+			if pending != "" {
+				if m := methodLine.FindStringSubmatch(line); m != nil {
+					out[m[1]] = pending
+				}
+			}
+			pending = ""
+		}
+	}
+	return out
+}
+
+// Limits writes each method's @limit as the operation's x-rate-limit.
+func Limits(top *yaml.Node, limits map[string]string) {
+	setExtension(top, "x-rate-limit", limits)
+}
+
+// setExtension sets (or clears) one x- field of every operation from a
+// method -> value map.
+func setExtension(top *yaml.Node, field string, values map[string]string) {
+	paths := mapGet(top, "paths")
+	if paths == nil || len(values) == 0 {
+		return
+	}
+	for i := 0; i+1 < len(paths.Content); i += 2 {
+		item := paths.Content[i+1]
+		for j := 0; j+1 < len(item.Content); j += 2 {
+			op := item.Content[j+1]
+			if op.Kind != yaml.MappingNode {
+				continue
+			}
+			method := ""
+			if n := mapGet(op, "operationId"); n != nil {
+				method = n.Value
+				if k := strings.LastIndex(method, "_"); k >= 0 {
+					method = method[k+1:]
+				}
+			}
+			mapDel(op, field)
+			if v := values[method]; v != "" {
+				mapSet(op, field, v)
+			}
+		}
+	}
+}
+
 // PermMethods are the service methods whose comment block carries a
 // `// @perm <point>` line, with the point: the gateway serves them only to
 // a login holding that permission point (hertzx.RequirePermission).

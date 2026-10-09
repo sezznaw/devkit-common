@@ -227,6 +227,10 @@ mysql:
 
 事件命名、主题命名在 idl 仓库的 README。
 
+### 网关防护（`guard:`）
+
+API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 取代理转发的（X-Forwarded-For），即 Hertz 的 ClientIP。
+
 ### 锁与缓存 `redisx`
 
 **跨副本的锁。** `redisx.WithLock(ctx, rt.Redis, "settle:"+matchID, 30*time.Second, func(ctx context.Context) error {...})` 在服务所有副本范围内持锁执行函数（key `lock:<服务>:<名字>`）：结算一场比赛、改一个会员的余额、同步一个厂商。第二个调用方立刻得到 `redisx.ErrLocked`，或 `redisx.Wait(2*time.Second)` 等一会再放弃。函数运行期间锁在后台自动续期，所以 TTL 是"进程死掉多久后别人能接手"，不是工作时限；中途锁丢了（Redis 不可用、key 被删）函数的 ctx 被取消，WithLock 返回 `redisx.ErrLockLost`。handler 里的 `sync.Mutex` 只锁本副本，所以 `devkit lint` 的 `mutex` 规则在 handler、repo 里拦它，自己写 `SetNX` 也拦（规则 `lock`）。指标 `locks_total{name,result}`、`lock_wait_seconds`。

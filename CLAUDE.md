@@ -326,6 +326,16 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `hertzx.Guard` (installed by New after the request log, before
+  RequireLogin): `kitexx.GuardConfig` (`guard:`), `Rate` parses "N/s|m|h" /
+  "off" (YAML unmarshal). Fixed-window counters: Redis INCR+PEXPIRE pipeline
+  on `rl:<svc>:<scope>:<window>` when rt.Redis is set, else an in-memory map
+  (purged when > 10000). Per-route limits come from x-rate-limit in the
+  embedded spec (apidoc `@limit` -> `Limits`, generic `setExtension`), read
+  lazily on the first request (Spec is set after New). Timeout: ctx with
+  deadline into c.Next; afterwards DeadlineExceeded + empty body -> 504/1010.
+  Body size is `server.WithMaxRequestBodySize` in New. Codes 1008 / 1010 in
+  kitexx/guard.go. Tests use ut.PerformRequest with X-Forwarded-For.
 - `redisx` lock and cache: `Open` takes an optional service name kept as the
   connection's ClientName; `Namespace(rdb)` reads it back and `keyOf` builds
   `lock:<svc>:<name>` / `cache:<svc>:<name>:<id>`. `WithLock`: SET NX PX with a

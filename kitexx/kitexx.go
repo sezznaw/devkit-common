@@ -103,6 +103,11 @@ type Config struct {
 	// API service; hertzx.New installs the middleware. allowed_origins lists
 	// the exact origins (scheme, host, port); nothing is allowed by default.
 	CORS CORSConfig `yaml:"cors"`
+	// Guard: what an API service refuses before any handler runs: request
+	// body size (413), a request deadline (504, code 1010) and request-rate
+	// limits per client IP (429, code 1008), service-wide and per route
+	// (`// @limit` in the IDL). Defaults apply without the section.
+	Guard GuardConfig `yaml:"guard"`
 	// RPCClient: timeout, retry and circuit breaker of the calls this
 	// service makes to other services (ClientOptions). Defaults suit the
 	// cluster; the section is only for changing them.
