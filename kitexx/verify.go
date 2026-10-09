@@ -117,7 +117,20 @@ func (rt *Runtime) frameworkChecks() []verifyx.Check {
 	}
 	if base := os.Getenv(verifyx.BaseURLEnv); base != "" {
 		out = append(out, verifyx.Check{Name: "gateway-ping", Description: base + "/ping answers", Run: func(ctx context.Context) error {
-			_, err := verifyx.NewGateway("").Get(ctx, "/ping")
+			// The hook starts the moment the rollout is healthy; the Service's
+			// endpoints may switch to the new pods a few seconds later.
+			gw := verifyx.NewGateway("")
+			var err error
+			for attempt := 0; attempt < 15; attempt++ {
+				if _, err = gw.Get(ctx, "/ping"); err == nil {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return err
+				case <-time.After(2 * time.Second):
+				}
+			}
 			return err
 		}})
 	}
