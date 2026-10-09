@@ -221,6 +221,7 @@ func (s *Scheduler) Start(ctx context.Context) {
 		defer ticker.Stop()
 		cleanup := time.NewTicker(time.Hour)
 		defer cleanup.Stop()
+		var lastObserve time.Time
 		s.mu.RLock()
 		n := len(s.handlers)
 		s.mu.RUnlock()
@@ -235,7 +236,10 @@ func (s *Scheduler) Start(ctx context.Context) {
 					break
 				}
 			}
-			s.observe(ctx)
+			if time.Since(lastObserve) >= observeEvery {
+				s.observe(ctx)
+				lastObserve = time.Now()
+			}
 			select {
 			case <-ctx.Done():
 				return
@@ -345,6 +349,10 @@ func backoff(attempts int) time.Duration {
 	}
 	return d
 }
+
+// observeEvery spaces the gauge queries: three counts a second per replica
+// would be most of a quiet service's query log.
+const observeEvery = 15 * time.Second
 
 func (s *Scheduler) observe(ctx context.Context) {
 	var pending, failed int64
