@@ -291,6 +291,19 @@ func (c *Client) consume(ctx context.Context, cl *kgo.Client, s subscription) {
 		fetches.EachRecord(func(r *kgo.Record) {
 			c.handle(ctx, r, s.handler)
 		})
+		// lag: how far behind the end of each partition this poll left us
+		// (the largest partition's figure is the topic's gauge)
+		var lag int64
+		fetches.EachPartition(func(p kgo.FetchTopicPartition) {
+			if n := len(p.Records); n > 0 {
+				if l := p.HighWatermark - p.Records[n-1].Offset - 1; l > lag {
+					lag = l
+				}
+			}
+		})
+		if !fetches.Empty() {
+			metricsx.KafkaConsumerLag.WithLabelValues(s.topic).Set(float64(lag))
+		}
 		if err := cl.CommitUncommittedOffsets(ctx); err != nil && ctx.Err() == nil {
 			zlog.Error("commit failed", zlog.Str("topic", s.topic), zlog.Err(err))
 		}

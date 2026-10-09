@@ -253,6 +253,10 @@ API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：�
 
 必须在某个时刻执行的函数（15 分钟后取消未支付订单、开赛封盘、一小时后重试派彩）是延时任务，不是 `time.AfterFunc`（进程重启就丢），也不是定时扫表（一分钟延迟、全表扫）。在需要它的那次业务变更的事务里 `rt.Delay.Schedule(ctx, tx, "order.cancel-unpaid", orderNo, time.Now().Add(15*time.Minute), payload)` 往本服务的 `delayed_task` 表写一行（项目迁移建表，`delayx.DDL` 是表结构）：订单和它的取消任务要么一起存在，要么都不存在。`app.Setup` 里每种 kind 注册一次函数 `rt.Delay.Handle("order.cancel-unpaid", func(ctx, t *delayx.Task) error {...})`；同一进程里的调度器（服务有 MySQL 且注册了 handler 时自动开，`delay.enabled: false` 关）认领到点的行（`FOR UPDATE SKIP LOCKED`，多副本分摊）并执行，延迟不超过一个轮询间隔（1s）。`rt.Delay.Cancel(ctx, tx, kind, key)` 撤掉还没执行的任务（订单付了）。至少一次（执行中崩溃会重跑），所以 handler 要幂等：先重读状态（"订单还没付吗？"），没事可做就返回 nil。返回错误的 handler 按退避重试（1m、2m、4m…1h）直到 `delay.max_attempts`（5 次），然后任务标 `failed`、记 `last_error`、计入 `delay_tasks_failed`（按它告警）；`delay_tasks_overdue_seconds` 是最早到点未执行的任务晚了多久，`delay_tasks_run_total{kind,result}` 是结果计数。已完成的行保留 `delay.retention`（7 天）。部署后检查 `delay`：有任务超时两分钟未执行或已彻底失败就不通过。`devkit lint` 的 `delay` 规则拒绝服务代码里的 `time.AfterFunc` / `time.NewTimer`。周期性的工作（每晚报表）是 job（`jobx`），不是延时任务。
 
+#### 死信与积压
+
+handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<二进制> --dlq list` 列出本服务订阅的每个主题的死信队列里待处理的消息（offset、时间、key、事件类型和 id、错误）；`--dlq show <主题> <offset>` 看一条的全文；`--dlq replay <主题>` 把待处理的全部重发回原主题——原始记录加一个 `replayed-from` 头，修好的 handler 像第一次一样处理——然后标记完成；`--dlq replay <主题> <offset>` 只重发一条；`--dlq drop <主题>` 不重发直接标记完成。"待处理"是工具自己的消费组（`<服务>-dlq`）还没提交过去的部分，队列本身只追加。线上在服务自己的 Pod 里跑：`kubectl -n <ns> exec deploy/<服务> -- /app/<服务> --dlq list`；本机 `make dlq ARGS="list"`。先把修复发上去再回放。消费者还会上报 `kafka_consumer_lag{topic}`（每次拉取后离主题末尾还差多少条），`kafka_events_handled_total{result="dlq"}` 计被放进死信的数量；部署按这两个告警。
+
 ### 用 `centrifugox` 推送
 
 `centrifugo:` 段：`enabled`，`source static` 的 `api_addr`、`api_key`、`token_secret`，或 `source platform` 从 Nacos 的

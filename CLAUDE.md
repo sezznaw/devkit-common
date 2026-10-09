@@ -326,6 +326,14 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   errors.md. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
+- `kafkax.DLQ` (the `--dlq` tool, `kitexx.DLQFlag` / `RunDLQ`, run after
+  app.Setup so `c.subs` names the dlq topics): kadm on the producer client
+  for ListEndOffsets / FetchOffsets (GroupIDNotFound = never committed) /
+  CommitOffsets of the tool group `<service>-dlq`; pending = committed..end,
+  read with a group-less kgo client via ConsumePartitions; replay strips the
+  park headers (error, source-topic, consumer) and adds replayed-from. Lag
+  gauge `kafka_consumer_lag{topic}` is HighWatermark - last offset - 1 per
+  poll (max over partitions). Test TestDLQTool on kfake.
 - `kitexx.Limits` (first middleware in Options): in-flight counter (atomic)
   and a fixed 100ms-window QPS counter, refusing through `BizError(ctx,
   NewBizStatusError(CodeBusy 5003))`; `connectionLimit` adds Kitex's

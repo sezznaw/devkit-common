@@ -145,6 +145,9 @@ var (
 	KafkaEventsHandled = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "kafka_events_handled_total", Help: "Events consumed by kafkax, by topic and outcome: ok, retried, dlq.",
 	}, []string{"topic", "result"})
+	KafkaConsumerLag = promauto.With(Registry).NewGaugeVec(prometheus.GaugeOpts{
+		Name: "kafka_consumer_lag", Help: "Records not yet consumed behind the end of the topic (largest partition), after each poll.",
+	}, []string{"topic"})
 	KafkaHandleDuration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
 		Name: "kafka_event_handle_duration_seconds", Help: "Time a handler took for one event (all attempts).", Buckets: DurationBuckets,
 	}, []string{"topic"})
