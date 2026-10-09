@@ -256,9 +256,23 @@ func (s *AsyncSinkT) run() {
 				return
 			}
 			batch = append(batch, e)
-			if len(batch) >= 100 {
-				flush()
+			// take what else is already waiting, then store at once: an
+			// audited operation is rare and its record should not sit in
+			// memory where a crash loses it
+		drain:
+			for len(batch) < 100 {
+				select {
+				case e, ok := <-s.queue:
+					if !ok {
+						flush()
+						return
+					}
+					batch = append(batch, e)
+				default:
+					break drain
+				}
 			}
+			flush()
 		case <-ticker.C:
 			flush()
 		}
