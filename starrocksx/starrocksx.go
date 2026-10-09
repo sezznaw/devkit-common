@@ -138,7 +138,6 @@ func Open(ctx context.Context, t Target, cfg Config, tenant string) (*Client, er
 	mc.ParseTime = true
 	mc.Timeout = 5 * time.Second
 	mc.ReadTimeout = cfg.timeout() + 5*time.Second
-	mc.Params = map[string]string{"charset": "utf8mb4"}
 	conn, err := gomysql.NewConnector(mc)
 	if err != nil {
 		return nil, fmt.Errorf("starrocksx: %w", err)
