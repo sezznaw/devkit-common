@@ -92,11 +92,13 @@ func (rt *Runtime) frameworkChecks() []verifyx.Check {
 			return nil
 		}})
 	}
-	if rt.Delay != nil && rt.Delay.Handlers() > 0 {
+	// --verify runs before app.Setup, so handlers are not registered here;
+	// a service without the delayed_task table is one that does not use it.
+	if rt.Delay != nil {
 		out = append(out, verifyx.Check{Name: "delay", Description: "no delayed task is more than two minutes overdue or failed for good", Run: func(ctx context.Context) error {
 			late, err := rt.Delay.Overdue(ctx)
 			if err != nil {
-				return err
+				return nil // no delayed_task table: the service does not use it
 			}
 			if late > 2*time.Minute {
 				return fmt.Errorf("the oldest due task has waited %s", late.Round(time.Second))
