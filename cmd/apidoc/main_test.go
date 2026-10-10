@@ -149,7 +149,7 @@ func TestPermMethods(t *testing.T) {
 }
 
 func TestEnvelope(t *testing.T) {
-	doc := "openapi: 3.0.3\ninfo:\n  title: x\n  version: '1'\npaths:\n  /v1/a:\n    post:\n      operationId: S_A\n      responses:\n        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/ProfileBody'\n  /v1/b:\n    post:\n      operationId: S_B\n      responses:\n        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/EmptyBody'\n"
+	doc := "openapi: 3.0.3\ninfo:\n  title: x\n  version: '1'\npaths:\n  /v1/a:\n    post:\n      operationId: S_A\n      responses:\n        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/ProfileBody'\n  /v1/b:\n    post:\n      operationId: S_B\n      responses: {}\n"
 	out, err := Patch([]byte(doc), "x", "1", "", "x", Directives{}, nil, nil, nil, nil)
 	if err != nil {
 		t.Fatal(err)

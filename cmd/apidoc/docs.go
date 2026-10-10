@@ -452,31 +452,46 @@ func Envelope(top *yaml.Node) {
 		item := paths.Content[i+1]
 		for j := 0; j+1 < len(item.Content); j += 2 {
 			op := item.Content[j+1]
-			resp := mapGet(op, "responses")
-			if resp == nil {
+			if op.Kind != yaml.MappingNode {
 				continue
 			}
-			for k := 0; k+1 < len(resp.Content); k += 2 {
-				if resp.Content[k].Value != "200" {
-					continue
-				}
-				content := mapGet(resp.Content[k+1], "content")
-				if content == nil {
-					continue
-				}
-				js := mapGet(content, "application/json")
-				if js == nil {
-					continue
-				}
-				schema := mapGet(js, "schema")
-				if schema == nil || mapGet(schema, "code") != nil {
-					continue
-				}
-				wrapped := envelopeSchema(schema)
-				for m := 0; m+1 < len(js.Content); m += 2 {
-					if js.Content[m].Value == "schema" {
-						js.Content[m+1] = wrapped
-					}
+			resp := mapGet(op, "responses")
+			if resp == nil {
+				resp = &yaml.Node{Kind: yaml.MappingNode}
+				op.Content = append(op.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "responses"}, resp)
+			}
+			ok := mapGet(resp, "200")
+			if ok == nil {
+				// The plugin writes nothing for a method that returns common.Empty:
+				// the client still gets {code, msg}.
+				ok = &yaml.Node{Kind: yaml.MappingNode}
+				resp.Content = append(resp.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "200"}, ok)
+			}
+			// The plugin puts the return struct's comment here; the envelope's
+			// meaning is the same everywhere.
+			mapSet(ok, "description", "成功。业务结果看 code：0 成功，其余见错误码表")
+			content := mapGet(ok, "content")
+			if content == nil {
+				content = &yaml.Node{Kind: yaml.MappingNode}
+				ok.Content = append(ok.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "content"}, content)
+			}
+			js := mapGet(content, "application/json")
+			if js == nil {
+				js = &yaml.Node{Kind: yaml.MappingNode}
+				content.Content = append(content.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "application/json"}, js)
+			}
+			schema := mapGet(js, "schema")
+			if schema != nil && mapGet(schema, "code") != nil {
+				continue
+			}
+			wrapped := envelopeSchema(schema)
+			if schema == nil {
+				js.Content = append(js.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "schema"}, wrapped)
+				continue
+			}
+			for m := 0; m+1 < len(js.Content); m += 2 {
+				if js.Content[m].Value == "schema" {
+					js.Content[m+1] = wrapped
 				}
 			}
 		}
@@ -497,9 +512,11 @@ func envelopeSchema(data *yaml.Node) *yaml.Node {
 		scalar("code"), prop("integer", "int32", "0 成功；其他见错误码表（idl/errors.md）"),
 		scalar("msg"), prop("string", "", "给人看的说明，成功时为空"),
 	}}
-	empty := false
-	if ref := mapGet(data, "$ref"); ref != nil && strings.Contains(ref.Value, "Empty") {
-		empty = true
+	empty := data == nil
+	if !empty {
+		if ref := mapGet(data, "$ref"); ref != nil && strings.Contains(ref.Value, "Empty") {
+			empty = true
+		}
 	}
 	if !empty {
 		props.Content = append(props.Content, scalar("data"), data)
