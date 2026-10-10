@@ -3,6 +3,7 @@ package hertzx
 import (
 	"context"
 	"errors"
+	"reflect"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/protocol/consts"
@@ -34,10 +35,31 @@ const CodeUpstream int32 = 5001
 // MsgUpstream is the message that goes with CodeUpstream.
 const MsgUpstream = "服务暂不可用，请稍后重试"
 
-// OK answers {code: 0, msg: "", data}; a nil data (or a method with nothing
-// to return) answers {code: 0, msg: ""}.
+// OK answers {code: 0, msg: "", data}. A method with nothing to return
+// returns common.Empty in the IDL and the handler passes &common.Empty{}
+// (or nil): both answer {code: 0, msg: ""} without data, so "nothing" looks
+// the same everywhere.
 func OK(c *app.RequestContext, data any) {
+	if isEmptyStruct(data) {
+		data = nil
+	}
 	c.JSON(consts.StatusOK, &Envelope{Code: CodeOK, Data: data})
+}
+
+// isEmptyStruct: nil, or a (pointer to a) struct without fields, such as
+// the generated common.Empty.
+func isEmptyStruct(v any) bool {
+	if v == nil {
+		return true
+	}
+	rv := reflect.ValueOf(v)
+	for rv.Kind() == reflect.Pointer {
+		if rv.IsNil() {
+			return true
+		}
+		rv = rv.Elem()
+	}
+	return rv.Kind() == reflect.Struct && rv.NumField() == 0
 }
 
 // Fail answers the error of an RPC call: a business answer

@@ -555,4 +555,4 @@ log_level_data_id: order.log-level              # kitexx：日志级别跟随这
 go test ./...
 ```
 
-**响应壳。** 网关方法的 IDL 返回类型就是数据结构体（没有数据用 `common.Empty`）；handler 以 `hertzx.OK(c, &data)` 或 `hertzx.Fail(ctx, c, err)` 结束（BizStatusError 变成它的 code 和 msg，其他错误记日志并回 5001；网关自己定的码用 `hertzx.FailCode`）。`{code, msg, data}` 的壳只在这里加一次，`cmd/apidoc` 生成文档时同样包上；IDL 里不写壳。
+**响应壳。** 网关方法的 IDL 返回类型就是数据结构体（没有数据用 `common.Empty`）；handler 以 `hertzx.OK(c, &data)`（`hertzx.OK(c, &common.Empty{})` 回没有 data 的壳） 或 `hertzx.Fail(ctx, c, err)` 结束（BizStatusError 变成它的 code 和 msg，其他错误记日志并回 5001；网关自己定的码用 `hertzx.FailCode`）。`{code, msg, data}` 的壳只在这里加一次，`cmd/apidoc` 生成文档时同样包上；IDL 里不写壳。
