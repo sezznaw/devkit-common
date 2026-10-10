@@ -171,8 +171,8 @@ func s3Target(ctx context.Context, cfg Config) (s3x.Target, error) {
 // APIs must run in a namespace that may leave the cluster.
 const PodNamespaceEnv = "POD_NAMESPACE"
 
-// ProviderNamespaceSuffix marks the namespaces with egress
-// (sportsbook-dev-provider).
+// ProviderNamespaceSuffix is the default egress.namespace_suffix: the
+// namespaces with a way out of the cluster end in it ("<env>-provider").
 const ProviderNamespaceSuffix = "-provider"
 
 // openProviders builds one httpx client per `providers:` entry. The
@@ -185,9 +185,11 @@ func (rt *Runtime) openProviders() error {
 	if len(cfg.Providers) == 0 {
 		return nil
 	}
-	if ns := os.Getenv(PodNamespaceEnv); ns != "" && !strings.HasSuffix(ns, ProviderNamespaceSuffix) {
-		return fmt.Errorf("kitexx: this service has providers (%s) but runs in namespace %q, which cannot reach the internet; deploy it to the %s namespace (services/<env>/<service>/app.yaml: namespace: %s%s)",
-			providerNames(cfg), ns, ProviderNamespaceSuffix, strings.TrimSuffix(ns, ProviderNamespaceSuffix), ProviderNamespaceSuffix)
+	if suffix := cfg.Egress.suffix(); cfg.Egress.check() {
+		if ns := os.Getenv(PodNamespaceEnv); ns != "" && !strings.HasSuffix(ns, suffix) {
+			return fmt.Errorf("kitexx: this service has providers (%s) but runs in namespace %q, which cannot reach the internet; deploy it to the %s namespace (services/<env>/<service>/app.yaml: namespace: %s%s), or set egress.check: false in a deployment without that split",
+				providerNames(cfg), ns, suffix, strings.TrimSuffix(ns, suffix), suffix)
+		}
 	}
 	for name, p := range cfg.Providers {
 		c, err := httpx.New(name, p)

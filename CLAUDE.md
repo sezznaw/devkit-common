@@ -334,6 +334,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   Runtime.Report via `openReport` (infra.yaml `starrocks` block for source
   platform; static assumes tenant_a when TENANT_CODE is empty). Tests run
   against MySQL (MYSQL_TEST_DSN_ROOT).
+- `EgressConfig` (`egress:`): the provider-namespace rule in openProviders
+  is `check` (default true) + `namespace_suffix` (default "-provider"); the
+  constant stays as the default. Nothing else in kit-common names a
+  deployment convention of one project; keep it that way (project facts
+  live in idl/devkit.yaml, conf and infra).
 - `kafkax` dedupe: `SetDedupe(rdb)` (runtime: when rt.Redis and
   kafka.dedupe.enabled != false; testx too). In `handle`, after the envelope
   decodes: SETNX `dedupe:<svc>:<topic>:<id>` EX ttl; dup -> result

@@ -91,6 +91,12 @@ type Config struct {
 	// Go runtime, MySQL pool, Redis commands, Kafka client. Deployments scrape
 	// it; off on a laptop.
 	Metrics metricsx.Config `yaml:"metrics"`
+	// Egress: the deployment rule for a service with providers. By default
+	// it must run in a namespace whose name ends in egress.namespace_suffix
+	// ("-provider": the one that may reach the internet) and refuses to start
+	// elsewhere, so a wrong placement fails at start and not at 3 am. A
+	// project that does not split namespaces sets egress.check: false.
+	Egress EgressConfig `yaml:"egress"`
 	// Providers: the external HTTP APIs this service calls, by name
 	// (`providers.odds-feed.base_url` ...); rt.Provider(name) is the client.
 	// A service with providers runs in the provider namespace (egress).
@@ -578,3 +584,21 @@ func RunStarters(rt *Runtime) error {
 // tag; it becomes log.version (the `version` of every record and span) when
 // the configuration does not set one.
 const VersionEnv = "APP_VERSION"
+
+// EgressConfig is the `egress:` section: where a service with providers may
+// run. The default matches a deployment that keeps business namespaces
+// offline and gives one "<env>-provider" namespace a way out.
+type EgressConfig struct {
+	// Check: false skips the namespace rule. Default true.
+	Check *bool `yaml:"check"`
+	// NamespaceSuffix a namespace with egress ends in. Default "-provider".
+	NamespaceSuffix string `yaml:"namespace_suffix"`
+}
+
+func (e EgressConfig) check() bool { return e.Check == nil || *e.Check }
+func (e EgressConfig) suffix() string {
+	if e.NamespaceSuffix == "" {
+		return ProviderNamespaceSuffix
+	}
+	return e.NamespaceSuffix
+}
