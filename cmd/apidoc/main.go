@@ -64,27 +64,45 @@ func run(idl, out, title, version, desc string) error {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	// Copy the IDL directory (includes are relative) with the annotations added.
+	// Copy the IDL repository (the service's directory and its siblings:
+	// includes such as "../common/common.thrift" are relative) with the
+	// annotations added, keeping the layout.
 	srcDir := filepath.Dir(idl)
-	entries, err := os.ReadDir(srcDir)
-	if err != nil {
-		return err
-	}
-	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".thrift") {
-			continue
+	repoDir := filepath.Dir(srcDir)
+	work := filepath.Join(tmp, filepath.Base(srcDir))
+	err = filepath.WalkDir(repoDir, func(p string, e os.DirEntry, err error) error {
+		if err != nil {
+			return nil
 		}
-		b, err := os.ReadFile(filepath.Join(srcDir, e.Name()))
+		if e.IsDir() {
+			if e.Name() == ".git" || e.Name() == "node_modules" {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		if !strings.HasSuffix(e.Name(), ".thrift") {
+			return nil
+		}
+		rel, err := filepath.Rel(repoDir, p)
 		if err != nil {
 			return err
 		}
-		if err := os.WriteFile(filepath.Join(tmp, e.Name()), Annotate(b), 0o644); err != nil {
+		b, err := os.ReadFile(p)
+		if err != nil {
 			return err
 		}
+		dst := filepath.Join(tmp, rel)
+		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
+			return err
+		}
+		return os.WriteFile(dst, Annotate(b), 0o644)
+	})
+	if err != nil {
+		return err
 	}
 	outDir := filepath.Join(tmp, "out")
 	cmd := exec.Command("thriftgo", "-g", "go", "-p", "http-swagger:OutputDir="+outDir, filepath.Base(idl))
-	cmd.Dir = tmp
+	cmd.Dir = work
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("thriftgo: %w\n%s", err, b)
 	}
