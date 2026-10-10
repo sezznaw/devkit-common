@@ -160,9 +160,12 @@ func TestEnvelope(t *testing.T) {
 			t.Fatalf("missing %q in\n%s", want, s)
 		}
 	}
-	// /v1/b returns Empty: the envelope has no data.
+	// /v1/b returns Empty: the envelope has no data, and the status key is a string.
 	b := s[strings.Index(s, "/v1/b"):]
 	if strings.Contains(b, "data:") {
 		t.Fatalf("Empty response documents data:\n%s", b)
+	}
+	if !strings.Contains(b, `"200":`) {
+		t.Fatalf("status key must be the string \"200\":\n%s", b)
 	}
 }

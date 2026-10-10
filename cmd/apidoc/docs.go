@@ -465,7 +465,9 @@ func Envelope(top *yaml.Node) {
 				// The plugin writes nothing for a method that returns common.Empty:
 				// the client still gets {code, msg}.
 				ok = &yaml.Node{Kind: yaml.MappingNode}
-				resp.Content = append(resp.Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "200"}, ok)
+				// Quoted: an unquoted 200 is an int key, which JSON cannot carry.
+				resp.Content = append(resp.Content, &yaml.Node{Kind: yaml.ScalarNode, Tag: "!!str", Style: yaml.DoubleQuotedStyle, Value: "200"}, ok)
+				resp.Style = 0 // block style, like the plugin's own output
 			}
 			// The plugin puts the return struct's comment here; the envelope's
 			// meaning is the same everywhere.

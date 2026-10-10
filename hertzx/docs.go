@@ -1,6 +1,7 @@
 package hertzx
 
 import (
+	"fmt"
 	"context"
 	_ "embed"
 	"encoding/json"
@@ -123,9 +124,10 @@ func normalize(v any) any {
 		}
 		return t
 	case map[any]any:
+		// A key like 200 (a response status) parses as an int.
 		m := make(map[string]any, len(t))
 		for k, x := range t {
-			m[k.(string)] = normalize(x)
+			m[fmt.Sprint(k)] = normalize(x)
 		}
 		return m
 	case []any:

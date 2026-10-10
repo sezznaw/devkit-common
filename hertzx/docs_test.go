@@ -37,3 +37,13 @@ func TestServeDocs(t *testing.T) {
 		t.Errorf("disabled still serves: %d", w.Code)
 	}
 }
+
+func TestYAMLToJSONIntKeys(t *testing.T) {
+	out, err := yamlToJSON([]byte("paths:\n  /x:\n    post:\n      responses: {200: {description: ok}}\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(out), `"200":{"description":"ok"}`) {
+		t.Fatalf("got %s", out)
+	}
+}
