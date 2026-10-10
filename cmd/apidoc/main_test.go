@@ -147,3 +147,22 @@ func TestPermMethods(t *testing.T) {
 		t.Fatalf("%s", out)
 	}
 }
+
+func TestEnvelope(t *testing.T) {
+	doc := "openapi: 3.0.3\ninfo:\n  title: x\n  version: '1'\npaths:\n  /v1/a:\n    post:\n      operationId: S_A\n      responses:\n        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/ProfileBody'\n  /v1/b:\n    post:\n      operationId: S_B\n      responses:\n        \"200\":\n          description: ok\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/EmptyBody'\n"
+	out, err := Patch([]byte(doc), "x", "1", "", "x", Directives{}, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := string(out)
+	for _, want := range []string{"code:", "msg:", "data:", "ProfileBody", "required:"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in\n%s", want, s)
+		}
+	}
+	// /v1/b returns Empty: the envelope has no data.
+	b := s[strings.Index(s, "/v1/b"):]
+	if strings.Contains(b, "data:") {
+		t.Fatalf("Empty response documents data:\n%s", b)
+	}
+}

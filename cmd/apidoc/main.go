@@ -6,9 +6,11 @@
 // (installed by `make tools`) on a copy of the IDL in which every struct field
 // without an annotation gets `api.body="<name>"`: the plugin only documents
 // annotated fields, and in this project a field without one is a JSON body
-// field (the API convention is POST + JSON). The response structs carry the
-// envelope {code, msg, data} themselves, so the document shows exactly what
-// the client receives. Afterwards the title and version are filled in.
+// field (the API convention is POST + JSON). A method returns its data
+// struct and the handler answers hertzx.OK / Fail, which add the envelope
+// {code, msg, data} at runtime; the document adds the same envelope around
+// every response schema (Envelope), so it shows exactly what the client
+// receives. Afterwards the title and version are filled in.
 //
 // `// @docs title: ...`, `// @docs description: ...` and `// @docs tag <domain>: <名字>`
 // lines in the IDL name the document and its sections (docs.go); the first
@@ -179,6 +181,7 @@ func Patch(doc []byte, title, version, desc, fallback string, d Directives, publ
 	Permissions(top, perms)
 	Audits(top, audits)
 	Limits(top, limits)
+	Envelope(top)
 	out, err := yaml.Marshal(&root)
 	if err != nil {
 		return nil, err

@@ -800,3 +800,5 @@ while we are on 0.x; services pin the version in their `go.mod`.
 ```sh
 go test ./...
 ```
+
+**Response envelope.** A gateway method's IDL return type is its data struct (`common.Empty` when there is none); the handler ends with `hertzx.OK(c, &data)` or `hertzx.Fail(ctx, c, err)` (a BizStatusError becomes its code and msg, anything else is logged and answered as 5001; `hertzx.FailCode` for a code the gateway decides). The envelope `{code, msg, data}` is added there, once, and `cmd/apidoc` documents it; the IDL never spells it out.

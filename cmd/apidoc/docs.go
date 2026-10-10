@@ -437,3 +437,76 @@ func splitSummary(s string) (summary, rest string) {
 	}
 	return first, tail
 }
+
+// Envelope wraps every 200 response schema in the gateway's envelope
+// {code, msg, data}: the IDL method returns its data struct and the handler
+// answers hertzx.OK / Fail, which add the envelope at runtime, so the
+// document adds it here to show exactly what the client receives. A method
+// that returns common.Empty documents {code, msg} with no data.
+func Envelope(top *yaml.Node) {
+	paths := mapGet(top, "paths")
+	if paths == nil {
+		return
+	}
+	for i := 0; i+1 < len(paths.Content); i += 2 {
+		item := paths.Content[i+1]
+		for j := 0; j+1 < len(item.Content); j += 2 {
+			op := item.Content[j+1]
+			resp := mapGet(op, "responses")
+			if resp == nil {
+				continue
+			}
+			for k := 0; k+1 < len(resp.Content); k += 2 {
+				if resp.Content[k].Value != "200" {
+					continue
+				}
+				content := mapGet(resp.Content[k+1], "content")
+				if content == nil {
+					continue
+				}
+				js := mapGet(content, "application/json")
+				if js == nil {
+					continue
+				}
+				schema := mapGet(js, "schema")
+				if schema == nil || mapGet(schema, "code") != nil {
+					continue
+				}
+				wrapped := envelopeSchema(schema)
+				for m := 0; m+1 < len(js.Content); m += 2 {
+					if js.Content[m].Value == "schema" {
+						js.Content[m+1] = wrapped
+					}
+				}
+			}
+		}
+	}
+}
+
+func envelopeSchema(data *yaml.Node) *yaml.Node {
+	scalar := func(v string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: v} }
+	prop := func(typ, format, desc string) *yaml.Node {
+		n := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{scalar("type"), scalar(typ)}}
+		if format != "" {
+			n.Content = append(n.Content, scalar("format"), scalar(format))
+		}
+		n.Content = append(n.Content, scalar("description"), scalar(desc))
+		return n
+	}
+	props := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		scalar("code"), prop("integer", "int32", "0 成功；其他见错误码表（idl/errors.md）"),
+		scalar("msg"), prop("string", "", "给人看的说明，成功时为空"),
+	}}
+	empty := false
+	if ref := mapGet(data, "$ref"); ref != nil && strings.Contains(ref.Value, "Empty") {
+		empty = true
+	}
+	if !empty {
+		props.Content = append(props.Content, scalar("data"), data)
+	}
+	return &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+		scalar("type"), scalar("object"),
+		scalar("required"), {Kind: yaml.SequenceNode, Content: []*yaml.Node{scalar("code"), scalar("msg")}},
+		scalar("properties"), props,
+	}}
+}
