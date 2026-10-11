@@ -13,8 +13,11 @@ go get github.com/sezznaw/devkit-common@latest
 |-----------|------|
 | `zlog`    | 公司统一日志，基于 zap：由编译器检查的强类型字段；给人看的控制台格式（颜色、可点击的 `文件:行号`）和给采集系统的 JSON 格式；带 `trace_id` 的请求级 logger；详见下文 |
 | `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开（`${VAR:-默认值}` 未设时取默认）；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
-| `kitexx`  | 服务的 Runtime：配置里开了什么就在注册前打开（`rt.DB`、`rt.Redis`、`rt.Kafka`、`rt.Centrifugo`、`rt.S3`、`rt.Delay`、`rt.ID`），Kitex 服务端/客户端选项（Nacos 注册发现、trace、指标、请求日志、参数校验、幂等、`limits:`），优雅停机，`--job`、`--verify`、`--dlq`；见下文 |
-| `hertzx`  | API（HTTP）服务的同一套：和 `kitexx` 共用配置，带 trace_id 的请求日志一路传到 RPC 服务，recovery、CORS、网关防护（`guard:` 请求体、时限、限流）、按 IDL 注解的 `RequireLogin` / `RequirePermission` / `Audit`、`Bind` 校验、`/docs`；见下文 |
+| `kitexx`  | 服务的 Runtime：配置里开了什么就在注册前打开（`rt.DB`、`rt.Redis`、`rt.Kafka`、`rt.Centrifugo`、`rt.S3`、`rt.Delay`、`rt.ID`、`rt.Report`、`rt.Provider(名字)`），Kitex 服务端/客户端选项（Nacos 注册发现、trace、指标、请求日志、参数校验、幂等、`limits:`），优雅停机，`--job`、`--verify`、`--dlq`；见下文 |
+| `hertzx`  | API（HTTP）服务的同一套：和 `kitexx` 共用配置，带 trace_id 的请求日志一路传到 RPC 服务，recovery、CORS、网关防护（`guard:` 请求体、时限、限流）、按 IDL 注解的 `RequireLogin` / `RequirePermission` / `Audit`、`Bind` 校验、加 `{code, msg, data}` 壳的 `OK` / `Fail` / `FailCode`、`/docs`；见下文 |
+| `pagex`   | 分页：`Normalize(req.Page)` 返回 page、size、offset，默认值（第 1 页、20 条、最多 100）只在这一处；见下文 |
+| `cmd/apidoc`、`cmd/errgen` | `make gen` 跑的两个生成器：网关从 IDL 目录生成 OpenAPI 文档（壳、required、x-error-codes）；每个服务从 `idl/errors/*.thrift` 的注释生成 `Message` / `Err` / `Errf`；见下文 |
+| `otelx`   | trace（OpenTelemetry）：`kitexx`/`hertzx` 按 `otel:` 段装好，每个 RPC、HTTP 调用、SQL、Redis 命令、Kafka 消息都是一个 span；不用直接调 |
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
@@ -268,6 +271,7 @@ handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<�
 `centrifugo:` 段：`enabled`，`source static` 的 `api_addr`、`api_key`、`token_secret`，或 `source platform` 从 Nacos 的
 `infra.yaml` 取地址、从它指名的环境变量取密钥。句柄在 `rt.Centrifugo`。
 
+- `rt.Centrifugo.UserChannel(uid)`：一个会员的频道名（`user:<uid>`），用它、不要自己拼字串
 - `rt.Centrifugo.Publish(ctx, "user:42", data)`：推给订阅了这个频道的客户端，是 trace 里的一个 span
 - `rt.Centrifugo.ConnectionToken("42")`：给登录后的客户端签连接 JWT（HS256，`token_ttl` 默认 24h），
   网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推
@@ -287,7 +291,7 @@ s3:
 
 ```go
 err  := rt.S3.Put(ctx, "avatars/42.png", file, "image/png")
-data, err := rt.S3.GetBytes(ctx, "kyc/42/front.jpg")
+data, err := rt.S3.GetBytes(ctx, "kyc/42/front.jpg")                    // Get 是流式，Stat 看大小和类型，PutBytes 收 []byte
 url, err  := rt.S3.PresignGet(ctx, "exports/2026-10.xlsx", 10*time.Minute)   // 客户端直接下载
 url, err  := rt.S3.PresignPut(ctx, "avatars/42.png", "image/png", 5*time.Minute) // 客户端直接上传
 objs, err := rt.S3.List(ctx, "avatars", 100)
@@ -410,13 +414,34 @@ API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：�
 
 ### 接口文档（`cmd/apidoc`、`hertzx.ServeDocs`）
 
-API 服务的文档从 IDL 生成。`make gen` 会对服务的 Thrift 文件跑 `go run github.com/sezznaw/devkit-common/cmd/apidoc`：
-给没写注解的结构体字段补上 `api.body`（我们的约定是 POST + JSON），用 thriftgo 加 CloudWeGo 的 `thrift-gen-http-swagger`
-插件生成，写到 `cmd/<服务>/openapi.yaml`，`main.go` 把它嵌进二进制。开了 `docs.enabled`，服务就提供 `/openapi.yaml` 和
-`/docs`（Scalar 文档页，"Send request" 直接打本服务）和 `/openapi.json`。响应结构体本身带着 `{code, msg, data}` 信封，所以页面显示的就是客户端
-拿到的样子。IDL 里方法和字段的注释就是文档说明：方法注释的第一句是接口标题，其余是说明。IDL 开头的三种 `// @docs` 行给页面起名和分组：
-`// @docs title: Sportsbook 玩家网关`、`// @docs description: ...`、`// @docs tag member: 会员`（接口按路径第二段 `/v1/<领域>/...`
-分组，`/ping` 归到"系统"）。不用再写别的。local 和 dev 开，生产关。
+API 服务的文档从 IDL 生成。`make gen` 对服务的 IDL 目录跑 `go run github.com/sezznaw/devkit-common/cmd/apidoc -dir <idl>/<服务>/`：
+目录里每个声明了 `service` 的文件（一个领域一个）先给没写注解的结构体字段补上 `api.body`（我们的约定是 POST + JSON），再用 thriftgo 加
+CloudWeGo 的 `thrift-gen-http-swagger` 插件生成，然后合并（schema 名加 `<namespace>.` 前缀，两个领域都有 `ListReq` 不会撞；同一条路由出现在两个文件里报错），
+写到 `cmd/<服务>/openapi.yaml`，`main.go` 把它嵌进二进制。`-idl <文件>` 仍可只生成一个文件。开了 `docs.enabled`，服务就提供 `/openapi.yaml`、`/openapi.json` 和
+`/docs`（Scalar 文档页，"Send request" 直接打本服务）。
+
+方法的 IDL 返回类型就是数据结构体；apidoc 给每个响应包上网关要加的 `{code, msg, data}` 壳（见下一节），返回 `common.Empty` 的方法合成一个 200，
+没写 `optional` 的字段标成 `required`，`// @limit` 写成 `x-rate-limit`，`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。
+IDL 里方法和字段的注释就是文档说明：方法注释的第一句是接口标题，其余是说明。`// @docs` 行（`// @docs title: ...`、`// @docs description: ...`、`// @docs tag member: 会员`）
+放在一个没有 `service` 的文件里，约定叫 `docs.thrift`；`@public`、`@perm`、`@audit`、`@limit` 从全部文件读。接口按路径第二段 `/v1/<领域>/...` 分组，`/ping` 归到"系统"。
+local 和 dev 开，生产关。
+
+### 响应壳与分页（`hertzx.OK`、`pagex`）
+
+网关方法的 IDL 返回类型就是数据结构体（没有数据用 `common.Empty`）；handler 以 `hertzx.OK(c, &data)`（`hertzx.OK(c, &common.Empty{})` 回没有 `data` 的壳）
+或 `hertzx.Fail(ctx, c, err)` 结束：`kerrors.BizStatusError` 变成它的 code 和 msg，其他错误连 trace 记日志并回 5001。网关自己定的码用 `hertzx.FailCode(c, code, msg)`；
+`hertzx.CodeOf(ctx, err) (int32, string)` 是 `Fail` 用的那套映射，给只想拿码、不想在这里应答的 handler。`{code, msg, data}` 的壳只在这里加一次，IDL 里不写，
+`devkit lint` 的 `no-envelope`、`envelope-write` 守着。
+
+列表请求带 `common.PageReq {page, page_size}`，响应在 `items` 旁边带 `common.PageInfo {page, page_size, total}`（`idl/common/common.thrift`）；
+`page, size, offset := pagex.Normalize(req.Page)` 统一默认值（第 1 页、每页 20、最多 100），默认值只在这一处。lint 规则 `paging` 拦裸的 `page` / `page_size` / `total` 字段。
+
+### 错误码与消息（`cmd/errgen`）
+
+码只在 IDL 仓库声明一次：`idl/errors/<领域>.thrift`（`namespace go errcode`，每个 `const i32 名字 = 码` 上一行一句说明）。`make gen` 先用 thriftgo 把它们编成
+`kitex_gen/errcode`，再跑 `go run github.com/sezznaw/devkit-common/cmd/errgen -dir <idl>/errors -out kitex_gen/errcode`，生成 `zz_messages.go`：
+`Message(code) string`、`Err(code) error`、`Errf(code, format, args...) error`（消息是那句说明，Errf 把细节接在后面的 `BizStatusError`）。
+服务写 `return nil, errcode.Err(errcode.MemberNotFound)`，不写消息字符串（lint 规则 `error-msg`）；网关的 `Fail` 把它变成壳，前端从 `x-error-codes` 显示同一句话。
 
 ### 金额 `moneyx`
 
@@ -447,9 +472,9 @@ auth:
 `Logout`（结束会话、拉黑 access）和 `RevokeAll`（改密码、封号、后台踢人）。会话数据在它的 Redis 键里（`auth:*`）。
 
 网关只校验、不按请求调 ser-auth：`authx.NewVerifier(rt.Config.Auth, rt.Redis)` 本地验签名和声明，再读一次 Redis
-（会话是否还活着、令牌是否被拉黑）；`hertzx.RequireLogin(h, verifier, openAPI)` 把它装到所有接口上，除了 IDL 里标了
+（会话是否还活着、令牌是否被拉黑）；`hertzx.RequireLogin(h, verifier, openAPI, publicPaths...)` 把它装到所有接口上，除了 IDL 里标了
 `// @public` 的（apidoc 不给它们加安全要求）和框架自己的路径（/ping、/docs、/openapi.*）。没带令牌回 HTTP 401
-`{code: 1004}`，会话已失效回 `{code: 1005}`。身份随上下文走：网关 handler 和它调用的每个 RPC 服务里 `kitexx.UID(ctx)`
+`{code: 1004}`，会话已失效回 `{code: 1005}`。身份随上下文走：网关 handler 和它调用的每个 RPC 服务里 `kitexx.UID(ctx)`（登录校验已经跑过的地方用 `kitexx.MustUID(ctx)`；`kitexx.Realm(ctx)` 取领域）
 都能拿到，`uid` 永远不再是请求字段。授权（能做什么）不在这里。
 
 ### 后台操作审计 `hertzx.Audit`
@@ -485,7 +510,7 @@ metrics:
 
 ### 用 `testx` 写测试
 
-handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL("../../infra/db/migrations/tenant"), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
+handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`；绕过真实登录的路由测试用 `kitexx.WithIdentity` 塞身份）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
 
 ### 用 `jobx` 写定时任务
 
@@ -554,7 +579,3 @@ log_level_data_id: order.log-level              # kitexx：日志级别跟随这
 ```sh
 go test ./...
 ```
-
-**响应壳。** 网关方法的 IDL 返回类型就是数据结构体（没有数据用 `common.Empty`）；handler 以 `hertzx.OK(c, &data)`（`hertzx.OK(c, &common.Empty{})` 回没有 data 的壳） 或 `hertzx.Fail(ctx, c, err)` 结束（BizStatusError 变成它的 code 和 msg，其他错误记日志并回 5001；网关自己定的码用 `hertzx.FailCode`）。`{code, msg, data}` 的壳只在这里加一次，`cmd/apidoc` 生成文档时同样包上；IDL 里不写壳。
-
-**分页与错误消息。** 列表请求带 `common.PageReq {page, page_size}`，响应带 `common.PageInfo {page, page_size, total}`；`pagex.Normalize(req.Page)` 统一默认值（第 1 页、每页 20、最多 100）。业务错误写 `errcode.Err(errcode.MemberNotFound)`：`cmd/errgen`（`make gen` 跑）从 idl/errors/*.thrift 的注释生成 `Message` / `Err` / `Errf`，服务不再手写消息。

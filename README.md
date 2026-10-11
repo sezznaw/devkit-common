@@ -13,14 +13,17 @@ go get github.com/sezznaw/devkit-common@latest
 |-----------|---------|
 | `zlog`    | Company logger on zap: typed fields checked by the compiler, a console format for people (colors, clickable `file:line`) and JSON for log collectors, request-scoped loggers with a `trace_id`; see below |
 | `config`  | Load `conf/<APP_ENV>.yaml` with `${VAR}` expansion (`${VAR:-default}` when unset); `Dir`/`LoadDefault` find the conf directory; `Duration` for `3s`-style values |
-| `kitexx`  | the Runtime of a service: what the configuration enables opened before it registers (`rt.DB`, `rt.Redis`, `rt.Kafka`, `rt.Centrifugo`, `rt.S3`, `rt.Delay`, `rt.ID`), Kitex server/client options (Nacos registration and discovery, tracing, metrics, request log, validation, idempotency, `limits:`), graceful stop, `--job`, `--verify`, `--dlq`; see below |
-| `hertzx`  | the same for API (HTTP) services on Hertz: one configuration with `kitexx`, request log with a `trace_id` that travels on to the RPC services, recovery, CORS, the guard (`guard:` body size, deadline, rate limits), `RequireLogin` / `RequirePermission` / `Audit` from the IDL's annotations, `Bind` validation, `/docs`; see below |
+| `kitexx`  | the Runtime of a service: what the configuration enables opened before it registers (`rt.DB`, `rt.Redis`, `rt.Kafka`, `rt.Centrifugo`, `rt.S3`, `rt.Delay`, `rt.ID`, `rt.Report`, `rt.Provider(name)`), Kitex server/client options (Nacos registration and discovery, tracing, metrics, request log, validation, idempotency, `limits:`), graceful stop, `--job`, `--verify`, `--dlq`; see below |
+| `hertzx`  | the same for API (HTTP) services on Hertz: one configuration with `kitexx`, request log with a `trace_id` that travels on to the RPC services, recovery, CORS, the guard (`guard:` body size, deadline, rate limits), `RequireLogin` / `RequirePermission` / `Audit` from the IDL's annotations, `Bind` validation, `OK` / `Fail` / `FailCode` adding the `{code, msg, data}` envelope, `/docs`; see below |
+| `pagex`   | paging: `Normalize(req.Page)` returns page, size and offset with the defaults (1, 20, max 100) applied once; see below |
+| `cmd/apidoc`, `cmd/errgen` | generators `make gen` runs for a gateway and for every service: the OpenAPI document from the IDL directory (envelope, required, x-error-codes), and `Message` / `Err` / `Errf` from the comments of `idl/errors/*.thrift`; see below |
+| `otelx`   | tracing (OpenTelemetry): set up from the `otel:` section by `kitexx`/`hertzx`, every RPC, HTTP call, SQL, Redis command and Kafka message is a span; nothing to call directly |
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
 | `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
 | `authx`   | the login state: one authentication service issues access (JWT, 15m) and refresh (30d, rotated, replay detected) tokens per realm (member, admin, agent) with sessions in Redis; every gateway verifies its realm's tokens locally plus one Redis read and puts the identity into the context (`kitexx.UID(ctx)`, carried over RPC); `hertzx.RequireLogin` protects every endpoint not marked `// @public` in the IDL; see below |
 | `s3x`     | object storage (SeaweedFS on dev, any S3 later) from the `s3:` section: `rt.S3.Put/Get/Stat/List/Delete`, presigned download and upload URLs, every file under the service's own prefix; source static or the deployment's datasource row; every call a span and a metric; see below |
-| `httpx`   | calls to external HTTP APIs (resty + otelhttp): providers listed under `providers:` with base URL, timeout, retries and headers from the environment; `rt.Provider("odds-feed").GetJSON(ctx, path, &out)`; trace carried on, one log record per call without secrets, metrics; a service with providers must run in the egress namespace (`egress:` section; the rule can be switched off); see below |
+| `httpx`   | calls to external HTTP APIs (resty + otelhttp): providers listed under `providers:` with base URL, timeout, retries and headers from the environment; `rt.Provider("odds-feed").GetJSON(ctx, path, &out)`; trace carried on, one log record per call without secrets, metrics; a service with providers must run in the provider namespace; see below |
 | `webhookx` | the callbacks a provider sends us (payment results, settlements), on a Hertz service in the provider namespace: `webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`; source-address check, signature check (hmac-sha256, basic, or the vendor's own Verifier), raw copy to Kafka for disputes, event-id dedupe through Redis, 500 on a handler error so the provider retries, metrics; see below |
 | `metricsx` | Prometheus metrics on a port of their own (`metrics.enabled`, default port 9091): requests by method and result code with latency histograms for Kitex and Hertz, calls made to other services, Go runtime, MySQL pool, Redis commands, Kafka events; the deployment scrapes it; see below |
 | `jobx`    | scheduled jobs: a service lists them in `app/jobs.go` (name, cron schedule, timeout, function), the framework runs one per `--job=<name>` with a root span, a run id in the log, a lock, a timeout and an exit code, and `--list-jobs` is what the deployment turns into CronJobs; see below |
@@ -398,6 +401,7 @@ The `centrifugo:` section: `enabled`; `source static` with `api_addr`,
 `infra.yaml` in Nacos and the secrets from the environment variables it
 names. The client is `rt.Centrifugo`.
 
+- `rt.Centrifugo.UserChannel(uid)` is the channel of one member (`user:<uid>`); use it instead of formatting the string
 - `rt.Centrifugo.Publish(ctx, "user:42", data)`: to the clients subscribed
   to that channel; a span of the trace
 - `rt.Centrifugo.ConnectionToken("42")`: the JWT a logged-in client connects
@@ -421,7 +425,7 @@ s3:
 
 ```go
 err  := rt.S3.Put(ctx, "avatars/42.png", file, "image/png")
-data, err := rt.S3.GetBytes(ctx, "kyc/42/front.jpg")
+data, err := rt.S3.GetBytes(ctx, "kyc/42/front.jpg")                    // Get streams, Stat gives size and type, PutBytes takes []byte
 url, err  := rt.S3.PresignGet(ctx, "exports/2026-10.xlsx", 10*time.Minute)   // the client downloads directly
 url, err  := rt.S3.PresignPut(ctx, "avatars/42.png", "image/png", 5*time.Minute) // the client uploads directly
 objs, err := rt.S3.List(ctx, "avatars", 100)
@@ -586,20 +590,62 @@ An API service refuses some requests before any handler runs, with defaults that
 ### API documentation (`cmd/apidoc`, `hertzx.ServeDocs`)
 
 An API service documents itself from its IDL. `make gen` runs
-`go run github.com/sezznaw/devkit-common/cmd/apidoc` on the service's Thrift
-file: it adds `api.body` to every bare struct field (the convention is POST +
-JSON), runs thriftgo with CloudWeGo's `thrift-gen-http-swagger` plugin, and
-writes `cmd/<service>/openapi.yaml`, which `main.go` embeds. With
-`docs.enabled` the service serves `/openapi.yaml` and `/docs` (Scalar API Reference,
-"Send request" against the service itself) and `/openapi.json`. The response structs carry the
-envelope `{code, msg, data}`, so the page shows exactly what a client gets.
-Comments on methods and fields in the IDL become the descriptions: the first
-sentence of a method's comment is its title, the rest its description. Three
-`// @docs` lines at the top of the IDL name the page and its sections:
-`// @docs title: Sportsbook 玩家网关`, `// @docs description: ...`,
-`// @docs tag member: 会员` (operations are grouped by the second segment of
-their path, `/v1/<domain>/...`; `/ping` goes under 系统). Nothing else to
-write. On for local and dev, off in production.
+`go run github.com/sezznaw/devkit-common/cmd/apidoc -dir <idl>/<service>/` on
+the service's IDL directory: every file that declares a `service` (one per
+domain) is run through thriftgo with CloudWeGo's `thrift-gen-http-swagger`
+plugin after `api.body` has been added to every bare struct field (the
+convention is POST + JSON); the documents are merged (schemas get a
+`<namespace>.` prefix so two domains may both have a `ListReq`; the same route
+in two files is an error) and written to `cmd/<service>/openapi.yaml`, which
+`main.go` embeds. `-idl <file>` still documents a single file. With
+`docs.enabled` the service serves `/openapi.yaml`, `/openapi.json` and `/docs`
+(Scalar API Reference, "Send request" against the service itself).
+
+The IDL return type of a method is its data struct; apidoc wraps every response
+in the `{code, msg, data}` envelope the gateway adds (see below), synthesizes a
+200 for methods returning `common.Empty`, marks every field without `optional`
+as `required`, writes `// @limit` as `x-rate-limit`, and writes the code table
+of `idl/errors/*.thrift` as `x-error-codes` (code, name, message, domain) for
+the front-end generators. Comments on methods and fields in the IDL become the
+descriptions: the first sentence of a method's comment is its title, the rest
+its description. The `// @docs` lines (`// @docs title: ...`,
+`// @docs description: ...`, `// @docs tag member: 会员`) live in a file with no
+`service`, by convention `docs.thrift`; `@public`, `@perm`, `@audit` and
+`@limit` are read from all files. Operations are grouped by the second segment
+of their path, `/v1/<domain>/...`; `/ping` goes under 系统. On for local and
+dev, off in production.
+
+### Response envelope and paging (`hertzx.OK`, `pagex`)
+
+A gateway method's IDL return type is its data struct (`common.Empty` when
+there is none); the handler ends with `hertzx.OK(c, &data)`
+(`hertzx.OK(c, &common.Empty{})` answers without `data`) or
+`hertzx.Fail(ctx, c, err)`: a `kerrors.BizStatusError` becomes its code and
+msg, anything else is logged with the trace and answered as 5001.
+`hertzx.FailCode(c, code, msg)` answers a code the gateway decides itself;
+`hertzx.CodeOf(ctx, err) (int32, string)` is the mapping `Fail` uses, for a
+handler that needs the code without answering. The envelope `{code, msg, data}`
+is added there, once; the IDL never spells it out and `devkit lint`
+(`no-envelope`, `envelope-write`) keeps it that way.
+
+A list request carries `common.PageReq {page, page_size}` and answers
+`common.PageInfo {page, page_size, total}` next to `items`
+(`idl/common/common.thrift`); `page, size, offset := pagex.Normalize(req.Page)`
+applies the defaults once (page 1, size 20, at most 100) and is the only place
+they live. Lint rule `paging` refuses bare `page` / `page_size` / `total` fields.
+
+### Error codes and messages (`cmd/errgen`)
+
+Codes are declared once, in the IDL repository: `idl/errors/<domain>.thrift`
+(`namespace go errcode`, a one-line comment above each `const i32 Name = code`).
+`make gen` compiles them with thriftgo into `kitex_gen/errcode` and then runs
+`go run github.com/sezznaw/devkit-common/cmd/errgen -dir <idl>/errors -out kitex_gen/errcode`,
+which writes `zz_messages.go` with `Message(code) string`, `Err(code) error`
+and `Errf(code, format, args...) error` (a `BizStatusError` whose message is the
+comment, with the detail appended). A service writes
+`return nil, errcode.Err(errcode.MemberNotFound)` and never a message string
+(lint rule `error-msg`); the gateway's `Fail` turns it into the envelope, and
+the front end shows the same text from `x-error-codes`.
 
 ### Money with `moneyx`
 
@@ -636,11 +682,11 @@ live in its Redis keys (`auth:*`).
 A gateway verifies, it does not call ser-auth per request:
 `authx.NewVerifier(rt.Config.Auth, rt.Redis)` checks the signature and
 claims locally and reads Redis once (session alive, token not blacklisted);
-`hertzx.RequireLogin(h, verifier, openAPI)` installs that on every endpoint
+`hertzx.RequireLogin(h, verifier, openAPI, publicPaths...)` installs that on every endpoint
 except the ones the IDL marks `// @public` (apidoc leaves those without a
 security requirement) and the framework's paths (/ping, /docs, /openapi.*).
 A request without a token is HTTP 401 `{code: 1004}`, a revoked session
-`{code: 1005}`. The identity travels with the context: `kitexx.UID(ctx)` in
+`{code: 1005}`. The identity travels with the context: `kitexx.UID(ctx)` (or `kitexx.MustUID(ctx)` where the login check already ran, and `kitexx.Realm(ctx)`) in
 the gateway handler and in every RPC service it calls, so `uid` is never a
 request field. Authorization (what a principal may do) is not here.
 
@@ -685,7 +731,7 @@ After every release the deployment runs the new image once more as `<binary> --v
 
 ### Tests with `testx`
 
-A handler test builds the Runtime the framework would hand `app.Setup`, on infrastructure that lives for that one test: `rt := testx.New(t, "order", testx.WithMySQL("../../infra/db/migrations/tenant"), testx.WithTopics("events.order"))` gives Redis in-process (miniredis, `rt.MiniRedis` to look at it), Kafka in-process (kfake), a fake Centrifugo that records what was pushed (`rt.Pushes()`, `rt.WaitPush(channel, timeout)`) and, with `WithMySQL`, a database created from the project's `*.up.sql` migrations and dropped afterwards. The database is the one thing not in-process: it comes from `MYSQL_TEST_DSN_ROOT` (the template's Makefile points it at the local stack, CI at a MySQL service container) and the test is skipped, not failed, when no server answers. Then `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)` and call the handler with `testx.Ctx(uid)` (a logged-in member; `CtxAs(realm, uid)` for others). `rt.Start()` runs what the server would after Setup (the subscribed consumers, the outbox relay, the delayed-task poller); `rt.RunDue()` runs the delayed tasks that are due without waiting (set a task's `run_at` back first); `rt.WaitEvent(topic, type, timeout)` and `rt.Events(topic, timeout)` read what reached a topic. For a gateway, `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))` and `testx.Get` call a route in-process and return the parsed envelope (`MustCode(t, 200, 0)`, `Decode(t, &out)`); `testx.From(ip)` sets the client IP the guard counts. `devkit lint` (rule `tests`) reminds a service whose handler package has no test at all.
+A handler test builds the Runtime the framework would hand `app.Setup`, on infrastructure that lives for that one test: `rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` gives Redis in-process (miniredis, `rt.MiniRedis` to look at it), Kafka in-process (kfake), a fake Centrifugo that records what was pushed (`rt.Pushes()`, `rt.WaitPush(channel, timeout)`) and, with `WithMySQL`, a database created from the project's `*.up.sql` migrations and dropped afterwards. The database is the one thing not in-process: it comes from `MYSQL_TEST_DSN_ROOT` (the template's Makefile points it at the local stack, CI at a MySQL service container) and the test is skipped, not failed, when no server answers. Then `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)` and call the handler with `testx.Ctx(uid)` (a logged-in member; `CtxAs(realm, uid)` for others; a route test that bypasses the real login puts an identity in with `kitexx.WithIdentity`). `rt.Start()` runs what the server would after Setup (the subscribed consumers, the outbox relay, the delayed-task poller); `rt.RunDue()` runs the delayed tasks that are due without waiting (set a task's `run_at` back first); `rt.WaitEvent(topic, type, timeout)` and `rt.Events(topic, timeout)` read what reached a topic. For a gateway, `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))` and `testx.Get` call a route in-process and return the parsed envelope (`MustCode(t, 200, 0)`, `Decode(t, &out)`); `testx.From(ip)` sets the client IP the guard counts. `devkit lint` (rule `tests`) reminds a service whose handler package has no test at all.
 
 ### Scheduled jobs with `jobx`
 
@@ -800,7 +846,3 @@ while we are on 0.x; services pin the version in their `go.mod`.
 ```sh
 go test ./...
 ```
-
-**Response envelope.** A gateway method's IDL return type is its data struct (`common.Empty` when there is none); the handler ends with `hertzx.OK(c, &data)` (`hertzx.OK(c, &common.Empty{})` answers without data) or `hertzx.Fail(ctx, c, err)` (a BizStatusError becomes its code and msg, anything else is logged and answered as 5001; `hertzx.FailCode` for a code the gateway decides). The envelope `{code, msg, data}` is added there, once, and `cmd/apidoc` documents it; the IDL never spells it out.
-
-**Paging and messages.** A list request carries `common.PageReq {page, page_size}` and answers `common.PageInfo {page, page_size, total}` (idl/common/common.thrift); `pagex.Normalize(req.Page)` applies the defaults (page 1, size 20, max 100) once. Business errors are `errcode.Err(errcode.MemberNotFound)`: `cmd/errgen` (run by `make gen`) generates `Message` / `Err` / `Errf` from the comments in idl/errors/*.thrift, so the service never writes the message.
