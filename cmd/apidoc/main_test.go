@@ -2,6 +2,8 @@ package main
 
 import (
 	"gopkg.in/yaml.v3"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -201,5 +203,23 @@ func TestMergeAndPrefix(t *testing.T) {
 	_ = yaml.Unmarshal([]byte(b), &rc)
 	if err := mergeDoc(ra.Content[0], rc.Content[0], "again.thrift"); err == nil {
 		t.Fatal("duplicate route accepted")
+	}
+}
+
+func TestErrorCodes(t *testing.T) {
+	dir := t.TempDir()
+	os.WriteFile(filepath.Join(dir, "member.thrift"), []byte("namespace go errcode\n\n// 会员不存在\nconst i32 MemberNotFound = 2001\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "common.thrift"), []byte("namespace go errcode\n\n// 参数错误\nconst i32 BadParam = 1001\n"), 0o644)
+	seq := errorCodes(dir)
+	if seq == nil || len(seq.Content) != 2 {
+		t.Fatalf("got %+v", seq)
+	}
+	out, _ := yaml.Marshal(seq)
+	s := string(out)
+	if !strings.Contains(s, "code: 1001") || !strings.Contains(s, "name: MemberNotFound") || !strings.Contains(s, "message: 会员不存在") || !strings.Contains(s, "domain: member") {
+		t.Fatalf("%s", s)
+	}
+	if strings.Index(s, "1001") > strings.Index(s, "2001") {
+		t.Fatalf("not sorted:\n%s", s)
 	}
 }

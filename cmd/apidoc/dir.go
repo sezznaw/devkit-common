@@ -106,6 +106,12 @@ func runDir(dir, out, title, version, desc string) error {
 	if master == nil {
 		return fmt.Errorf("%s: no file declares a service", dir)
 	}
+	// The business codes, from the repository's errors/ directory (one Thrift
+	// file per domain), so a front end generates its code table from the
+	// same document it generates its types from.
+	if codes := errorCodes(filepath.Join(filepath.Dir(dir), "errors")); codes != nil && len(codes.Content) > 0 {
+		master.Content[0].Content = append(master.Content[0].Content, &yaml.Node{Kind: yaml.ScalarNode, Value: "x-error-codes"}, codes)
+	}
 	b, err := yaml.Marshal(master)
 	if err != nil {
 		return err
