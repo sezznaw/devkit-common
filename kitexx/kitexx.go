@@ -207,6 +207,10 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
 		server.WithExitWaitTime(DrainTimeout(cfg)),
 	}
+	if cfg.DevRoute.Enabled() {
+		// tagged requests: the RPCs this service makes for them wait for the breakpoint [takeover]
+		opts = append(opts, server.WithMiddleware(devRouteCallOptions(cfg.DevRoute)))
+	}
 	opts = append(opts, connectionLimit(cfg.Limits)...)
 	zlog.Info("limits on", zlog.Int("max_in_flight", int64(cfg.Limits.inFlight())), zlog.Int("max_qps", int64(cfg.Limits.MaxQPS)), zlog.Int("max_connections", int64(cfg.Limits.connections())))
 	if !cfg.RegistryDisabled {

@@ -6,8 +6,10 @@ import (
 	"net"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/cloudwego/kitex/client"
+	"github.com/cloudwego/kitex/client/callopt"
 	"github.com/cloudwego/kitex/pkg/discovery"
 	"github.com/cloudwego/kitex/pkg/endpoint"
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
@@ -63,22 +65,30 @@ func rewriteAddr(addr string) string { return config.RewriteAddr(addr) }
 // rewriteURL is rewriteAddr for URLs.
 func rewriteURL(u string) string { return config.RewriteURL(u) }
 
-// devRouteTimeout is the client middleware that gives a tagged request the
-// debug timeout: someone is on a breakpoint behind it.
-func devRouteTimeout(c devroute.Config) endpoint.Middleware {
+// devRouteCallOptions is the server middleware (and what hertzx's DevTag does
+// for a gateway) that gives every RPC made from a tagged request the debug
+// timeout: someone is on a breakpoint behind it. Kitex reads per-call
+// options from the context (client.NewCtxWithCallOptions); a handler that
+// passes the request's ctx on, which is the rule, carries them to the
+// generated client. The client's own WithRPCTimeout is a lock, which is why
+// this is a call option and not a change of the config in a middleware.
+func devRouteCallOptions(c devroute.Config) endpoint.Middleware {
 	timeout := c.Timeout()
 	return func(next endpoint.Endpoint) endpoint.Endpoint {
 		return func(ctx context.Context, req, resp any) error {
-			if len(devroute.Tags(ctx)) > 0 {
-				if ri := rpcinfo.GetRPCInfo(ctx); ri != nil {
-					if err := rpcinfo.AsMutableRPCConfig(ri.Config()).SetRPCTimeout(timeout); err != nil {
-						zlog.Ctx(ctx).Warn("devroute: cannot relax the rpc timeout", zlog.Err(err))
-					}
-				}
-			}
-			return next(ctx, req, resp)
+			return next(WithDebugTimeout(ctx, timeout), req, resp)
 		}
 	}
+}
+
+// WithDebugTimeout returns ctx with the debug timeout as a call option for
+// every RPC made with it, when ctx carries dev tags; otherwise ctx itself.
+// hertzx uses it for tagged HTTP requests.
+func WithDebugTimeout(ctx context.Context, timeout time.Duration) context.Context {
+	if len(devroute.Tags(ctx)) == 0 || len(client.CallOptionsFromCtx(ctx)) > 0 {
+		return ctx
+	}
+	return client.NewCtxWithCallOptions(ctx, []callopt.Option{callopt.WithRPCTimeout(timeout)})
 }
 
 // devRouteClientOptions are the client options of tagged routing: the
@@ -87,10 +97,7 @@ func devRouteClientOptions(cfg Config) []client.Option {
 	if !cfg.DevRoute.Enabled() {
 		return nil
 	}
-	return []client.Option{
-		client.WithLoadBalancer(devroute.NewBalancer()),
-		client.WithMiddleware(devRouteTimeout(cfg.DevRoute)),
-	}
+	return []client.Option{client.WithLoadBalancer(devroute.NewBalancer())}
 }
 
 // takeoverResolver is the resolver of a takeover instance: the services it

@@ -315,9 +315,10 @@ func DevTag(cfg devroute.Config) app.HandlerFunc {
 	if !cfg.Enabled() {
 		return func(ctx context.Context, c *app.RequestContext) { c.Next(ctx) }
 	}
+	timeout := cfg.Timeout()
 	return func(ctx context.Context, c *app.RequestContext) {
 		if tags, ok := devroute.Parse(string(c.GetHeader(devroute.HeaderKey))); ok {
-			ctx = devroute.WithTags(ctx, tags)
+			ctx = kitexx.WithDebugTimeout(devroute.WithTags(ctx, tags), timeout)
 		}
 		c.Next(ctx)
 	}

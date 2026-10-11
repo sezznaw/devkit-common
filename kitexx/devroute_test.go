@@ -5,8 +5,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/cloudwego/kitex/client"
+	"github.com/cloudwego/kitex/client/callopt"
 	"github.com/cloudwego/kitex/pkg/discovery"
-	"github.com/cloudwego/kitex/pkg/rpcinfo"
 
 	"github.com/sezznaw/devkit-common/devroute"
 	"github.com/sezznaw/devkit-common/nacosx"
@@ -48,23 +49,20 @@ func TestDiffSeesTagChange(t *testing.T) {
 	}
 }
 
-func TestDevRouteTimeoutOnlyForTaggedRequests(t *testing.T) {
-	mw := devRouteTimeout(devroute.Config{})
-	seen := time.Duration(0)
-	ep := mw(func(ctx context.Context, req, resp any) error {
-		seen = rpcinfo.GetRPCInfo(ctx).Config().RPCTimeout()
-		return nil
-	})
-	cfg := rpcinfo.NewRPCConfig()
-	rpcinfo.AsMutableRPCConfig(cfg).SetRPCTimeout(3 * time.Second)
-	ctx := rpcinfo.NewCtxWithRPCInfo(context.Background(), rpcinfo.NewRPCInfo(nil, nil, nil, cfg, rpcinfo.NewRPCStats()))
-	_ = ep(ctx, nil, nil)
-	if seen != 3*time.Second {
-		t.Errorf("untagged request timeout changed to %v", seen)
+func TestWithDebugTimeoutOnlyForTaggedRequests(t *testing.T) {
+	ctx := context.Background()
+	if got := WithDebugTimeout(ctx, time.Minute); len(client.CallOptionsFromCtx(got)) != 0 {
+		t.Error("untagged request got call options")
 	}
-	_ = ep(devroute.WithTags(ctx, []string{"alice"}), nil, nil)
-	if seen != devroute.DefaultDebugTimeout {
-		t.Errorf("tagged request timeout %v, want %v", seen, devroute.DefaultDebugTimeout)
+	tagged := devroute.WithTags(ctx, []string{"alice"})
+	got := WithDebugTimeout(tagged, time.Minute)
+	if len(client.CallOptionsFromCtx(got)) != 1 {
+		t.Fatal("tagged request has no call option")
+	}
+	// The handler's own call options win.
+	own := client.NewCtxWithCallOptions(tagged, []callopt.Option{callopt.WithRPCTimeout(time.Second)})
+	if got := WithDebugTimeout(own, time.Minute); len(client.CallOptionsFromCtx(got)) != 1 || &client.CallOptionsFromCtx(got)[0] == nil {
+		t.Error("existing call options replaced")
 	}
 }
 
@@ -86,8 +84,8 @@ func TestDevRouteClientOptionsOffByDefault(t *testing.T) {
 		t.Errorf("prod got %d devroute client options", len(opts))
 	}
 	t.Setenv("APP_ENV", "dev")
-	if opts := devRouteClientOptions(cfg); len(opts) != 2 {
-		t.Errorf("dev got %d devroute client options, want balancer + timeout", len(opts))
+	if opts := devRouteClientOptions(cfg); len(opts) != 1 {
+		t.Errorf("dev got %d devroute client options, want the balancer", len(opts))
 	}
 	off := false
 	cfg.DevRoute.On = &off
