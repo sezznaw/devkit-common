@@ -802,3 +802,5 @@ go test ./...
 ```
 
 **Response envelope.** A gateway method's IDL return type is its data struct (`common.Empty` when there is none); the handler ends with `hertzx.OK(c, &data)` (`hertzx.OK(c, &common.Empty{})` answers without data) or `hertzx.Fail(ctx, c, err)` (a BizStatusError becomes its code and msg, anything else is logged and answered as 5001; `hertzx.FailCode` for a code the gateway decides). The envelope `{code, msg, data}` is added there, once, and `cmd/apidoc` documents it; the IDL never spells it out.
+
+**Paging and messages.** A list request carries `common.PageReq {page, page_size}` and answers `common.PageInfo {page, page_size, total}` (idl/common/common.thrift); `pagex.Normalize(req.Page)` applies the defaults (page 1, size 20, max 100) once. Business errors are `errcode.Err(errcode.MemberNotFound)`: `cmd/errgen` (run by `make gen`) generates `Message` / `Err` / `Errf` from the comments in idl/errors/*.thrift, so the service never writes the message.

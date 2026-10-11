@@ -19,8 +19,9 @@ func TestRender(t *testing.T) {
 		t.Fatal(err)
 	}
 	s := string(src)
-	for _, want := range []string{`MemberNotFound: "会员不存在"`, `NoMsg: ""`, "func Err(code int32) error", "func Errf("} {
-		if !strings.Contains(s, want) {
+	flat := strings.Join(strings.Fields(s), " ") // gofmt aligns map values; compare without the padding
+	for _, want := range []string{`MemberNotFound: "会员不存在",`, `NoMsg: "",`, "func Err(code int32) error", "func Errf("} {
+		if !strings.Contains(flat, want) {
 			t.Fatalf("missing %q:\n%s", want, s)
 		}
 	}

@@ -9,9 +9,9 @@ func (r *req) GetPageSize() int32 { return r.s }
 
 func TestNormalize(t *testing.T) {
 	cases := []struct {
-		in           *req
-		page, size   int32
-		offset       int
+		in         *req
+		page, size int32
+		offset     int
 	}{
 		{nil, 1, 20, 0},
 		{&req{0, 0}, 1, 20, 0},
