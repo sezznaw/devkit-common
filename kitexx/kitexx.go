@@ -26,6 +26,7 @@ import (
 	"github.com/sezznaw/devkit-common/centrifugox"
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/delayx"
+	"github.com/sezznaw/devkit-common/devroute"
 	"github.com/sezznaw/devkit-common/httpx"
 	"github.com/sezznaw/devkit-common/idx"
 	"github.com/sezznaw/devkit-common/kafkax"
@@ -143,6 +144,10 @@ type Config struct {
 	// ConfigDataID names the Nacos configuration that WatchConfig reads.
 	// Default: "<service.name>.yaml".
 	ConfigDataID string `yaml:"config_data_id"`
+	// DevRoute: tagged routing for taking a service over from a developer's
+	// machine (package devroute). On in dev by this rule, off elsewhere; the
+	// section only overrides. [takeover]
+	DevRoute devroute.Config `yaml:"devroute"`
 	// RegistryDisabled runs the service without Nacos (handy for local runs):
 	// it is not registered, the services it calls are not looked up, and
 	// configurations are files, see Nacos.
@@ -247,6 +252,7 @@ func Bootstrap(cfg *Config) error {
 		}
 	}
 	bridgeKlog(zlog.Init(cfg.Log))
+	applyTakeover(cfg)
 	if err := initTracing(*cfg); err != nil {
 		return err
 	}
@@ -342,14 +348,24 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 		// Who is calling: the "from" of the request log of the service called.
 		opts = append(opts, client.WithClientBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}))
 	}
+	opts = append(opts, devRouteClientOptions(cfg)...)
 	if cfg.RegistryDisabled {
 		return opts, nil
+	}
+	if m := takeover(); m != nil && m.Service == cfg.Service.Name {
+		return append(opts, client.WithResolver(&takeoverResolver{services: m.Services})), nil
 	}
 	cli, err := Nacos(cfg)
 	if err != nil {
 		return nil, err
 	}
-	return append(opts, client.WithResolver(newNacosResolver(cli, cfg.Nacos))), nil
+	var watcher *nacosx.Client
+	if cfg.DevRoute.Enabled() {
+		if watcher, err = takeoverClient(cfg); err != nil {
+			return nil, err
+		}
+	}
+	return append(opts, client.WithResolver(newNacosResolver(cli, watcher, cfg.Nacos))), nil
 }
 
 // Run starts the server and blocks until it has stopped completely. With
@@ -365,7 +381,7 @@ func (rt *Runtime) Run(svr server.Server) error {
 		zlog.Error("cannot start", zlog.Err(err))
 		return err
 	}
-	if rt.Kafka != nil {
+	if rt.Kafka != nil && !inTakeover(rt.Config) {
 		if err := rt.Kafka.Start(context.Background()); err != nil {
 			zlog.Error("cannot start consumers", zlog.Err(err))
 			return err
@@ -423,6 +439,9 @@ func LoggingMiddleware() endpoint.Middleware {
 			ctx = zlog.CtxWith(ctx, zlog.Str(traceIDField, traceID), zlog.Str("method", method))
 			if uid, ok := UID(ctx); ok {
 				ctx = zlog.CtxWith(ctx, zlog.Int("uid", uid))
+			}
+			if tag := devroute.TagString(ctx); tag != "" {
+				ctx = zlog.CtxWith(ctx, zlog.Str("dev_tag", tag))
 			}
 
 			err := next(ctx, req, resp)

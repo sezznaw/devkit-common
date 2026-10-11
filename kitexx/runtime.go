@@ -164,7 +164,7 @@ func s3Target(ctx context.Context, cfg Config) (s3x.Target, error) {
 	if err != nil {
 		return s3x.Target{}, err
 	}
-	return s3x.TargetFromRow(row.Addr, row.DB, row.Password, row.Params, os.Getenv)
+	return s3x.TargetFromRow(rewriteURL(rewriteAddr(row.Addr)), row.DB, row.Password, row.Params, os.Getenv)
 }
 
 // PodNamespaceEnv is set by the deployment; a service that calls external
@@ -270,7 +270,7 @@ func centrifugoTarget(cfg Config) (centrifugox.Target, error) {
 	if c.TokenHMACEnv != "" {
 		secret = os.Getenv(c.TokenHMACEnv)
 	}
-	return centrifugox.Target{APIAddr: c.APIAddr, APIKey: key, TokenSecret: secret}, nil
+	return centrifugox.Target{APIAddr: rewriteURL(c.APIAddr), APIKey: key, TokenSecret: secret}, nil
 }
 
 // openID makes the id generator: an instance number leased in Redis when
@@ -317,7 +317,7 @@ func (rt *Runtime) openReport() error {
 				return fmt.Errorf("report.source platform: the password is to come from the environment variable %q (infra.yaml starrocks.password_env), which is not set", sr.PasswordEnv)
 			}
 		}
-		target = starrocksx.Target{Addr: sr.Addr, DB: sr.DB, User: sr.User, Password: pw}
+		target = starrocksx.Target{Addr: rewriteAddr(sr.Addr), DB: sr.DB, User: sr.User, Password: pw}
 	}
 	tenant := strings.TrimSpace(os.Getenv(TenantEnv))
 	if tenant == "" && cfg.Report.SourceName() == starrocksx.SourceStatic {
@@ -346,6 +346,10 @@ func (rt *Runtime) openDelay() {
 	s := delayx.New(rt.DB, cfg.Delay, cfg.Service.Name)
 	rt.Delay = s
 	rt.OnStart("delayed tasks", func() error {
+		if inTakeover(cfg) {
+			zlog.Info("delayed tasks not polled: takeover mode (the dev instance runs them)")
+			return nil
+		}
 		if s.Handlers() == 0 {
 			zlog.Debug("delayed tasks off", zlog.Str("hint", "rt.Delay.Handle(kind, fn) in app.Setup starts the scheduler"))
 			return nil
@@ -385,7 +389,7 @@ func (rt *Runtime) openKafka() error {
 		zlog.Str("source", cfg.Kafka.SourceName()), zlog.Str("role", cfg.Kafka.RoleName()))
 	// The outbox relay: events queued in the database (PublishTx) go out
 	// from here. Needs the service's MySQL; off by kafka.outbox.enabled.
-	if rt.DB != nil && cfg.Kafka.Outbox.EnabledOrDefault() {
+	if rt.DB != nil && cfg.Kafka.Outbox.EnabledOrDefault() && !inTakeover(cfg) {
 		db := rt.DB
 		rt.OnStart("outbox relay", func() error {
 			cli.StartOutbox(context.Background(), db, cfg.Kafka.Outbox)
@@ -419,7 +423,14 @@ func kafkaTarget(ctx context.Context, cfg Config) (kafkax.Target, error) {
 			brokers = append(brokers, h)
 		}
 	}
-	return kafkax.Target{Brokers: brokers, Username: row.User, Password: row.Password}, nil
+	t := kafkax.Target{Brokers: brokers, Username: row.User, Password: row.Password}
+	if inTakeover(cfg) {
+		for i, b := range t.Brokers {
+			t.Brokers[i] = rewriteAddr(b)
+		}
+		t.RewriteAddr = rewriteAddr
+	}
+	return t, nil
 }
 
 func (rt *Runtime) openRedis() error {
@@ -466,7 +477,8 @@ func redisTarget(ctx context.Context, cfg Config) (redisx.Target, error) {
 	if err != nil {
 		return redisx.Target{}, err
 	}
-	return redisx.TargetFromRow(row.Addr, row.DB, row.Password)
+	t, err := redisx.TargetFromRow(rewriteAddr(row.Addr), row.DB, row.Password)
+	return t, err
 }
 
 func (rt *Runtime) openMySQL() error {
@@ -555,7 +567,9 @@ func mysqlTarget(ctx context.Context, cfg Config) (mysqlx.Target, error) {
 	if err != nil {
 		return mysqlx.Target{}, err
 	}
-	return mysqlx.Resolve(ctx, platform, strings.TrimSpace(os.Getenv(TenantEnv)), cfg.MySQL.RoleName(), os.Getenv)
+	t, err := mysqlx.Resolve(ctx, platform, strings.TrimSpace(os.Getenv(TenantEnv)), cfg.MySQL.RoleName(), os.Getenv)
+	t.Addr = rewriteAddr(t.Addr)
+	return t, err
 }
 
 // platformDatabase is the platform database every source-platform lookup
@@ -575,7 +589,7 @@ func platformDatabase(cfg Config, what string) (mysqlx.Target, error) {
 	if password == "" {
 		return mysqlx.Target{}, fmt.Errorf("%s: the platform database's password is to come from the environment variable %q (infra.yaml mysql.platform.password_env), which is not set", what, p.PasswordEnv)
 	}
-	return mysqlx.Target{Addr: p.Addr, DB: p.DB, User: p.User, Password: password}, nil
+	return mysqlx.Target{Addr: rewriteAddr(p.Addr), DB: p.DB, User: p.User, Password: password}, nil
 }
 
 func isLoopback(addr string) bool {

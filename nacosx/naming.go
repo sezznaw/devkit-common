@@ -246,6 +246,35 @@ func (c *Client) Instances(name string) ([]Instance, error) {
 	return usable, nil
 }
 
+// Lookup is Instances for a service that may legitimately have no instance
+// (a takeover group): the usable instances, possibly none, and an error only
+// when Nacos could not be asked.
+func (c *Client) Lookup(name string) ([]Instance, error) {
+	if c.IsOffline() {
+		return nil, fmt.Errorf("nacosx: cannot look up %s: nacos is switched off", name)
+	}
+	s, err := c.subscribe(name)
+	if err != nil {
+		return nil, err
+	}
+	all, err := c.naming.SelectAllInstances(vo.SelectAllInstancesParam{
+		ServiceName: name,
+		GroupName:   c.cfg.GroupName(),
+	})
+	if err != nil {
+		return nil, fmt.Errorf("nacosx: look up %s: %w", name, err)
+	}
+	list := convert(all)
+	s.observe(list, false)
+	usable := list[:0:0]
+	for _, in := range list {
+		if in.usable() {
+			usable = append(usable, in)
+		}
+	}
+	return usable, nil
+}
+
 // Pick returns one usable instance, chosen at random in proportion to the
 // weights. It is for callers without a load balancer of their own; Kitex has
 // one and takes the whole list.

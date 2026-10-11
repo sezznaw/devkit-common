@@ -27,6 +27,7 @@ import (
 	hconfig "github.com/cloudwego/hertz/pkg/common/config"
 	"github.com/hertz-contrib/cors"
 
+	"github.com/sezznaw/devkit-common/devroute"
 	"github.com/sezznaw/devkit-common/kitexx"
 	"github.com/sezznaw/devkit-common/nacosx"
 	"github.com/sezznaw/devkit-common/otelx"
@@ -81,10 +82,14 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 		h.Use(CORS(cfg.CORS))
 		zlog.Info("cors on", zlog.Any("allowed_origins", cfg.CORS.AllowedOrigins))
 	}
-	h.Use(Tracing(), Metrics(), RequestLog(), Recovery())
+	h.Use(Tracing(), DevTag(cfg.DevRoute), Metrics(), RequestLog(), Recovery())
 	// The guard after the request log, so a refused request is a record
 	// too; before the login check, so guessing passwords is limited.
-	h.Use(Guard(h, cfg.Guard, rt.Redis, cfg.Service.Name))
+	debug := time.Duration(0)
+	if cfg.DevRoute.Enabled() {
+		debug = cfg.DevRoute.Timeout()
+	}
+	h.Use(Guard(h, cfg.Guard, rt.Redis, cfg.Service.Name, debug))
 	zlog.Info("guard on", zlog.Int("max_body_bytes", int64(cfg.Guard.MaxBody())), zlog.Dur("timeout", cfg.Guard.RequestTimeout()), zlog.Str("rate_per_ip", cfg.Guard.PerIP().String()))
 	return h, nil
 }
@@ -98,7 +103,7 @@ func CORS(cfg kitexx.CORSConfig) app.HandlerFunc {
 	return cors.New(cors.Config{
 		AllowOrigins:     cfg.AllowedOrigins,
 		AllowMethods:     []string{"POST", "GET", "OPTIONS"},
-		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-Id"},
+		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-Id", devroute.HeaderKey},
 		ExposeHeaders:    []string{"x-trace-id"},
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,
@@ -254,6 +259,9 @@ func RequestLog() app.HandlerFunc {
 		ctx = metainfo.WithPersistentValue(ctx, kitexx.TraceIDKey, traceID)
 		ctx = zlog.CtxWith(ctx, zlog.Str("trace_id", traceID),
 			zlog.Str("method", string(c.Method())), zlog.Str("path", string(c.Path())))
+		if tag := devroute.TagString(ctx); tag != "" {
+			ctx = zlog.CtxWith(ctx, zlog.Str("dev_tag", tag))
+		}
 
 		c.Next(ctx)
 
@@ -295,6 +303,22 @@ func Recovery() app.HandlerFunc {
 				c.AbortWithStatus(500)
 			}
 		}()
+		c.Next(ctx)
+	}
+}
+
+// DevTag reads X-Dev-Tag and, when tagged routing is on and the value is
+// well formed, puts the tags into the context as the persistent metainfo
+// value every RPC of this request carries (package devroute). Off, or
+// malformed, the header is ignored. [takeover]
+func DevTag(cfg devroute.Config) app.HandlerFunc {
+	if !cfg.Enabled() {
+		return func(ctx context.Context, c *app.RequestContext) { c.Next(ctx) }
+	}
+	return func(ctx context.Context, c *app.RequestContext) {
+		if tags, ok := devroute.Parse(string(c.GetHeader(devroute.HeaderKey))); ok {
+			ctx = devroute.WithTags(ctx, tags)
+		}
 		c.Next(ctx)
 	}
 }

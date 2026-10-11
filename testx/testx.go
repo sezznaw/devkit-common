@@ -123,6 +123,7 @@ func New(t testing.TB, service string, opts ...Option) *Runtime {
 		opt(&o)
 	}
 	zlogtest.Discard(t)
+	config.DisableTakeover()
 	ctx := context.Background()
 	rt := &Runtime{Runtime: &kitexx.Runtime{}, t: t, topics: o.topics}
 	rt.Config.Service.Name = service

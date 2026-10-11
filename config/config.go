@@ -36,9 +36,14 @@ func Env() string {
 	return DefaultEnv
 }
 
-// Load reads <dir>/<env>.yaml into out.
+// Load reads <dir>/<env>.yaml into out. In takeover mode (Takeover) the
+// profile the marker names is read instead of local.yaml.
 func Load(dir string, out any) error {
-	return LoadFile(filepath.Join(dir, Env()+".yaml"), out)
+	profile := Env()
+	if p := takeoverProfile(); p != "" {
+		profile = p
+	}
+	return LoadFile(filepath.Join(dir, profile+".yaml"), out)
 }
 
 // LoadFile reads a single YAML file into out, expanding ${VAR} references.

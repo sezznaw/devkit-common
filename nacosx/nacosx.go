@@ -212,6 +212,26 @@ func New(c Config) (*Client, error) {
 	return cli, nil
 }
 
+// NewWatcher is New for a client that must believe Nacos when it says a
+// service has no instance left (UpdateCacheWhenEmpty): the one that
+// subscribes to the takeover group, whose last instance leaving is the event
+// that matters. The client calls go through keeps the SDK's protection
+// against an empty push, which is why it is a client of its own. [takeover]
+func NewWatcher(c Config) (*Client, error) {
+	if err := probeFunc(c, 2*time.Second); err != nil {
+		return nil, err
+	}
+	bridgeSDKLog(c.SDKLogLevel)
+	naming, err := newWatchNamingFunc(c)
+	if err != nil {
+		return nil, fmt.Errorf("nacosx: %w", err)
+	}
+	cli := NewFrom(c, naming, nil)
+	zlog.Info("nacos connected (watcher)", zlog.Any("addrs", c.Addrs), zlog.Str("namespace", c.namespaceName()), zlog.Str("group", c.GroupName()))
+	go cli.watchConnection(healthInterval)
+	return cli, nil
+}
+
 // NewFrom makes a client of SDK clients that exist already, which is how a
 // test puts fakes underneath. config may be nil: it is then created from c
 // when first needed. Nothing is probed, announced or watched.

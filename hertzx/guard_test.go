@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/hertz/pkg/common/ut"
 
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/devroute"
 	"github.com/sezznaw/devkit-common/kitexx"
 	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/zlog/zlogtest"
@@ -43,11 +44,25 @@ func TestParseRate(t *testing.T) {
 }
 
 func newGuarded(t *testing.T, cfg kitexx.GuardConfig, withRedis bool) *server.Hertz {
+	return newGuardedWith(t, cfg, withRedis, 0)
+}
+
+// newGuardedWithDebug is newGuarded with tagged routing on: the X-Dev-Tag
+// middleware installed and the guard given the debug timeout.
+func newGuardedWithDebug(t *testing.T, cfg kitexx.GuardConfig, debug time.Duration) *server.Hertz {
+	return newGuardedWith(t, cfg, false, debug)
+}
+
+func newGuardedWith(t *testing.T, cfg kitexx.GuardConfig, withRedis bool, debug time.Duration) *server.Hertz {
 	t.Helper()
 	zlogtest.Discard(t)
 	h := server.New(server.WithDisablePrintRoute(true))
 	SetSpec(h, []byte(guardSpec))
-	if withRedis {
+	if debug > 0 {
+		on := true
+		h.Use(DevTag(devroute.Config{On: &on}))
+		h.Use(Guard(h, cfg, nil, "api", debug))
+	} else if withRedis {
 		srv := miniredis.RunT(t)
 		cli, err := redisx.Open(context.Background(), redisx.Target{Addr: srv.Addr()}, redisx.Config{}, "api")
 		if err != nil {
@@ -123,6 +138,21 @@ func TestGuardTimeout(t *testing.T) {
 	}
 	if w := ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil); w.Code != 200 {
 		t.Fatalf("fast request: %d", w.Code)
+	}
+}
+
+// A tagged request gets the debug timeout: the same slow handler that is
+// 504 for everyone else completes for the developer on a breakpoint. [takeover]
+func TestGuardTimeoutRelaxedForTaggedRequest(t *testing.T) {
+	cfg := kitexx.GuardConfig{Timeout: config.Duration(30 * time.Millisecond)}
+	h := newGuardedWithDebug(t, cfg, time.Second)
+	w := ut.PerformRequest(h.Engine, "POST", "/slow", nil)
+	if w.Code != 504 {
+		t.Fatalf("untagged slow request: %d", w.Code)
+	}
+	w = ut.PerformRequest(h.Engine, "POST", "/slow", nil, ut.Header{Key: devroute.HeaderKey, Value: "alice"})
+	if w.Code != 200 {
+		t.Fatalf("tagged slow request: %d %s", w.Code, w.Body.String())
 	}
 }
 

@@ -13,6 +13,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"strings"
 	"sync"
 	"time"
@@ -127,6 +128,11 @@ type Target struct {
 	Brokers  []string
 	Username string
 	Password string
+	// RewriteAddr, when set, maps every broker address the client dials
+	// (the seeds and the addresses brokers advertise) to another one. Takeover
+	// mode sets it to the tunnel map: Redpanda advertises its in-cluster DNS
+	// name, which a developer's machine cannot reach. [takeover]
+	RewriteAddr func(addr string) string
 }
 
 // Static is the target of a static configuration.
@@ -252,6 +258,12 @@ func (c *Client) baseOpts() []kgo.Opt {
 	}
 	if c.target.Username != "" {
 		opts = append(opts, kgo.SASL(scram.Auth{User: c.target.Username, Pass: c.target.Password}.AsSha256Mechanism()))
+	}
+	if rw := c.target.RewriteAddr; rw != nil {
+		d := &net.Dialer{Timeout: 10 * time.Second}
+		opts = append(opts, kgo.Dialer(func(ctx context.Context, network, host string) (net.Conn, error) {
+			return d.DialContext(ctx, network, rw(host))
+		}))
 	}
 	return opts
 }

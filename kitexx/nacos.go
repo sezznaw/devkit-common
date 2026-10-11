@@ -12,7 +12,9 @@ import (
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
 
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/devroute"
 	"github.com/sezznaw/devkit-common/nacosx"
+	"github.com/sezznaw/devkit-common/zlog"
 )
 
 var (
@@ -145,15 +147,22 @@ func (r *nacosRegistry) Deregister(info *registry.Info) error {
 
 // nacosResolver finds the instances of the services a Kitex client calls.
 // Kitex asks again every few seconds; nacosx answers from memory, which Nacos
-// keeps current by pushing, and puts every change of a list on record.
+// keeps current by pushing, and puts every change of a list on record. With
+// tagged routing on, a second client (watcher) contributes the takeover
+// group's instances, see devroute. [takeover]
 type nacosResolver struct {
-	cli  *nacosx.Client
-	name string
+	cli     *nacosx.Client
+	watcher *nacosx.Client // nil: routing off
+	name    string
 }
 
-func newNacosResolver(cli *nacosx.Client, c nacosx.Config) *nacosResolver {
+func newNacosResolver(cli, watcher *nacosx.Client, c nacosx.Config) *nacosResolver {
 	// Kitex shares the cache of instance lists between resolvers of one name.
-	return &nacosResolver{cli: cli, name: fmt.Sprintf("nacosx:%v:%s:%s", c.Addrs, c.Namespace, c.GroupName())}
+	name := fmt.Sprintf("nacosx:%v:%s:%s", c.Addrs, c.Namespace, c.GroupName())
+	if watcher != nil {
+		name += "+" + devroute.TakeoverGroup
+	}
+	return &nacosResolver{cli: cli, watcher: watcher, name: name}
 }
 
 func (r *nacosResolver) Target(_ context.Context, target rpcinfo.EndpointInfo) string {
@@ -161,19 +170,39 @@ func (r *nacosResolver) Target(_ context.Context, target rpcinfo.EndpointInfo) s
 }
 
 func (r *nacosResolver) Resolve(_ context.Context, desc string) (discovery.Result, error) {
-	list, err := r.cli.Instances(desc)
+	if r.watcher == nil {
+		list, err := r.cli.Instances(desc)
+		if err != nil {
+			return discovery.Result{}, err
+		}
+		instances := make([]discovery.Instance, 0, len(list))
+		for _, in := range list {
+			instances = append(instances, discovery.NewInstance("tcp", in.Addr, int(in.Weight), in.Metadata))
+		}
+		return discovery.Result{Cacheable: true, CacheKey: desc, Instances: instances}, nil
+	}
+	baseline, err := r.cli.Lookup(desc)
 	if err != nil {
 		return discovery.Result{}, err
 	}
-	instances := make([]discovery.Instance, 0, len(list))
-	for _, in := range list {
-		instances = append(instances, discovery.NewInstance("tcp", in.Addr, int(in.Weight), in.Metadata))
+	takeovers, err := r.watcher.Lookup(desc)
+	if err != nil {
+		// The takeover group is a convenience; the baseline is the service.
+		zlog.Warn("devroute: takeover group not readable, baseline only", zlog.Str("service", desc), zlog.Err(err))
+		takeovers = nil
+	}
+	instances := mergeInstances(baseline, takeovers)
+	if len(instances) == 0 {
+		return discovery.Result{}, fmt.Errorf("nacosx: no instance of %s can take requests", desc)
 	}
 	return discovery.Result{Cacheable: true, CacheKey: desc, Instances: instances}, nil
 }
 
 func (r *nacosResolver) Diff(cacheKey string, prev, next discovery.Result) (discovery.Change, bool) {
-	return discovery.DefaultDiff(cacheKey, prev, next)
+	if r.watcher == nil {
+		return discovery.DefaultDiff(cacheKey, prev, next)
+	}
+	return diffWithTags(cacheKey, prev, next)
 }
 
 func (r *nacosResolver) Name() string { return r.name }

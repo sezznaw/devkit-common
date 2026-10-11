@@ -13,6 +13,7 @@ import (
 	"github.com/redis/go-redis/v9"
 	"gopkg.in/yaml.v3"
 
+	"github.com/sezznaw/devkit-common/devroute"
 	"github.com/sezznaw/devkit-common/kitexx"
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/zlog"
@@ -34,8 +35,11 @@ import (
 // 整个服务一个（guard.rate.per_ip），每条接口可再加一个（IDL 里 `// @limit 10/m`）。
 // 请求体大小是 New 设的服务器选项（读之前就 413）。有 Redis 时各副本共用计数，没有就
 // 每副本各算。超限回 429、code 1008、带 Retry-After。限流在登录校验之前：猜密码的请求到不了那一步。
-func Guard(h *server.Hertz, cfg kitexx.GuardConfig, rdb *redis.Client, service string) app.HandlerFunc {
+func Guard(h *server.Hertz, cfg kitexx.GuardConfig, rdb *redis.Client, service string, debug ...time.Duration) app.HandlerFunc {
 	g := &guard{cfg: cfg, rdb: rdb, service: service, h: h, local: map[string]*window{}}
+	if len(debug) > 0 {
+		g.debug = debug[0]
+	}
 	if rdb == nil {
 		zlog.Warn("guard: no redis; request-rate limits count per replica, not across them")
 	}
@@ -43,6 +47,8 @@ func Guard(h *server.Hertz, cfg kitexx.GuardConfig, rdb *redis.Client, service s
 }
 
 type guard struct {
+	// debug replaces the request timeout of a tagged request; 0 = never.
+	debug   time.Duration
 	cfg     kitexx.GuardConfig
 	rdb     *redis.Client
 	service string
@@ -79,6 +85,9 @@ func (g *guard) handle(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 	timeout := g.cfg.RequestTimeout()
+	if g.debug > 0 && len(devroute.Tags(ctx)) > 0 {
+		timeout = g.debug // someone is on a breakpoint behind this request [takeover]
+	}
 	rctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	c.Next(rctx)
