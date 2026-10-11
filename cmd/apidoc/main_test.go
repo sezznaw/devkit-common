@@ -223,3 +223,24 @@ func TestErrorCodes(t *testing.T) {
 		t.Fatalf("not sorted:\n%s", s)
 	}
 }
+
+func TestRequired(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "member"), 0o755)
+	os.WriteFile(filepath.Join(dir, "member", "member.thrift"), []byte("namespace go member\n\nstruct MemberInfo {\n    1: i64 uid\n    2: string username\n    3: optional i32 status\n}\nstruct Empty {}\n"), 0o644)
+	structs := requiredFields(dir)
+	if got := structs["member.MemberInfo"]; len(got) != 2 || got[0] != "uid" || got[1] != "username" {
+		t.Fatalf("required = %v", got)
+	}
+	doc := "openapi: 3.0.3\ncomponents:\n  schemas:\n    member.MemberInfoBody:\n      type: object\n      properties:\n        uid: {type: integer}\n        username: {type: string}\n        status: {type: integer}\n    member.Empty:\n      type: object\n"
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
+		t.Fatal(err)
+	}
+	Required(root.Content[0], structs)
+	out, _ := yaml.Marshal(&root)
+	s := string(out)
+	if !strings.Contains(s, "required:") || !strings.Contains(s, "- uid") || !strings.Contains(s, "- username") || strings.Contains(s, "- status") {
+		t.Fatalf("%s", s)
+	}
+}
