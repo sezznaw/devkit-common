@@ -20,14 +20,16 @@
 // RequireLogin reads to decide what to protect. -title / -description on the
 // command line win over the directives.
 //
-//	go run github.com/sezznaw/devkit-common/cmd/apidoc -idl ../idl/ser-api/ser-api.thrift -out cmd/ser-api/openapi.yaml -version v1.2.3
+//	go run github.com/sezznaw/devkit-common/cmd/apidoc -dir ../idl/ser-api -out cmd/ser-api/openapi.yaml -version v1.2.3
+//
+// -dir documents a gateway whose IDL is a directory, one Thrift file per
+// domain (dir.go); -idl documents a single file.
 package main
 
 import (
 	"flag"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -36,79 +38,41 @@ import (
 )
 
 func main() {
-	idl := flag.String("idl", "", "the service's Thrift IDL (with api.* annotations)")
+	idl := flag.String("idl", "", "the service's Thrift IDL (with api.* annotations); one file")
+	dir := flag.String("dir", "", "the service's IDL directory: one Thrift file per domain, merged into one document")
 	out := flag.String("out", "openapi.yaml", "where to write the OpenAPI document")
 	title := flag.String("title", "", "info.title (default: the IDL's file name)")
 	version := flag.String("version", "", "info.version (default: dev)")
 	desc := flag.String("description", "", "info.description")
 	flag.Parse()
-	if *idl == "" {
-		fmt.Fprintln(os.Stderr, "apidoc: -idl is required")
+	if *idl == "" && *dir == "" {
+		fmt.Fprintln(os.Stderr, "apidoc: -idl <file> or -dir <directory> is required")
 		os.Exit(2)
 	}
-	if err := run(*idl, *out, *title, *version, *desc); err != nil {
+	var err error
+	if *dir != "" {
+		err = runDir(*dir, *out, *title, *version, *desc)
+	} else {
+		err = run(*idl, *out, *title, *version, *desc)
+	}
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "apidoc:", err)
 		os.Exit(1)
 	}
 }
 
 func run(idl, out, title, version, desc string) error {
-	if _, err := exec.LookPath("thriftgo"); err != nil {
-		return fmt.Errorf("thriftgo not found in PATH (run: make tools)")
+	if err := needTools(); err != nil {
+		return err
 	}
-	if _, err := exec.LookPath("thrift-gen-http-swagger"); err != nil {
-		return fmt.Errorf("thrift-gen-http-swagger not found in PATH (run: make tools)")
-	}
-	tmp, err := os.MkdirTemp("", "apidoc-*")
+	tmp, work, err := stage(filepath.Dir(idl))
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmp)
-	// Copy the IDL repository (the service's directory and its siblings:
-	// includes such as "../common/common.thrift" are relative) with the
-	// annotations added, keeping the layout.
-	srcDir := filepath.Dir(idl)
-	repoDir := filepath.Dir(srcDir)
-	work := filepath.Join(tmp, filepath.Base(srcDir))
-	err = filepath.WalkDir(repoDir, func(p string, e os.DirEntry, err error) error {
-		if err != nil {
-			return nil
-		}
-		if e.IsDir() {
-			if e.Name() == ".git" || e.Name() == "node_modules" {
-				return filepath.SkipDir
-			}
-			return nil
-		}
-		if !strings.HasSuffix(e.Name(), ".thrift") {
-			return nil
-		}
-		rel, err := filepath.Rel(repoDir, p)
-		if err != nil {
-			return err
-		}
-		b, err := os.ReadFile(p)
-		if err != nil {
-			return err
-		}
-		dst := filepath.Join(tmp, rel)
-		if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
-			return err
-		}
-		return os.WriteFile(dst, Annotate(b), 0o644)
-	})
+	doc, err := plugin(work, filepath.Base(idl))
 	if err != nil {
 		return err
-	}
-	outDir := filepath.Join(tmp, "out")
-	cmd := exec.Command("thriftgo", "-g", "go", "-p", "http-swagger:OutputDir="+outDir, filepath.Base(idl))
-	cmd.Dir = work
-	if b, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("thriftgo: %w\n%s", err, b)
-	}
-	doc, err := os.ReadFile(filepath.Join(outDir, "openapi.yaml"))
-	if err != nil {
-		return fmt.Errorf("the plugin wrote no openapi.yaml: %w", err)
 	}
 	src, err := os.ReadFile(idl)
 	if err != nil {

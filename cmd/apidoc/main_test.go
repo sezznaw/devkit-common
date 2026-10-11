@@ -1,6 +1,7 @@
 package main
 
 import (
+	"gopkg.in/yaml.v3"
 	"strings"
 	"testing"
 )
@@ -167,5 +168,38 @@ func TestEnvelope(t *testing.T) {
 	}
 	if !strings.Contains(b, `"200":`) {
 		t.Fatalf("status key must be the string \"200\":\n%s", b)
+	}
+}
+
+func TestMergeAndPrefix(t *testing.T) {
+	a := "openapi: 3.0.3\npaths:\n  /v1/member/list:\n    post:\n      operationId: MemberService_List\n      responses:\n        \"200\":\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/ListRespBody'\ncomponents:\n  schemas:\n    ListRespBody:\n      type: object\ntags:\n  - name: 会员\n"
+	b := "openapi: 3.0.3\npaths:\n  /v1/wallet/list:\n    post:\n      operationId: WalletService_List\n      responses:\n        \"200\":\n          content:\n            application/json:\n              schema:\n                $ref: '#/components/schemas/ListRespBody'\ncomponents:\n  schemas:\n    ListRespBody:\n      type: string\ntags:\n  - name: 钱包\n  - name: 会员\n"
+	var ra, rb yaml.Node
+	if err := yaml.Unmarshal([]byte(a), &ra); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal([]byte(b), &rb); err != nil {
+		t.Fatal(err)
+	}
+	prefixSchemas(ra.Content[0], "member")
+	prefixSchemas(rb.Content[0], "wallet")
+	if err := mergeDoc(ra.Content[0], rb.Content[0], "wallet.thrift"); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := yaml.Marshal(&ra)
+	s := string(out)
+	for _, want := range []string{"member.ListRespBody:", "wallet.ListRespBody:", "'#/components/schemas/member.ListRespBody'", "'#/components/schemas/wallet.ListRespBody'", "/v1/member/list", "/v1/wallet/list", "name: 钱包"} {
+		if !strings.Contains(s, want) {
+			t.Fatalf("missing %q in\n%s", want, s)
+		}
+	}
+	if strings.Count(s, "name: 会员") != 1 {
+		t.Fatalf("tag 会员 should appear once:\n%s", s)
+	}
+	// the same route in two domains is refused
+	var rc yaml.Node
+	_ = yaml.Unmarshal([]byte(b), &rc)
+	if err := mergeDoc(ra.Content[0], rc.Content[0], "again.thrift"); err == nil {
+		t.Fatal("duplicate route accepted")
 	}
 }
