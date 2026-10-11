@@ -24,6 +24,13 @@ func TestNormalize(t *testing.T) {
 		if c.in != nil {
 			p = c.in
 		}
+		// Callers pass req.Page straight through: a typed nil pointer when
+		// the request had no page block. Both spellings must agree.
+		if c.in == nil {
+			if page, size, off := Normalize(Pager(c.in)); page != 1 || size != 20 || off != 0 {
+				t.Errorf("typed nil pointer: %d %d %d", page, size, off)
+			}
+		}
 		page, size, off := Normalize(p)
 		if page != c.page || size != c.size || off != c.offset {
 			t.Errorf("Normalize(%+v) = %d %d %d", c.in, page, size, off)

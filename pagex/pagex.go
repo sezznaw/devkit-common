@@ -9,8 +9,11 @@
 // 把请求变成查询要的 offset/limit，默认第 1 页、每页 20、最多 100。
 package pagex
 
-// Pager is what the generated common.PageReq satisfies (its getters are
-// nil-safe, so a request without a page block is fine).
+import "reflect"
+
+// Pager is what the generated common.PageReq satisfies. A request without a
+// page block hands Normalize a typed nil pointer; Normalize treats it as
+// "no page block" (the generated getters would dereference it).
 type Pager interface {
 	GetPage() int32
 	GetPageSize() int32
@@ -24,7 +27,7 @@ const (
 // Normalize returns the page (from 1), the page size (1..MaxSize, default
 // DefaultSize) and the offset a query uses. nil means page 1.
 func Normalize(p Pager) (page, size int32, offset int) {
-	if p != nil {
+	if !isNil(p) {
 		page, size = p.GetPage(), p.GetPageSize()
 	}
 	if page < 1 {
@@ -37,4 +40,14 @@ func Normalize(p Pager) (page, size int32, offset int) {
 		size = MaxSize
 	}
 	return page, size, int(page-1) * int(size)
+}
+
+// isNil is true for a nil interface and for an interface holding a nil
+// pointer (what `req.Page` is when the caller sent no page block).
+func isNil(p Pager) bool {
+	if p == nil {
+		return true
+	}
+	v := reflect.ValueOf(p)
+	return v.Kind() == reflect.Pointer && v.IsNil()
 }
