@@ -12,6 +12,7 @@ import (
 	"github.com/cloudwego/kitex/client/callopt"
 	"github.com/cloudwego/kitex/pkg/discovery"
 	"github.com/cloudwego/kitex/pkg/endpoint"
+	"github.com/cloudwego/kitex/pkg/loadbalance/lbcache"
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
 
 	"github.com/sezznaw/devkit-common/config"
@@ -97,7 +98,9 @@ func devRouteClientOptions(cfg Config) []client.Option {
 	if !cfg.DevRoute.Enabled() {
 		return nil
 	}
-	return []client.Option{client.WithLoadBalancer(devroute.NewBalancer())}
+	// A shorter resolver refresh than Kitex's 5s: a takeover coming or going
+	// is seen within about two seconds. dev only, like the rest.
+	return []client.Option{client.WithLoadBalancer(devroute.NewBalancer(), &lbcache.Options{RefreshInterval: 2 * time.Second})}
 }
 
 // takeoverResolver is the resolver of a takeover instance: the services it
