@@ -15,6 +15,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开（`${VAR:-默认值}` 未设时取默认）；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
 | `kitexx`  | 服务的 Runtime：配置里开了什么就在注册前打开（`rt.DB`、`rt.Redis`、`rt.Kafka`、`rt.Centrifugo`、`rt.S3`、`rt.Delay`、`rt.ID`、`rt.Report`、`rt.Provider(名字)`），Kitex 服务端/客户端选项（Nacos 注册发现、trace、指标、请求日志、参数校验、幂等、`limits:`），优雅停机，`--job`、`--verify`、`--dlq`；见下文 |
 | `hertzx`  | API（HTTP）服务的同一套：和 `kitexx` 共用配置，带 trace_id 的请求日志一路传到 RPC 服务，recovery、CORS、网关防护（`guard:` 请求体、时限、限流）、按 IDL 注解的 `RequireLogin` / `RequirePermission` / `Audit`、`Bind` 校验、加 `{code, msg, data}` 壳的 `OK` / `Fail` / `FailCode`、`/docs`；见下文 |
+| `devroute` | 从开发者本机接管 dev 的一个服务：`X-Dev-Tag` 作为 metainfo 持久值 `DEV_TAG` 跨每一跳，负载均衡器把带 tag 的请求送到同 tag 的接管实例（Nacos 分组 `DEV_TAKEOVER`），带 tag 的请求用调试超时；只在 `APP_ENV=dev` 开。工具是 `devkit takeover`；见下文 |
 | `pagex`   | 分页：`Normalize(req.Page)` 返回 page、size、offset，默认值（第 1 页、20 条、最多 100）只在这一处；见下文 |
 | `cmd/apidoc`、`cmd/errgen` | `make gen` 跑的两个生成器：网关从 IDL 目录生成 OpenAPI 文档（壳、required、x-error-codes）；每个服务从 `idl/errors/*.thrift` 的注释生成 `Message` / `Err` / `Errf`；见下文 |
 | `otelx`   | trace（OpenTelemetry）：`kitexx`/`hertzx` 按 `otel:` 段装好，每个 RPC、HTTP 调用、SQL、Redis 命令、Kafka 消息都是一个 span；不用直接调 |
@@ -503,6 +504,12 @@ metrics:
 
 服务自己的指标：包顶层 `promauto.With(metricsx.Registry).NewCounter(...)`；Prometheus 默认注册表不会被提供。
 端口被占用是启动时的一条告警，不是启动失败。
+
+### 从本机接管 dev 的服务（`devroute`）[takeover]
+
+`devkit takeover <服务>` 让开发者在 IDE 里（带断点）跑的实例，替 dev 环境处理带 `X-Dev-Tag: <tag>` 的请求，其余请求照常走 dev 自己的实例。框架这边是 `devroute`，只在 `APP_ENV=dev`（或下面的接管模式）打开；uat、prod 里它不在请求路径上，测试锁住了这一点：网关忽略请求头、没有第二个 Nacos 客户端、不换负载均衡器、超时不动。dev 里：`hertzx` 把 `X-Dev-Tag`（校验 `^[a-z0-9-]{1,32}$`，逗号分隔多个）写成 metainfo 持久值 `DEV_TAG`，和 uid 一样跨每一跳；Kitex resolver 合并 `DEFAULT_GROUP` 和 `DEV_TAKEOVER`（第二个 nacosx 客户端，相信空列表，Diff 能看见 tag 变化）；`devroute.NewBalancer` 把带 tag 的请求送到 `dev-tag` 元数据相同的实例（按 tag 顺序第一个匹配，多个同 tag 轮询），其余交给 Kitex 默认的加权均衡器、只在基线实例里选，绝不选接管实例；带 tag 请求的 RPC 超时和网关的 `guard.timeout` 换成 `devroute.debug_timeout`（30 分钟）。请求日志带 `dev_tag`。
+
+接管模式是本地实例连 dev 的方式：`devkit takeover` 运行期间维持 `<服务>/.devkit/takeover.json`（5 秒心跳，服务认 15 秒内的），并用一条 ssh 把集群里的地址全部打通。不设 `APP_ENV` 启动的服务发现属于自己的新鲜标记（`config.Takeover`），就读 `conf/<标记里的 env>.yaml`、拿到部署的环境变量、把 `platform` 来源解析出的所有地址（MySQL、Redis、Kafka 的 broker 及其公布的地址、Centrifugo、S3、StarRocks、OTLP）改写到隧道口（`config.RewriteAddr`），下游服务解析到其 ClusterIP 的隧道口，**不注册**，也不起任何后台工作者：不消费（否则和 dev 实例争分区）、不转发 outbox（本地写进共享表的行由 dev 实例转发）、不轮询延时任务、不开 metrics 端口。启动日志第一行是 `TAKEOVER MODE`。`testx` 关掉标记检测，测试永远不会碰到正在进行的接管。可选的 `devroute:`（`enabled`、`debug_timeout`）覆盖 APP_ENV 规则，不进模板。
 
 ### 部署后验证 `verifyx`
 
