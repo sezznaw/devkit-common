@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
 	"net/url"
 	"os"
@@ -58,7 +59,17 @@ var (
 	takeoverOnce sync.Once
 	takeover     *TakeoverMarker
 	takeoverOff  atomic.Bool
+	takeoverNote string // why a marker that exists was ignored, for the start-up log
 )
+
+// TakeoverIgnored says why a marker found next to this service was not used
+// (APP_ENV set to an environment, another service's marker, a stale
+// heartbeat), or "" when there was no marker or it was used. The service
+// logs it at start so that "the tool says not registered" has a reason.
+func TakeoverIgnored() string {
+	Takeover()
+	return takeoverNote
+}
 
 // DisableTakeover makes Takeover report nothing, whatever is on disk and
 // whether or not it was read before. Tests (testx) call it: a test must
@@ -91,26 +102,34 @@ func Takeover() *TakeoverMarker {
 		return nil
 	}
 	takeoverOnce.Do(func() {
-		if env := os.Getenv(EnvVar); env != "" && env != "local" {
-			return
-		}
 		dir, err := Dir()
 		if err != nil {
 			return
 		}
-		path := filepath.Join(filepath.Dir(dir), filepath.FromSlash(TakeoverFile))
+		if abs, err := filepath.Abs(dir); err == nil {
+			dir = abs // make run and go run find "conf" relative to the working directory
+		}
+		serviceDir := filepath.Dir(dir)
+		path := filepath.Join(serviceDir, filepath.FromSlash(TakeoverFile))
 		b, err := os.ReadFile(path)
 		if err != nil {
+			return // no marker: the usual case, nothing to say
+		}
+		if env := os.Getenv(EnvVar); env != "" && env != LocalEnv {
+			takeoverNote = fmt.Sprintf("%s=%s (takeover mode needs it unset or local)", EnvVar, env)
 			return
 		}
 		var m TakeoverMarker
-		if json.Unmarshal(b, &m) != nil || m.Service == "" || m.Env == "" {
+		if err := json.Unmarshal(b, &m); err != nil || m.Service == "" || m.Env == "" {
+			takeoverNote = "marker unreadable or incomplete: " + path
 			return
 		}
-		if m.Service != filepath.Base(filepath.Dir(dir)) {
+		if m.Service != filepath.Base(serviceDir) {
+			takeoverNote = fmt.Sprintf("marker names service %s, this directory is %s", m.Service, filepath.Base(serviceDir))
 			return
 		}
-		if time.Since(m.Heartbeat) > TakeoverFresh {
+		if age := time.Since(m.Heartbeat); age > TakeoverFresh {
+			takeoverNote = fmt.Sprintf("marker heartbeat is %s old (is devkit takeover still running?)", age.Truncate(time.Second))
 			return
 		}
 		m.Path = path

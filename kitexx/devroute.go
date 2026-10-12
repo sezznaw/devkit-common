@@ -40,6 +40,9 @@ func takeover() *config.TakeoverMarker { return config.Takeover() }
 func applyTakeover(cfg *Config) {
 	m := takeover()
 	if m == nil {
+		if why := config.TakeoverIgnored(); why != "" {
+			zlog.Warn("takeover marker found but ignored: "+why+"; this instance runs against its local middleware and devkit takeover will not register it", zlog.Str("marker", config.TakeoverFile))
+		}
 		return
 	}
 	if m.Service != cfg.Service.Name {
