@@ -11,7 +11,7 @@ import (
 )
 
 // CodeBadParam is the business code of a request that fails validation
-// (idl/errors.md 1001): the message names the field and the rule.
+// (idl/errors/common.thrift, 1001): the message names the field and the rule.
 const CodeBadParam int32 = 1001
 
 // validatable is what thrift-gen-validator gives every request struct

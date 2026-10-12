@@ -14,7 +14,7 @@ import (
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
-// Business codes of the login state (idl/errors.md).
+// Business codes of the login state (idl/errors/common.thrift).
 const (
 	CodeUnauthenticated = 1004 // no token, or invalid / expired
 	CodeSessionRevoked  = 1005 // logged out, replaced by a newer login, or revoked

@@ -642,8 +642,9 @@ Codes are declared once, in the IDL repository: `idl/errors/<domain>.thrift`
 `make gen` compiles them with thriftgo into `kitex_gen/errcode` and then runs
 `go run github.com/sezznaw/devkit-common/cmd/errgen -dir <idl>/errors -out kitex_gen/errcode`,
 which writes `zz_messages.go` with `Message(code) string`, `Err(code) error`
-and `Errf(code, format, args...) error` (a `BizStatusError` whose message is the
-comment, with the detail appended). A service writes
+and `Errf(code, detail string) error` (a `BizStatusError` whose message is the
+comment, with the detail appended after a colon; not printf-style, format the
+detail yourself). A service writes
 `return nil, errcode.Err(errcode.MemberNotFound)` and never a message string
 (lint rule `error-msg`); the gateway's `Fail` turns it into the envelope, and
 the front end shows the same text from `x-error-codes`.

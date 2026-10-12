@@ -511,7 +511,7 @@ func envelopeSchema(data *yaml.Node) *yaml.Node {
 		return n
 	}
 	props := &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
-		scalar("code"), prop("integer", "int32", "0 成功；其他见错误码表（idl/errors.md）"),
+		scalar("code"), prop("integer", "int32", "0 成功；其他见错误码表（idl/errors/*.thrift，也在本文档的 x-error-codes）"),
 		scalar("msg"), prop("string", "", "给人看的说明，成功时为空"),
 	}}
 	empty := data == nil

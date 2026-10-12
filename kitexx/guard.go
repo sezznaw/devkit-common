@@ -116,7 +116,7 @@ func (r *Rate) UnmarshalYAML(n *yaml.Node) error {
 	return nil
 }
 
-// Codes the guard answers with; rows of the idl repository's errors.md.
+// Codes the guard answers with; declared in the idl repository's errors/common.thrift.
 const (
 	CodeTooManyRequests = 1008 // HTTP 429
 	CodeRequestTimeout  = 1010 // HTTP 504

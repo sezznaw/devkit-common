@@ -16,7 +16,7 @@ import (
 )
 
 // Business codes the idempotency middleware answers with; registered in the
-// idl repository's errors.md.
+// idl repository's errors/common.thrift.
 const (
 	// CodeRequestInProgress: the same request_id is being processed right now.
 	CodeRequestInProgress int32 = 1002

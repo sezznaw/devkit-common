@@ -323,7 +323,7 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   value of the Success field's type by reflection (`setSuccess`). Fail closed:
   no Redis or Redis down is 5002, never a second execution; a handler error
   deletes the key. Codes 1002 / 1003 / 5002 are in the idl repository's
-  errors.md. It is installed by `rt.Options()` unconditionally (count it in
+  errors/common.thrift. It is installed by `rt.Options()` unconditionally (count it in
   `TestOptionsWithoutRegistry`); tests use the generated shapes as hand-written
   structs on miniredis.
 - `starrocksx`: database/sql on the go-sql-driver connector (StarRocks is

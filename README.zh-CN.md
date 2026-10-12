@@ -441,7 +441,7 @@ local 和 dev 开，生产关。
 
 码只在 IDL 仓库声明一次：`idl/errors/<领域>.thrift`（`namespace go errcode`，每个 `const i32 名字 = 码` 上一行一句说明）。`make gen` 先用 thriftgo 把它们编成
 `kitex_gen/errcode`，再跑 `go run github.com/sezznaw/devkit-common/cmd/errgen -dir <idl>/errors -out kitex_gen/errcode`，生成 `zz_messages.go`：
-`Message(code) string`、`Err(code) error`、`Errf(code, format, args...) error`（消息是那句说明，Errf 把细节接在后面的 `BizStatusError`）。
+`Message(code) string`、`Err(code) error`、`Errf(code, detail string) error`（消息是那句说明，Errf 把 detail 用冒号接在后面的 `BizStatusError`；不是 printf 风格，细节自己拼好）。
 服务写 `return nil, errcode.Err(errcode.MemberNotFound)`，不写消息字符串（lint 规则 `error-msg`）；网关的 `Fail` 把它变成壳，前端从 `x-error-codes` 显示同一句话。
 
 ### 金额 `moneyx`
