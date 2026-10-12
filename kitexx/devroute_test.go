@@ -2,6 +2,7 @@ package kitexx
 
 import (
 	"context"
+	"github.com/cloudwego/kitex/pkg/loadbalance"
 	"net"
 	"strings"
 	"testing"
@@ -57,6 +58,13 @@ func TestWithDebugTimeoutOnlyForTaggedRequests(t *testing.T) {
 		t.Error("untagged request got call options")
 	}
 	tagged := devroute.WithTags(ctx, []string{"alice"})
+	if got := WithDebugTimeout(tagged, time.Minute); len(client.CallOptionsFromCtx(got)) != 0 {
+		t.Error("a tag nobody has a takeover for relaxed the timeout")
+	}
+	lb := devroute.NewBalancer().(loadbalance.Rebalancer)
+	key := "debug-timeout-test"
+	lb.Rebalance(discovery.Change{Result: discovery.Result{Cacheable: true, CacheKey: key, Instances: []discovery.Instance{discovery.NewInstance("tcp", "172.31.41.180:24001", 1, map[string]string{devroute.TagMetadata: "alice"})}}})
+	t.Cleanup(func() { lb.Delete(discovery.Change{Result: discovery.Result{Cacheable: true, CacheKey: key}}) })
 	got := WithDebugTimeout(tagged, time.Minute)
 	if len(client.CallOptionsFromCtx(got)) != 1 {
 		t.Fatal("tagged request has no call option")

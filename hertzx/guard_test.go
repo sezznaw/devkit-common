@@ -2,6 +2,8 @@ package hertzx
 
 import (
 	"context"
+	"github.com/cloudwego/kitex/pkg/discovery"
+	"github.com/cloudwego/kitex/pkg/loadbalance"
 	"strings"
 	"testing"
 	"time"
@@ -141,8 +143,10 @@ func TestGuardTimeout(t *testing.T) {
 	}
 }
 
-// A tagged request gets the debug timeout: the same slow handler that is
-// 504 for everyone else completes for the developer on a breakpoint. [takeover]
+// A request tagged with a tag that has a takeover instance gets the debug
+// timeout: the same slow handler that is 504 for everyone else completes for
+// the developer on a breakpoint. A tag nobody is debugging with relaxes
+// nothing, so a header alone cannot hold a gateway slot. [takeover]
 func TestGuardTimeoutRelaxedForTaggedRequest(t *testing.T) {
 	cfg := kitexx.GuardConfig{Timeout: config.Duration(30 * time.Millisecond)}
 	h := newGuardedWithDebug(t, cfg, time.Second)
@@ -151,9 +155,25 @@ func TestGuardTimeoutRelaxedForTaggedRequest(t *testing.T) {
 		t.Fatalf("untagged slow request: %d", w.Code)
 	}
 	w = ut.PerformRequest(h.Engine, "POST", "/slow", nil, ut.Header{Key: devroute.HeaderKey, Value: "alice"})
+	if w.Code != 504 {
+		t.Fatalf("tagged request without a takeover behind it: %d", w.Code)
+	}
+	takeoverActive(t, "alice")
+	w = ut.PerformRequest(h.Engine, "POST", "/slow", nil, ut.Header{Key: devroute.HeaderKey, Value: "alice"})
 	if w.Code != 200 {
 		t.Fatalf("tagged slow request: %d %s", w.Code, w.Body.String())
 	}
+}
+
+// takeoverActive makes the process see a takeover instance with the tag,
+// the way a backend client's balancer would when one registers.
+func takeoverActive(t *testing.T, tag string) {
+	t.Helper()
+	lb := devroute.NewBalancer().(loadbalance.Rebalancer)
+	key := "guard-test-" + tag
+	in := discovery.NewInstance("tcp", "172.31.41.180:24001", 1, map[string]string{devroute.TagMetadata: tag})
+	lb.Rebalance(discovery.Change{Result: discovery.Result{Cacheable: true, CacheKey: key, Instances: []discovery.Instance{in}}})
+	t.Cleanup(func() { lb.Delete(discovery.Change{Result: discovery.Result{Cacheable: true, CacheKey: key}}) })
 }
 
 func TestRouteLimits(t *testing.T) {

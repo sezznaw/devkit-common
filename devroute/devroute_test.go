@@ -138,3 +138,23 @@ func TestRebalanceFollowsInstanceChanges(t *testing.T) {
 		t.Errorf("after Delete the picker is rebuilt from the result: %s", a)
 	}
 }
+
+// Active follows the takeover instances a balancer has seen: a tag is active
+// from the moment an instance with it arrives to the moment it leaves.
+func TestActiveFollowsTakeoverInstances(t *testing.T) {
+	b := NewBalancer()
+	key := "ser-active-test"
+	base := inst("10.42.0.1:8120", "")
+	b.GetPicker(discovery.Result{Cacheable: true, CacheKey: key, Instances: []discovery.Instance{base}})
+	if Active([]string{"zoe"}) {
+		t.Fatal("zoe active before her instance registered")
+	}
+	b.(loadbalance.Rebalancer).Rebalance(discovery.Change{Result: discovery.Result{Cacheable: true, CacheKey: key, Instances: []discovery.Instance{base, inst("172.31.41.180:24001", "zoe")}}})
+	if !Active([]string{"zoe"}) || Active([]string{"bob"}) || Active(nil) {
+		t.Fatal("active set does not follow the instances")
+	}
+	b.(loadbalance.Rebalancer).Rebalance(discovery.Change{Result: discovery.Result{Cacheable: true, CacheKey: key, Instances: []discovery.Instance{base}}})
+	if Active([]string{"zoe"}) {
+		t.Fatal("zoe still active after her instance left")
+	}
+}

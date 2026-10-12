@@ -85,10 +85,11 @@ func devRouteCallOptions(c devroute.Config) endpoint.Middleware {
 }
 
 // WithDebugTimeout returns ctx with the debug timeout as a call option for
-// every RPC made with it, when ctx carries dev tags; otherwise ctx itself.
-// hertzx uses it for tagged HTTP requests.
+// every RPC made with it, when ctx carries a dev tag that has a takeover
+// instance right now (devroute.Active); otherwise ctx itself. A header alone
+// relaxes nothing. hertzx uses it for tagged HTTP requests.
 func WithDebugTimeout(ctx context.Context, timeout time.Duration) context.Context {
-	if len(devroute.Tags(ctx)) == 0 || len(client.CallOptionsFromCtx(ctx)) > 0 {
+	if !devroute.Active(devroute.Tags(ctx)) || len(client.CallOptionsFromCtx(ctx)) > 0 {
 		return ctx
 	}
 	return client.NewCtxWithCallOptions(ctx, []callopt.Option{callopt.WithRPCTimeout(timeout)})

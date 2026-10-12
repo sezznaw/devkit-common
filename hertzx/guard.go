@@ -85,7 +85,7 @@ func (g *guard) handle(ctx context.Context, c *app.RequestContext) {
 		}
 	}
 	timeout := g.cfg.RequestTimeout()
-	if g.debug > 0 && len(devroute.Tags(ctx)) > 0 {
+	if g.debug > 0 && devroute.Active(devroute.Tags(ctx)) {
 		timeout = g.debug // someone is on a breakpoint behind this request [takeover]
 	}
 	rctx, cancel := context.WithTimeout(ctx, timeout)

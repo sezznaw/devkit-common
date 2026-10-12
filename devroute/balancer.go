@@ -35,6 +35,34 @@ type balancer struct {
 	pickers sync.Map // CacheKey -> loadbalance.Picker
 }
 
+// active is, per CacheKey of every devroute balancer in the process, the set
+// of tags that have a takeover instance right now. A gateway process has a
+// client for each backend it calls, so the union over the keys is "the tags
+// somebody is debugging against through this process".
+var active sync.Map // CacheKey -> map[string]bool
+
+// Active reports whether any of the tags has a takeover instance known to
+// this process. The debug timeout is granted to a tagged request only when
+// it is: a header alone, from anybody in the office, must not hold a gateway
+// slot for half an hour.
+func Active(tags []string) bool {
+	if len(tags) == 0 {
+		return false
+	}
+	found := false
+	active.Range(func(_, v any) bool {
+		set := v.(map[string]bool)
+		for _, t := range tags {
+			if set[t] {
+				found = true
+				return false
+			}
+		}
+		return true
+	})
+	return found
+}
+
 func (b *balancer) Name() string { return BalancerName }
 
 // GetPicker: cached by CacheKey for a cacheable result (what the resolver
@@ -65,6 +93,7 @@ func (b *balancer) Delete(ch discovery.Change) {
 		return
 	}
 	b.pickers.Delete(ch.Result.CacheKey)
+	active.Delete(ch.Result.CacheKey)
 	if rb, ok := b.base.(loadbalance.Rebalancer); ok {
 		rb.Delete(ch)
 	}
@@ -81,6 +110,13 @@ func (b *balancer) build(result discovery.Result) loadbalance.Picker {
 		} else {
 			baseline = append(baseline, in)
 		}
+	}
+	if result.Cacheable {
+		tags := make(map[string]bool, len(tagged))
+		for tag := range tagged {
+			tags[tag] = true
+		}
+		active.Store(result.CacheKey, tags)
 	}
 	baseResult := discovery.Result{Cacheable: result.Cacheable, CacheKey: result.CacheKey, Instances: baseline}
 	var base loadbalance.Picker
