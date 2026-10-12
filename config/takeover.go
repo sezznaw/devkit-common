@@ -65,9 +65,25 @@ var (
 // never pick up a developer's live takeover.
 func DisableTakeover() { takeoverOff.Store(true) }
 
+// TakeoverAckFile is written next to the marker when the service has entered
+// takeover mode: the tool registers the local instance only once it is there,
+// so a service that is up but running against its local middleware (the
+// marker ignored or unreadable) never receives the environment's traffic.
+// The name extends the marker's so the same .gitignore line covers it.
+const TakeoverAckFile = TakeoverFile + ".ack"
+
+// TakeoverAck is the content of TakeoverAckFile.
+type TakeoverAck struct {
+	Service string    `json:"service"`
+	Tag     string    `json:"tag"`
+	PID     int       `json:"pid"`
+	Since   time.Time `json:"since"`
+}
+
 // Takeover returns the fresh marker of this service, or nil. It is read once;
 // the service decides at start whether it is in takeover mode and stays
-// there. Only a process without APP_ENV (a developer's machine) looks. The
+// there. Only a process on a developer's machine looks: APP_ENV unset or
+// "local" (make run sets local; an IDE run configuration sets nothing). The
 // marker must name the service whose directory it is in (<service>/.devkit),
 // so a marker left for another service is not one.
 func Takeover() *TakeoverMarker {
@@ -75,7 +91,7 @@ func Takeover() *TakeoverMarker {
 		return nil
 	}
 	takeoverOnce.Do(func() {
-		if os.Getenv(EnvVar) != "" {
+		if env := os.Getenv(EnvVar); env != "" && env != "local" {
 			return
 		}
 		dir, err := Dir()
@@ -104,6 +120,9 @@ func Takeover() *TakeoverMarker {
 			}
 		}
 		takeover = &m
+		if b, err := json.Marshal(TakeoverAck{Service: m.Service, Tag: m.Tag, PID: os.Getpid(), Since: time.Now().UTC()}); err == nil {
+			_ = os.WriteFile(path+".ack", b, 0o600) // best effort; the tool waits for it
+		}
 	})
 	return takeover
 }

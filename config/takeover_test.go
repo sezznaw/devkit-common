@@ -103,3 +103,40 @@ func TestTakeoverIgnoredWhenStaleDisabledOrDeployed(t *testing.T) {
 		t.Error("empty table changed an address")
 	}
 }
+
+// APP_ENV=local (what make run sets) still enters takeover mode, and entering
+// it leaves the acknowledgement the tool waits for; any other APP_ENV does not.
+func TestTakeoverUnderLocalWritesAck(t *testing.T) {
+	dir := t.TempDir()
+	svc := filepath.Base(dir)
+	confDir := filepath.Join(dir, "conf")
+	if err := os.MkdirAll(filepath.Join(dir, ".devkit"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(confDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(DirEnv, confDir)
+	marker, _ := json.Marshal(TakeoverMarker{Service: svc, Tag: "zoe", Env: "dev", Heartbeat: time.Now()})
+	if err := os.WriteFile(filepath.Join(dir, TakeoverFile), marker, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv(EnvVar, "dev")
+	resetTakeover()
+	if Takeover() != nil {
+		t.Fatal("APP_ENV=dev entered takeover mode")
+	}
+	t.Setenv(EnvVar, "local")
+	resetTakeover()
+	if Takeover() == nil {
+		t.Fatal("APP_ENV=local did not enter takeover mode")
+	}
+	b, err := os.ReadFile(filepath.Join(dir, TakeoverAckFile))
+	if err != nil {
+		t.Fatalf("no ack: %v", err)
+	}
+	var ack TakeoverAck
+	if json.Unmarshal(b, &ack) != nil || ack.Service != svc || ack.Tag != "zoe" || ack.PID != os.Getpid() {
+		t.Fatalf("ack: %s", b)
+	}
+}
