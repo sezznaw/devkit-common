@@ -231,7 +231,7 @@ func TestRegistryAndResolverGoThroughNacosx(t *testing.T) {
 		t.Errorf("records: %s", logs)
 	}
 
-	res := newNacosResolver(cli, nil, nacosx.Config{})
+	res := newNacosResolver(cli, nil, nil, nacosx.Config{})
 	if _, err := res.Resolve(context.Background(), "pay"); err == nil {
 		t.Error("no instance must be an error, or Kitex caches an empty list")
 	}

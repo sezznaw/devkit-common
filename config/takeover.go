@@ -2,10 +2,13 @@ package config
 
 import (
 	"encoding/json"
+	"net"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -54,19 +57,25 @@ type TakeoverMarker struct {
 var (
 	takeoverOnce sync.Once
 	takeover     *TakeoverMarker
-	takeoverOff  bool
+	takeoverOff  atomic.Bool
 )
 
-// DisableTakeover makes Takeover report nothing, whatever is on disk. Tests
-// (testx) call it: a test must never pick up a developer's live takeover.
-func DisableTakeover() { takeoverOff = true }
+// DisableTakeover makes Takeover report nothing, whatever is on disk and
+// whether or not it was read before. Tests (testx) call it: a test must
+// never pick up a developer's live takeover.
+func DisableTakeover() { takeoverOff.Store(true) }
 
 // Takeover returns the fresh marker of this service, or nil. It is read once;
 // the service decides at start whether it is in takeover mode and stays
-// there. Only a process without APP_ENV (a developer's machine) looks.
+// there. Only a process without APP_ENV (a developer's machine) looks. The
+// marker must name the service whose directory it is in (<service>/.devkit),
+// so a marker left for another service is not one.
 func Takeover() *TakeoverMarker {
+	if takeoverOff.Load() {
+		return nil
+	}
 	takeoverOnce.Do(func() {
-		if takeoverOff || os.Getenv(EnvVar) != "" {
+		if os.Getenv(EnvVar) != "" {
 			return
 		}
 		dir, err := Dir()
@@ -80,6 +89,9 @@ func Takeover() *TakeoverMarker {
 		}
 		var m TakeoverMarker
 		if json.Unmarshal(b, &m) != nil || m.Service == "" || m.Env == "" {
+			return
+		}
+		if m.Service != filepath.Base(filepath.Dir(dir)) {
 			return
 		}
 		if time.Since(m.Heartbeat) > TakeoverFresh {
@@ -111,34 +123,32 @@ func RewriteAddr(addr string) string {
 	return addr
 }
 
-// RewriteURL is RewriteAddr for "scheme://host:port[/path]".
+// RewriteURL is RewriteAddr for a URL ("scheme://host:port/path?query").
 func RewriteURL(u string) string {
 	m := Takeover()
 	if m == nil || len(m.Rewrite) == 0 {
 		return u
 	}
-	scheme, rest, ok := strings.Cut(u, "://")
-	if !ok {
+	parsed, err := url.Parse(u)
+	if err != nil || parsed.Host == "" {
 		return RewriteAddr(u)
 	}
-	hostport, path, _ := strings.Cut(rest, "/")
-	to := RewriteAddr(hostport)
-	if to == hostport {
+	to := RewriteAddr(parsed.Host)
+	if to == parsed.Host {
 		return u
 	}
-	if path != "" {
-		return scheme + "://" + to + "/" + path
-	}
-	return scheme + "://" + to
+	parsed.Host = to
+	return parsed.String()
 }
 
 func normalizeAddr(addr string) string {
-	host, port, ok := strings.Cut(addr, ":")
-	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
-	if !ok {
-		return host
+	addr = strings.TrimSpace(addr)
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return strings.ToLower(strings.TrimSuffix(addr, "."))
 	}
-	return host + ":" + port
+	host = strings.ToLower(strings.TrimSuffix(host, "."))
+	return net.JoinHostPort(host, port)
 }
 
 // takeoverProfile is the file Load reads in takeover mode, else "".

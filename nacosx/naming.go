@@ -164,6 +164,10 @@ func instanceAddr(addr string, nacos []string) (ip string, port uint64, err erro
 // outboundIP is the address this machine uses to reach Nacos. Nothing is
 // sent: connecting a UDP socket only asks the routing table. "" when that
 // gives no IPv4 address.
+// OwnIP is the IPv4 this process reaches Nacos from (what Register would
+// announce without service.advertise), or "" when it cannot be told.
+func OwnIP(nacos []string) string { return outboundIP(nacos) }
+
 func outboundIP(nacos []string) string {
 	for _, a := range nacos {
 		conn, err := net.Dial("udp4", a)

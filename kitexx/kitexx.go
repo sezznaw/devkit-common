@@ -364,12 +364,12 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 		return nil, err
 	}
 	var watcher *nacosx.Client
+	var guard *instanceGuard
 	if cfg.DevRoute.Enabled() {
-		if watcher, err = takeoverClient(cfg); err != nil {
-			return nil, err
-		}
+		watcher = takeoverClient(cfg)
+		guard = instanceGuardFor(cfg)
 	}
-	return append(opts, client.WithResolver(newNacosResolver(cli, watcher, cfg.Nacos))), nil
+	return append(opts, client.WithResolver(newNacosResolver(cli, watcher, guard, cfg.Nacos))), nil
 }
 
 // Run starts the server and blocks until it has stopped completely. With

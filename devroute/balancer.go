@@ -2,6 +2,7 @@ package devroute
 
 import (
 	"context"
+	"sync"
 	"sync/atomic"
 
 	"github.com/cloudwego/kitex/pkg/discovery"
@@ -18,20 +19,60 @@ const BalancerName = "devroute"
 // whose context carries tags goes to an instance of the first tag that has
 // one; every other request is picked among the baseline instances by the
 // balancer Kitex uses by default (weighted random), never a takeover
-// instance. With no takeover instance present the picker is the default
-// balancer's own, so a service with routing on and nobody taking anything
-// over behaves exactly as before.
+// instance.
+//
+// It is a loadbalance.Rebalancer: Kitex's lbcache only tells a balancer that
+// implements Rebalance/Delete about instance changes, and the default
+// balancer caches its picker by CacheKey until told. Without this, a
+// downstream whose Pods changed would keep being called at the old
+// addresses until this process restarts.
 func NewBalancer() loadbalance.Loadbalancer {
 	return &balancer{base: loadbalance.NewWeightedBalancer()}
 }
 
 type balancer struct {
-	base loadbalance.Loadbalancer
+	base    loadbalance.Loadbalancer
+	pickers sync.Map // CacheKey -> loadbalance.Picker
 }
 
 func (b *balancer) Name() string { return BalancerName }
 
+// GetPicker: cached by CacheKey for a cacheable result (what the resolver
+// returns), rebuilt by Rebalance; built on the spot otherwise.
 func (b *balancer) GetPicker(result discovery.Result) loadbalance.Picker {
+	if !result.Cacheable {
+		return b.build(result)
+	}
+	if p, ok := b.pickers.Load(result.CacheKey); ok {
+		return p.(loadbalance.Picker)
+	}
+	p := b.build(result)
+	b.pickers.Store(result.CacheKey, p)
+	return p
+}
+
+// Rebalance implements loadbalance.Rebalancer: the instances changed.
+func (b *balancer) Rebalance(ch discovery.Change) {
+	if !ch.Result.Cacheable {
+		return
+	}
+	b.pickers.Store(ch.Result.CacheKey, b.build(ch.Result))
+}
+
+// Delete implements loadbalance.Rebalancer: the target is gone.
+func (b *balancer) Delete(ch discovery.Change) {
+	if !ch.Result.Cacheable {
+		return
+	}
+	b.pickers.Delete(ch.Result.CacheKey)
+	if rb, ok := b.base.(loadbalance.Rebalancer); ok {
+		rb.Delete(ch)
+	}
+}
+
+// build splits the instances and makes the picker. The baseline goes to the
+// default balancer through its own Rebalance (so its cache follows ours).
+func (b *balancer) build(result discovery.Result) loadbalance.Picker {
 	tagged := map[string][]discovery.Instance{}
 	baseline := make([]discovery.Instance, 0, len(result.Instances))
 	for _, in := range result.Instances {
@@ -41,7 +82,12 @@ func (b *balancer) GetPicker(result discovery.Result) loadbalance.Picker {
 			baseline = append(baseline, in)
 		}
 	}
-	base := b.base.GetPicker(discovery.Result{Cacheable: result.Cacheable, CacheKey: result.CacheKey, Instances: baseline})
+	baseResult := discovery.Result{Cacheable: result.Cacheable, CacheKey: result.CacheKey, Instances: baseline}
+	var base loadbalance.Picker
+	if rb, ok := b.base.(loadbalance.Rebalancer); ok && result.Cacheable {
+		rb.Rebalance(discovery.Change{Result: baseResult})
+	}
+	base = b.base.GetPicker(baseResult)
 	if len(tagged) == 0 {
 		return base
 	}

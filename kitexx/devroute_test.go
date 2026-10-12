@@ -2,6 +2,8 @@ package kitexx
 
 import (
 	"context"
+	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -23,7 +25,7 @@ func TestMergeInstancesDropsTaggedBaselineAndBadTags(t *testing.T) {
 		{Addr: "172.31.41.180:23002", Weight: 10, Metadata: map[string]string{devroute.TagMetadata: "Bad Tag"}},
 		{Addr: "172.31.41.180:23003", Weight: 10},
 	}
-	got := mergeInstances(baseline, takeovers)
+	got := mergeInstances(baseline, takeovers, nil)
 	if len(got) != 2 {
 		t.Fatalf("want baseline 10.0.0.1 and alice only, got %d: %v", len(got), got)
 	}
@@ -91,5 +93,34 @@ func TestDevRouteClientOptionsOffByDefault(t *testing.T) {
 	cfg.DevRoute.On = &off
 	if opts := devRouteClientOptions(cfg); len(opts) != 0 {
 		t.Error("devroute.enabled: false not honoured")
+	}
+}
+
+func TestInstanceGuardRefusesForeignBaselineAndOddTakeovers(t *testing.T) {
+	_, pods, _ := net.ParseCIDR("10.42.0.0/16")
+	g := &instanceGuard{baseline: []*net.IPNet{pods}}
+	baseline := []nacosx.Instance{
+		{Addr: "10.42.1.5:8100", Weight: 10},
+		{Addr: "172.31.41.180:23456", Weight: 10}, // someone's reverse tunnel registered as a plain instance
+		{Addr: "192.168.69.222:8100", Weight: 10},
+	}
+	takeovers := []nacosx.Instance{
+		{Addr: "172.31.41.180:23001", Weight: 10, Metadata: map[string]string{devroute.TagMetadata: "alice"}},
+		{Addr: "10.42.1.9:23001", Weight: 10, Metadata: map[string]string{devroute.TagMetadata: "bob"}},      // a Pod address claiming a tag
+		{Addr: "172.31.41.180:8100", Weight: 10, Metadata: map[string]string{devroute.TagMetadata: "carol"}}, // off the tunnel port range
+	}
+	got := mergeInstances(baseline, takeovers, g)
+	var addrs []string
+	for _, in := range got {
+		addrs = append(addrs, in.Address().String())
+	}
+	if strings.Join(addrs, " ") != "10.42.1.5:8100 172.31.41.180:23001" {
+		t.Errorf("kept %v", addrs)
+	}
+	// No network known: baseline unchecked, the takeover port range still
+	// enforced (carol on 8100 is out, bob's Pod address cannot be told apart).
+	open := &instanceGuard{}
+	if n := len(mergeInstances(baseline, takeovers, open)); n != 5 {
+		t.Errorf("open guard kept %d, want 3 baseline + alice + bob", n)
 	}
 }

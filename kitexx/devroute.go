@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/cloudwego/kitex/client"
@@ -129,39 +131,136 @@ func (r *takeoverResolver) Diff(cacheKey string, prev, next discovery.Result) (d
 func (r *takeoverResolver) Name() string { return "takeover" }
 
 // takeoverWatcher is the second Nacos client of a service with routing on:
-// it subscribes to the takeover group and believes an empty list. Nil when
-// routing is off. One per process.
+// it subscribes to the takeover group and believes an empty list. One per
+// process; a failure to make it is a warning (the baseline is the service,
+// the takeover group a convenience) and leaves routing off for this process.
 var takeoverWatcher struct {
-	cli *nacosx.Client
-	err error
-	did bool
+	once sync.Once
+	cli  *nacosx.Client
 }
 
-func takeoverClient(cfg Config) (*nacosx.Client, error) {
-	if takeoverWatcher.did {
-		return takeoverWatcher.cli, takeoverWatcher.err
+func takeoverClient(cfg Config) *nacosx.Client {
+	takeoverWatcher.once.Do(func() {
+		c := cfg.Nacos
+		c.Group = devroute.TakeoverGroup
+		off := false
+		c.Register = &off
+		c.WatchServices = nil
+		cli, err := nacosx.NewWatcher(c)
+		if err != nil {
+			zlog.Warn("devroute: cannot subscribe to the takeover group; tagged routing is off in this process", zlog.Str("group", devroute.TakeoverGroup), zlog.Err(err))
+			return
+		}
+		takeoverWatcher.cli = cli
+	})
+	return takeoverWatcher.cli
+}
+
+var guardOnce struct {
+	once sync.Once
+	g    *instanceGuard
+}
+
+// instanceGuardFor is the process's guard, made once.
+func instanceGuardFor(cfg Config) *instanceGuard {
+	guardOnce.once.Do(func() { guardOnce.g = newInstanceGuard(cfg) })
+	return guardOnce.g
+}
+
+// instanceGuard decides which instances a client may be sent to. Baseline
+// instances must live in the Pod network this process is in (by default its
+// own /16; conf devroute.baseline_cidrs overrides); takeover instances must
+// not, and must sit on the port range devkit takeover binds on the node.
+// Without this, anyone holding the environment's Nacos account could
+// register a plain instance that points at their own machine and receive
+// everybody's requests. [takeover]
+type instanceGuard struct {
+	baseline []*net.IPNet
+}
+
+func newInstanceGuard(cfg Config) *instanceGuard {
+	g := &instanceGuard{}
+	for _, c := range cfg.DevRoute.BaselineCIDRs {
+		if _, n, err := net.ParseCIDR(strings.TrimSpace(c)); err == nil {
+			g.baseline = append(g.baseline, n)
+		} else {
+			zlog.Warn("devroute.baseline_cidrs: not a CIDR, ignored", zlog.Str("value", c))
+		}
 	}
-	takeoverWatcher.did = true
-	c := cfg.Nacos
-	c.Group = devroute.TakeoverGroup
-	off := false
-	c.Register = &off
-	c.WatchServices = nil
-	takeoverWatcher.cli, takeoverWatcher.err = nacosx.NewWatcher(c)
-	if takeoverWatcher.err != nil {
-		takeoverWatcher.err = fmt.Errorf("devroute: cannot subscribe to the %s group: %w", devroute.TakeoverGroup, takeoverWatcher.err)
+	if len(g.baseline) == 0 {
+		if own := net.ParseIP(nacosx.OwnIP(cfg.Nacos.Addrs)); own != nil && own.To4() != nil {
+			g.baseline = []*net.IPNet{{IP: own.To4().Mask(net.CIDRMask(16, 32)), Mask: net.CIDRMask(16, 32)}}
+		}
 	}
-	return takeoverWatcher.cli, takeoverWatcher.err
+	if len(g.baseline) == 0 {
+		zlog.Warn("devroute: cannot tell the Pod network; baseline instances are not checked (set devroute.baseline_cidrs)")
+	} else {
+		zlog.Info("devroute: baseline instances must be in", zlog.Any("cidrs", cidrStrings(g.baseline)))
+	}
+	return g
+}
+
+func cidrStrings(list []*net.IPNet) []string {
+	out := make([]string, 0, len(list))
+	for _, n := range list {
+		out = append(out, n.String())
+	}
+	return out
+}
+
+func (g *instanceGuard) inBaselineNet(ip net.IP) bool {
+	for _, n := range g.baseline {
+		if n.Contains(ip) {
+			return true
+		}
+	}
+	return false
+}
+
+// allowBaseline: a baseline instance is one of the deployment's own Pods.
+func (g *instanceGuard) allowBaseline(addr string) bool {
+	if g == nil || len(g.baseline) == 0 {
+		return true
+	}
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	ip := net.ParseIP(host)
+	return ip != nil && g.inBaselineNet(ip)
+}
+
+// allowTakeover: a takeover instance is the node's reverse tunnel, never a
+// Pod address.
+func (g *instanceGuard) allowTakeover(addr string) bool {
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return false
+	}
+	port, err := strconv.Atoi(portStr)
+	if err != nil || port < devroute.TakeoverPortMin || port >= devroute.TakeoverPortMax {
+		return false
+	}
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return false
+	}
+	return g == nil || len(g.baseline) == 0 || !g.inBaselineNet(ip)
 }
 
 // mergeInstances builds the instance list a client sees: the baseline
-// without any instance that claims a tag (defence: takeover instances live in
-// their own group), plus the takeover group's instances with a valid tag.
-func mergeInstances(baseline, takeovers []nacosx.Instance) []discovery.Instance {
+// without any instance that claims a tag or sits outside the Pod network,
+// plus the takeover group's instances with a valid tag on the node's tunnel
+// ports. Refused instances are logged once per address.
+func mergeInstances(baseline, takeovers []nacosx.Instance, g *instanceGuard) []discovery.Instance {
 	out := make([]discovery.Instance, 0, len(baseline)+len(takeovers))
 	for _, in := range baseline {
 		if tag := in.Metadata[devroute.TagMetadata]; tag != "" {
-			zlog.Warn("devroute: an instance of the baseline group claims a dev-tag and is ignored", zlog.Str("addr", in.Addr), zlog.Str("dev_tag", tag))
+			refused(in.Addr, "a baseline instance claims a dev-tag")
+			continue
+		}
+		if !g.allowBaseline(in.Addr) {
+			refused(in.Addr, "a baseline instance outside the Pod network (someone registered their own address?)")
 			continue
 		}
 		out = append(out, discovery.NewInstance("tcp", in.Addr, int(in.Weight), in.Metadata))
@@ -171,9 +270,22 @@ func mergeInstances(baseline, takeovers []nacosx.Instance) []discovery.Instance 
 		if !devroute.ValidTag(tag) {
 			continue
 		}
+		if !g.allowTakeover(in.Addr) {
+			refused(in.Addr, "a takeover instance not on the node's tunnel ports")
+			continue
+		}
 		out = append(out, discovery.NewInstance("tcp", in.Addr, int(in.Weight), in.Metadata))
 	}
 	return out
+}
+
+var refusedSeen sync.Map
+
+// refused logs an instance the guard dropped, once per address.
+func refused(addr, why string) {
+	if _, loaded := refusedSeen.LoadOrStore(addr+"|"+why, struct{}{}); !loaded {
+		zlog.Warn("devroute: instance ignored: "+why, zlog.Str("addr", addr))
+	}
 }
 
 // diffWithTags is discovery.DefaultDiff that also sees a change of the

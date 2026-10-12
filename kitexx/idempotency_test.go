@@ -101,12 +101,17 @@ func TestIdempotencyRefusals(t *testing.T) {
 		resp.(*transferResult).Success = &transferResp{TxID: "slow"}
 		return nil
 	})
-	go func() { _ = slow(ctx, &transferArgs{Req: &transferReq{RequestId: "r3"}}, &transferResult{}) }()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_ = slow(ctx, &transferArgs{Req: &transferReq{RequestId: "r3"}}, &transferResult{})
+	}()
 	<-started
 	if err := slow(ctx, &transferArgs{Req: &transferReq{RequestId: "r3"}}, &transferResult{}); bizOf(ctx, err) != CodeRequestInProgress {
 		t.Errorf("while running: %v", err)
 	}
 	close(release)
+	<-done // or its tail (a Set on the closed redis, logged) lands on the next test's logger
 
 	// A handler error drops the id: the retry runs.
 	runs := 0

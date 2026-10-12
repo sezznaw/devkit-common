@@ -43,6 +43,11 @@ const (
 	DefaultDebugTimeout = 30 * time.Minute
 	// DevEnv is the APP_ENV in which routing is on by default.
 	DevEnv = "dev"
+	// MaxTags is how many tags one request may carry (a chain of takeovers).
+	MaxTags = 3
+	// TakeoverPortMin / Max is the port range devkit takeover binds on the
+	// node for the reverse tunnel; a takeover instance outside it is refused.
+	TakeoverPortMin, TakeoverPortMax = 20000, 32000
 )
 
 // Config is the optional `devroute:` section of a service configuration.
@@ -52,6 +57,10 @@ type Config struct {
 	// DebugTimeout replaces the RPC and gateway timeouts of a tagged
 	// request. Default 30m.
 	DebugTimeout config.Duration `yaml:"debug_timeout"`
+	// BaselineCIDRs are the networks a baseline (non-takeover) instance may
+	// have; an instance elsewhere is ignored. Default: this process's own
+	// /16, which is the Pod network in a cluster.
+	BaselineCIDRs []string `yaml:"baseline_cidrs"`
 }
 
 // Enabled says whether tagged routing is on for this process.
@@ -75,7 +84,11 @@ func Parse(header string) (tags []string, ok bool) {
 	if header == "" {
 		return nil, false
 	}
-	for _, t := range strings.Split(header, ",") {
+	parts := strings.Split(header, ",")
+	if len(parts) > MaxTags {
+		return nil, false
+	}
+	for _, t := range parts {
 		t = strings.TrimSpace(t)
 		if !tagRe.MatchString(t) {
 			return nil, false

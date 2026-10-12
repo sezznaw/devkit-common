@@ -22,7 +22,7 @@ func TestParse(t *testing.T) {
 		in   string
 		want int
 		ok   bool
-	}{{"alice", 1, true}, {"alice,bob-2", 2, true}, {" alice , bob ", 2, true}, {"", 0, false}, {"Alice", 0, false}, {"a b", 0, false}, {"alice,", 0, false}, {"x" + string(make([]byte, 40)), 0, false}} {
+	}{{"alice", 1, true}, {"alice,bob-2", 2, true}, {" alice , bob ", 2, true}, {"", 0, false}, {"Alice", 0, false}, {"a b", 0, false}, {"alice,", 0, false}, {"x" + string(make([]byte, 40)), 0, false}, {"a,b,c", 3, true}, {"a,b,c,d", 0, false}} {
 		tags, ok := Parse(c.in)
 		if ok != c.ok || len(tags) != c.want {
 			t.Errorf("Parse(%q) = %v %v", c.in, tags, ok)
@@ -99,3 +99,42 @@ func TestPickerIsDefaultWithoutTakeover(t *testing.T) {
 }
 
 func typeName(v any) string { return reflect.TypeOf(v).String() }
+
+// Kitex's lbcache tells the balancer about instance changes through
+// Rebalance; the cached picker (Cacheable results) must follow them, for the
+// baseline as much as for the takeover instances.
+func TestRebalanceFollowsInstanceChanges(t *testing.T) {
+	lb := NewBalancer()
+	old := discovery.Result{Cacheable: true, CacheKey: "svc", Instances: []discovery.Instance{inst("10.0.0.1:8100", "")}}
+	p := lb.GetPicker(old)
+	if a := p.Next(context.Background(), nil).Address().String(); a != "10.0.0.1:8100" {
+		t.Fatalf("first pick %s", a)
+	}
+	// the Pod moved and alice took the service over
+	now := discovery.Result{Cacheable: true, CacheKey: "svc", Instances: []discovery.Instance{inst("10.0.0.2:8100", ""), inst("172.31.41.180:23001", "alice")}}
+	lb.(loadbalance.Rebalancer).Rebalance(discovery.Change{Result: now, Added: now.Instances, Removed: old.Instances})
+	p = lb.GetPicker(now)
+	for i := 0; i < 20; i++ {
+		if a := p.Next(context.Background(), nil).Address().String(); a != "10.0.0.2:8100" {
+			t.Fatalf("after rebalance a plain request reached %s", a)
+		}
+	}
+	if a := p.Next(WithTags(context.Background(), []string{"alice"}), nil).Address().String(); a != "172.31.41.180:23001" {
+		t.Errorf("alice after rebalance -> %s", a)
+	}
+	// alice left: back to a plain default picker over the new baseline
+	gone := discovery.Result{Cacheable: true, CacheKey: "svc", Instances: []discovery.Instance{inst("10.0.0.2:8100", "")}}
+	lb.(loadbalance.Rebalancer).Rebalance(discovery.Change{Result: gone})
+	if a := lb.GetPicker(gone).Next(WithTags(context.Background(), []string{"alice"}), nil).Address().String(); a != "10.0.0.2:8100" {
+		t.Errorf("alice gone -> %s", a)
+	}
+	// Without Rebalance a cached picker must not change (that is lbcache's contract).
+	stale := discovery.Result{Cacheable: true, CacheKey: "svc", Instances: []discovery.Instance{inst("10.0.0.9:8100", "")}}
+	if a := lb.GetPicker(stale).Next(context.Background(), nil).Address().String(); a != "10.0.0.2:8100" {
+		t.Errorf("GetPicker rebuilt a cached picker without Rebalance: %s", a)
+	}
+	lb.(loadbalance.Rebalancer).Delete(discovery.Change{Result: stale})
+	if a := lb.GetPicker(stale).Next(context.Background(), nil).Address().String(); a != "10.0.0.9:8100" {
+		t.Errorf("after Delete the picker is rebuilt from the result: %s", a)
+	}
+}

@@ -153,16 +153,17 @@ func (r *nacosRegistry) Deregister(info *registry.Info) error {
 type nacosResolver struct {
 	cli     *nacosx.Client
 	watcher *nacosx.Client // nil: routing off
+	guard   *instanceGuard // which instances may be used, routing on
 	name    string
 }
 
-func newNacosResolver(cli, watcher *nacosx.Client, c nacosx.Config) *nacosResolver {
+func newNacosResolver(cli, watcher *nacosx.Client, guard *instanceGuard, c nacosx.Config) *nacosResolver {
 	// Kitex shares the cache of instance lists between resolvers of one name.
 	name := fmt.Sprintf("nacosx:%v:%s:%s", c.Addrs, c.Namespace, c.GroupName())
 	if watcher != nil {
 		name += "+" + devroute.TakeoverGroup
 	}
-	return &nacosResolver{cli: cli, watcher: watcher, name: name}
+	return &nacosResolver{cli: cli, watcher: watcher, guard: guard, name: name}
 }
 
 func (r *nacosResolver) Target(_ context.Context, target rpcinfo.EndpointInfo) string {
@@ -191,7 +192,7 @@ func (r *nacosResolver) Resolve(_ context.Context, desc string) (discovery.Resul
 		zlog.Warn("devroute: takeover group not readable, baseline only", zlog.Str("service", desc), zlog.Err(err))
 		takeovers = nil
 	}
-	instances := mergeInstances(baseline, takeovers)
+	instances := mergeInstances(baseline, takeovers, r.guard)
 	if len(instances) == 0 {
 		return discovery.Result{}, fmt.Errorf("nacosx: no instance of %s can take requests", desc)
 	}
