@@ -100,6 +100,9 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 	if err := rt.openMySQL(); err != nil {
 		return nil, err
 	}
+	if err := rt.EnsureFrameworkTables(); err != nil {
+		return nil, err
+	}
 	rt.openDelay()
 	if err := rt.openRedis(); err != nil {
 		return nil, err

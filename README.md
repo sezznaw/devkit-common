@@ -365,9 +365,14 @@ release process runs the migration as its own step. `mysql.auto_migrate:
 true|false` overrides. Under `--verify` it does nothing. A table is migrated
 by one service, the one whose domain it is; the others only read it.
 
-Tests: `testx.New(t, "ser-bet", testx.WithMySQL(testx.MigrationsDir()),
-testx.WithModels(mysql.Bet{}))` builds the framework tables from the
-migrations and the service's tables from the models.
+The framework's own tables (`outbox` for PublishTx, `delayed_task` for
+delay) are created by the framework too, when the feature is on, under the
+same rule (`EnsureFrameworkTables`, called by `NewRuntime`): no project
+declares them.
+
+Tests: `testx.New(t, "ser-bet", testx.WithMySQL(""), testx.WithModels(mysql.Bet{}))`
+gives a fresh database with the framework tables and the service's tables
+from the models; no SQL migrations anywhere.
 
 ### Redis with `redisx`, and idempotent requests
 

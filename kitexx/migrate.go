@@ -12,9 +12,73 @@ import (
 	"gorm.io/gorm/schema"
 
 	"github.com/sezznaw/devkit-common/config"
+	"github.com/sezznaw/devkit-common/delayx"
+	"github.com/sezznaw/devkit-common/kafkax"
 	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
+
+// EnsureFrameworkTables creates the tables the framework itself uses in the
+// service's database, when the configuration enables the feature that needs
+// them: `outbox` (kafka.outbox, PublishTx) and `delayed_task` (delay). They
+// are the framework's, so no project declares them; the same rule as
+// AutoMigrate decides whether this may alter the database (local and dev
+// yes, elsewhere only check and complain). NewRuntime calls it right after
+// opening MySQL; testx calls it for a test database.
+//
+// EnsureFrameworkTables 建框架自己用的表（outbox、delayed_task），按配置开了什么建什么；
+// 和 AutoMigrate 一样 local / dev 才动库，别的环境只检查、缺了就报错说明。
+func (rt *Runtime) EnsureFrameworkTables() error {
+	if rt.DB == nil {
+		return nil
+	}
+	cfg := rt.Config
+	var want []struct{ name, ddl string }
+	if cfg.Kafka.Enabled && cfg.Kafka.Outbox.EnabledOrDefault() {
+		want = append(want, struct{ name, ddl string }{"outbox", kafkax.OutboxDDL})
+	}
+	if cfg.Delay.EnabledOrDefault() {
+		want = append(want, struct{ name, ddl string }{"delayed_task", delayx.DDL})
+	}
+	if len(want) == 0 {
+		return nil
+	}
+	m := rt.DB.Migrator()
+	var missing []string
+	for _, w := range want {
+		if !m.HasTable(w.name) {
+			missing = append(missing, w.name)
+		}
+	}
+	if len(missing) == 0 {
+		return nil
+	}
+	if !cfg.MySQL.AutoMigrateOn() {
+		return fmt.Errorf("kitexx: framework tables missing in this database: %s (auto migrate is off in %s; run the migration step of the release, or set mysql.auto_migrate: true)", strings.Join(missing, ", "), config.Env())
+	}
+	create := func(ctx context.Context) error {
+		for _, w := range want {
+			if m.HasTable(w.name) {
+				continue
+			}
+			if err := rt.DB.WithContext(ctx).Exec(w.ddl).Error; err != nil {
+				return fmt.Errorf("kitexx: create %s: %w", w.name, err)
+			}
+			zlog.Info("auto migrate: framework table created", zlog.Str("table", w.name))
+		}
+		return nil
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	if rt.Redis == nil {
+		return create(ctx)
+	}
+	err := redisx.WithLock(ctx, rt.Redis, "auto-migrate", 2*time.Minute, create, redisx.Wait(5*time.Minute))
+	if errors.Is(err, redisx.ErrLockLost) {
+		return nil
+	}
+	return err
+}
 
 // AutoMigrate brings the tables of the given models (the project's
 // lib/model/mysql structs) up to date with the structs: it creates a table

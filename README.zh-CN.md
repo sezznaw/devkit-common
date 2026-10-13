@@ -241,8 +241,11 @@ func (Bet) TableName() string { return "bet" }
 在哪开着：`local` 和 `dev` 开，表结构跟着代码走；`uat` 和 `prod` 关，只打印差异，由发布流程把迁移当独立一步跑。
 `mysql.auto_migrate: true|false` 可覆盖。`--verify` 下什么都不做。一张表只由一个服务迁移（它所属的领域），别的服务只读。
 
-测试：`testx.New(t, "ser-bet", testx.WithMySQL(testx.MigrationsDir()), testx.WithModels(mysql.Bet{}))`，
-框架的表来自迁移，服务自己的表来自模型。
+框架自己的表（PublishTx 的 `outbox`、延时任务的 `delayed_task`）也由框架在开了对应功能时按同一规则建（`EnsureFrameworkTables`，
+`NewRuntime` 调），项目里不声明它们。
+
+测试：`testx.New(t, "ser-bet", testx.WithMySQL(""), testx.WithModels(mysql.Bet{}))`，一个干净的新库，框架表和本服务的表都在，
+哪里都没有 SQL 迁移。
 
 ### 用 `redisx` 连 Redis，以及幂等请求
 

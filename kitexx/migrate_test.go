@@ -1,23 +1,11 @@
 package kitexx_test
 
 import (
-	"os"
-	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/sezznaw/devkit-common/testx"
 )
-
-// emptyMigrations is a migrations directory with nothing in it but what
-// testx insists on: the schema here comes from the models.
-func emptyMigrations(t *testing.T) string {
-	dir := t.TempDir()
-	if err := os.WriteFile(filepath.Join(dir, "000001_nothing.up.sql"), []byte("SELECT 1;\n"), 0o644); err != nil {
-		t.Fatal(err)
-	}
-	return dir
-}
 
 // Two versions of the same table: the second adds a column and an index.
 type migV1 struct {
@@ -46,7 +34,7 @@ type migUntyped struct {
 func (migUntyped) TableName() string { return "mig_untyped" }
 
 func TestAutoMigrateCreatesThenAddsColumnsAndIndexes(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(emptyMigrations(t)))
+	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
 	m := rt.DB.Migrator()
 
 	if err := rt.AutoMigrate(migV1{}); err != nil {
@@ -76,7 +64,7 @@ func TestAutoMigrateCreatesThenAddsColumnsAndIndexes(t *testing.T) {
 }
 
 func TestAutoMigrateRefusesAFieldWithoutAType(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(emptyMigrations(t)))
+	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
 	err := rt.AutoMigrate(migUntyped{})
 	if err == nil || !strings.Contains(err.Error(), "Amount") || !strings.Contains(err.Error(), "type") {
 		t.Fatalf("untyped field accepted: %v", err)
@@ -87,7 +75,7 @@ func TestAutoMigrateRefusesAFieldWithoutAType(t *testing.T) {
 }
 
 func TestAutoMigrateOffOnlyReports(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(emptyMigrations(t)))
+	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
 	off := false
 	rt.Config.MySQL.AutoMigrate = &off
 	if err := rt.AutoMigrate(migV1{}); err != nil {

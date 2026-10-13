@@ -94,16 +94,24 @@ type Push struct {
 type Option func(*options)
 
 type options struct {
+	mysql      bool
 	migrations string
 	models     []any
 	topics     []string
 	realm      authx.Realm
 }
 
-// WithMySQL gives the Runtime a database created from the `*.up.sql` files
-// of dir (the project's migrations, in order), dropped when the test ends.
+// WithMySQL gives the Runtime a fresh database, dropped when the test ends,
+// with the framework's tables (outbox, delayed_task) in it; the service's
+// own tables come from WithModels. dir may name a directory of `*.up.sql`
+// files to apply first (a project that still has SQL migrations), or be "".
 // Needs MYSQL_TEST_DSN_ROOT; without a server the test is skipped.
-func WithMySQL(migrationsDir string) Option { return func(o *options) { o.migrations = migrationsDir } }
+//
+// WithMySQL 给 Runtime 一个测完就删的新库，框架的表（outbox、delayed_task）已建好；本服务的表用
+// WithModels。dir 可以是 *.up.sql 的目录（仍用 SQL 迁移的项目），一般传 ""。
+func WithMySQL(migrationsDir string) Option {
+	return func(o *options) { o.mysql = true; o.migrations = migrationsDir }
+}
 
 // WithModels creates the tables of these models (the project's
 // lib/model/mysql structs) in the test database after the migrations, the
@@ -158,12 +166,16 @@ func New(t testing.TB, service string, opts ...Option) *Runtime {
 	rt.ID = gen
 
 	// MySQL
-	if o.migrations != "" {
+	if o.mysql || o.migrations != "" {
 		rt.DB = openMySQL(t, service, o.migrations)
 		rt.Config.MySQL.Enabled = true
+		on := true
+		rt.Config.MySQL.AutoMigrate = &on
+		rt.Config.Kafka.Enabled = true // the framework tables a service would have: outbox and delayed_task
+		if err := rt.EnsureFrameworkTables(); err != nil {
+			t.Fatalf("testx: framework tables: %v", err)
+		}
 		if len(o.models) > 0 {
-			on := true
-			rt.Config.MySQL.AutoMigrate = &on
 			if err := rt.AutoMigrate(o.models...); err != nil {
 				t.Fatalf("testx: WithModels: %v", err)
 			}
@@ -336,9 +348,6 @@ func CtxAs(realm authx.Realm, uid int64) context.Context {
 // the end of the test. No server: the test is skipped.
 func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 	t.Helper()
-	if migrationsDir == "" {
-		t.Fatalf("testx: WithMySQL needs the migrations directory: run the test through `make test` (it sets %s), or pass the path", MigrationsEnv)
-	}
 	require := os.Getenv(RequireEnv) == "1"
 	root := os.Getenv(DSNEnv)
 	if root == "" {
@@ -385,11 +394,14 @@ func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 		_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
 		_ = admin.Close()
 	})
-	files, err := filepath.Glob(filepath.Join(migrationsDir, "*.up.sql"))
-	if err != nil || len(files) == 0 {
-		t.Fatalf("testx: no *.up.sql in %s (the migrations directory; make test sets MIGRATIONS_DIR)", migrationsDir)
+	var files []string
+	if migrationsDir != "" {
+		files, err = filepath.Glob(filepath.Join(migrationsDir, "*.up.sql"))
+		if err != nil || len(files) == 0 {
+			t.Fatalf("testx: no *.up.sql in %s (WithMySQL(\"\") for a project without SQL migrations)", migrationsDir)
+		}
+		sort.Strings(files)
 	}
-	sort.Strings(files)
 	dbDSN := *dsn
 	dbDSN.DBName = name
 	dbDSN.MultiStatements = true
