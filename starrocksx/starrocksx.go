@@ -136,6 +136,10 @@ func Open(ctx context.Context, t Target, cfg Config, tenant string) (*Client, er
 	mc := gomysql.NewConfig()
 	mc.User, mc.Passwd, mc.Net, mc.Addr, mc.DBName = t.User, t.Password, "tcp", t.Addr, t.DB
 	mc.ParseTime = true
+	// Placeholders are filled in on the client. StarRocks' server-side
+	// prepared statements do not accept a parameter as LIMIT / OFFSET (nor in
+	// a few other places); interpolated, `LIMIT ? OFFSET ?` is plain SQL.
+	mc.InterpolateParams = true
 	mc.Timeout = 5 * time.Second
 	mc.ReadTimeout = cfg.timeout() + 5*time.Second
 	conn, err := gomysql.NewConnector(mc)
