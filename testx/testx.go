@@ -95,6 +95,7 @@ type Option func(*options)
 
 type options struct {
 	migrations string
+	models     []any
 	topics     []string
 	realm      authx.Realm
 }
@@ -103,6 +104,17 @@ type options struct {
 // of dir (the project's migrations, in order), dropped when the test ends.
 // Needs MYSQL_TEST_DSN_ROOT; without a server the test is skipped.
 func WithMySQL(migrationsDir string) Option { return func(o *options) { o.migrations = migrationsDir } }
+
+// WithModels creates the tables of these models (the project's
+// lib/model/mysql structs) in the test database after the migrations, the
+// way the service does at start-up with rt.AutoMigrate. Use it with
+// WithMySQL for the tables the service owns.
+//
+// WithModels 在迁移之后按这些模型（项目 lib/model/mysql 的结构体）建表，和服务启动时的
+// rt.AutoMigrate 一样；和 WithMySQL 一起用，列出本服务拥有的表。
+func WithModels(models ...any) Option {
+	return func(o *options) { o.models = append(o.models, models...) }
+}
 
 // WithTopics creates these Kafka topics up front (the ones the service
 // publishes to or subscribes); auto-creation covers the rest.
@@ -149,6 +161,13 @@ func New(t testing.TB, service string, opts ...Option) *Runtime {
 	if o.migrations != "" {
 		rt.DB = openMySQL(t, service, o.migrations)
 		rt.Config.MySQL.Enabled = true
+		if len(o.models) > 0 {
+			on := true
+			rt.Config.MySQL.AutoMigrate = &on
+			if err := rt.AutoMigrate(o.models...); err != nil {
+				t.Fatalf("testx: WithModels: %v", err)
+			}
+		}
 		rt.Delay = delayx.New(rt.DB, delayx.Config{PollInterval: config.Duration(50 * time.Millisecond)}, service)
 	}
 

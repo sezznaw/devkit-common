@@ -318,6 +318,57 @@ mysql:
   statement is one statement.
 - `rt` belongs to the framework: a service takes from it, never adds to it.
 
+### Schema from the models: `rt.AutoMigrate`
+
+**The table structure lives in the project's `lib/model/mysql`, one Go struct
+per table; the service that owns a table brings it up to date at start-up.**
+No SQL migration files for business tables, no `CREATE TABLE` in a repo:
+
+```go
+// app/app.go
+func Setup(cfg *Config, rt *kitexx.Runtime) (*handler.Impl, error) {
+	if err := rt.AutoMigrate(mysql.Bet{}, mysql.ExportTask{}); err != nil {   // the tables this service owns
+		return nil, err
+	}
+	...
+}
+```
+
+```go
+// lib/model/mysql/bet.go: every field says its column AND its type
+type Bet struct {
+	ID          int64  `gorm:"column:id;type:bigint;primaryKey;autoIncrement"`
+	BetNo       int64  `gorm:"column:bet_no;type:bigint;not null;uniqueIndex:uk_bet_no"`
+	StakeAmount string `gorm:"column:stake_amount;type:decimal(24,3);not null"`
+	SettleTime  int64  `gorm:"column:settle_time;type:bigint;not null;default:0;index:idx_bet_settle_time"`
+}
+func (Bet) TableName() string { return "bet" }
+```
+
+What `rt.AutoMigrate` does: creates a table that is missing; adds the columns
+and indexes a table lacks; logs each difference it fixed (`auto migrate: bet:
+columns added [settle_time]`) or that there was nothing to do. It runs under a
+Redis lock (`lock:<service>:auto-migrate`) so replicas and services starting
+together take turns. A field without an explicit `type:` is refused before
+anything is touched: GORM's default types (`longtext` for a string, `double`
+for a float) are not what an amount column should be.
+
+What it deliberately does **not** do, and a person must: drop or rename a
+column (GORM only adds; a rename becomes a new column next to the old one);
+change a column's type or narrow its length (an ALTER on a table with data
+can fail or truncate); any change that needs data backfilled. Those three go
+through a hand-written migration agreed with whoever runs the database.
+
+Where it is allowed: on in `local` and `dev`, where the schema follows the
+code; off in `uat` and `prod`, where it only logs what differs and the
+release process runs the migration as its own step. `mysql.auto_migrate:
+true|false` overrides. Under `--verify` it does nothing. A table is migrated
+by one service, the one whose domain it is; the others only read it.
+
+Tests: `testx.New(t, "ser-bet", testx.WithMySQL(testx.MigrationsDir()),
+testx.WithModels(mysql.Bet{}))` builds the framework tables from the
+migrations and the service's tables from the models.
+
 ### Redis with `redisx`, and idempotent requests
 
 The `redis:` section works like `mysql:`: `enabled`, `source: static`

@@ -60,6 +60,22 @@ type Config struct {
 	// SlowQuery is the latency from which a query is logged at warn
 	// ("mysql slow query"). Default 200ms.
 	SlowQuery config.Duration `yaml:"slow_query"`
+	// AutoMigrate lets rt.AutoMigrate alter tables at start-up (create a
+	// missing table, add missing columns and indexes). Unset: on in local
+	// and dev, where the schema follows the code; off in uat and prod,
+	// where a release must not alter tables while it rolls out and the
+	// migration is a step of the release instead. true / false overrides.
+	AutoMigrate *bool `yaml:"auto_migrate"`
+}
+
+// AutoMigrateOn says whether rt.AutoMigrate may alter tables: the explicit
+// setting, else by environment (local and dev yes, anything else no).
+func (c Config) AutoMigrateOn() bool {
+	if c.AutoMigrate != nil {
+		return *c.AutoMigrate
+	}
+	env := config.Env()
+	return env == config.LocalEnv || env == "dev"
 }
 
 const (

@@ -205,6 +205,45 @@ mysql:
   `SkipDefaultTransaction` 已开，一条语句就是一条语句。
 - `rt` 属于框架：服务从里面取，不往里加。
 
+### 表结构在模型里：`rt.AutoMigrate`
+
+**表结构写在项目 `lib/model/mysql` 里，一张表一个 Go 结构体；拥有这张表的服务在启动时把表补到和结构体一致。**
+业务表不写 SQL 迁移文件，repo 里不写 `CREATE TABLE`：
+
+```go
+// app/app.go
+func Setup(cfg *Config, rt *kitexx.Runtime) (*handler.Impl, error) {
+	if err := rt.AutoMigrate(mysql.Bet{}, mysql.ExportTask{}); err != nil {   // 本服务拥有的表
+		return nil, err
+	}
+	...
+}
+```
+
+```go
+// lib/model/mysql/bet.go：每个字段写明 column 和 type
+type Bet struct {
+	ID          int64  `gorm:"column:id;type:bigint;primaryKey;autoIncrement"`
+	BetNo       int64  `gorm:"column:bet_no;type:bigint;not null;uniqueIndex:uk_bet_no"`
+	StakeAmount string `gorm:"column:stake_amount;type:decimal(24,3);not null"`
+	SettleTime  int64  `gorm:"column:settle_time;type:bigint;not null;default:0;index:idx_bet_settle_time"`
+}
+func (Bet) TableName() string { return "bet" }
+```
+
+`rt.AutoMigrate` 做的事：缺表建表，缺列、缺索引补上，每处差异打一条日志（`auto migrate: bet: columns added
+[settle_time]`），没差异也说一句。在 Redis 锁（`lock:<服务>:auto-migrate`）里跑，多副本、多服务同时启动也只有一个在改表。
+字段没有显式 `type:` 直接拒绝、不碰库：GORM 的默认类型（string 变 longtext、float 变 double）不是金额列该有的样子。
+
+它**故意不做**、必须由人来做的三类改动：删字段或改字段名（GORM 只加不删，改名会变成旧列旁边多一列）；改字段类型或收窄长度
+（有数据时 ALTER 可能失败或截断）；需要回填数据的变更。这三类走人工迁移，和管数据库的人商量。
+
+在哪开着：`local` 和 `dev` 开，表结构跟着代码走；`uat` 和 `prod` 关，只打印差异，由发布流程把迁移当独立一步跑。
+`mysql.auto_migrate: true|false` 可覆盖。`--verify` 下什么都不做。一张表只由一个服务迁移（它所属的领域），别的服务只读。
+
+测试：`testx.New(t, "ser-bet", testx.WithMySQL(testx.MigrationsDir()), testx.WithModels(mysql.Bet{}))`，
+框架的表来自迁移，服务自己的表来自模型。
+
 ### 用 `redisx` 连 Redis，以及幂等请求
 
 `redis:` 段和 `mysql:` 一模一样：`enabled`、`source: static`（`addr`、`password`、`db`）或 `source: platform`
