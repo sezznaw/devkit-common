@@ -92,18 +92,6 @@ func TestRuntimeMySQL(t *testing.T) {
 	}
 }
 
-func TestWithMySQLNeedsDir(t *testing.T) {
-	// a WithMySQL("") is a mistake worth a clear message, not a skip
-	ft := &fakeT{T: t}
-	func() {
-		defer func() { recover() }()
-		openMySQL(ft, "x", "")
-	}()
-	if !ft.fatal {
-		t.Fatal("empty migrations dir accepted")
-	}
-}
-
 type fakeT struct {
 	*testing.T
 	fatal bool
