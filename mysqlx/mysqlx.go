@@ -64,13 +64,27 @@ type Config struct {
 	// missing table, add missing columns and indexes). Unset: on in local
 	// and dev, where the schema follows the code; off in uat and prod,
 	// where a release must not alter tables while it rolls out and the
-	// migration is a step of the release instead. true / false overrides.
+	// migration is a step of the release instead. true / false overrides,
+	// except in takeover mode, where it is always off.
 	AutoMigrate *bool `yaml:"auto_migrate"`
 }
 
-// AutoMigrateOn says whether rt.AutoMigrate may alter tables: the explicit
-// setting, else by environment (local and dev yes, anything else no).
+// inTakeover reports takeover mode; a variable so the tests can set it.
+var inTakeover = func() bool { return config.Takeover() != nil }
+
+// AutoMigrateOn says whether rt.AutoMigrate may alter tables: never in
+// takeover mode (a developer's local instance on the shared dev database,
+// whose models may hold changes nobody has pushed: the schema of dev
+// follows what is deployed, not what is on someone's machine); else the
+// explicit setting, else by environment (local and dev yes, anything else
+// no).
+//
+// 接管模式下一律不改表：本机实例连的是共享的 dev 库，本地模型里可能有没推送的改动；
+// dev 的表结构只跟部署的代码走。其余按 mysql.auto_migrate，没写按环境（local、dev 开）。
 func (c Config) AutoMigrateOn() bool {
+	if inTakeover() {
+		return false
+	}
 	if c.AutoMigrate != nil {
 		return *c.AutoMigrate
 	}

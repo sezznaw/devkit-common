@@ -54,6 +54,9 @@ func (rt *Runtime) EnsureFrameworkTables() error {
 		return nil
 	}
 	if !cfg.MySQL.AutoMigrateOn() {
+		if takeover() != nil {
+			return fmt.Errorf("kitexx: framework tables missing in the %s database: %s (takeover mode never creates tables there; the service deployed to %s creates them when the feature is on there)", takeover().Env, strings.Join(missing, ", "), takeover().Env)
+		}
 		return fmt.Errorf("kitexx: framework tables missing in this database: %s (auto migrate is off in %s; run the migration step of the release, or set mysql.auto_migrate: true)", strings.Join(missing, ", "), config.Env())
 	}
 	create := func(ctx context.Context) error {
@@ -105,12 +108,16 @@ func (rt *Runtime) EnsureFrameworkTables() error {
 //     there it only reports what it would do and the release process runs
 //     the migration as its own step. `mysql.auto_migrate` overrides.
 //   - Does nothing under --verify (the post-deploy check is read-only).
+//   - Never alters the database in takeover mode: the local instance of
+//     `devkit takeover` runs on the shared dev database, and its models may
+//     hold changes nobody has pushed. It reports the differences instead.
 //
 // AutoMigrate 把这些模型（项目 lib/model/mysql 里的结构体）对应的表补到和结构体一致：缺表建表，
 // 缺列、缺索引补上。每个服务在 app.Setup 里对自己拥有的表调一次；一张表只由一个服务迁移，别的只读。
 // 它不删列、不改名、不收窄类型、不回填数据——这三类改动要人工写迁移；每个字段必须有显式的 type 标签；
 // 开着 Redis 时在锁里跑，多副本、多服务同时启动也只有一个在改表；local / dev 默认开，uat / prod 默认关
-// （只打印差异），conf 的 mysql.auto_migrate 可覆盖；--verify 下什么都不做。
+// （只打印差异），conf 的 mysql.auto_migrate 可覆盖；--verify 下什么都不做；接管模式（devkit takeover）
+// 下永远不改表，只打印差异——本机连的是共享的 dev 库，本地模型里可能有没推送的改动。
 func (rt *Runtime) AutoMigrate(models ...any) error {
 	if rt.DB == nil {
 		return errors.New("kitexx: AutoMigrate needs mysql.enabled: true")
@@ -127,6 +134,18 @@ func (rt *Runtime) AutoMigrate(models ...any) error {
 		return err
 	}
 	if !rt.Config.MySQL.AutoMigrateOn() {
+		if m := takeover(); m != nil {
+			// The shared database is not this developer's to change: say
+			// what differs (queries touching it may fail) and go on.
+			for _, p := range plan {
+				if p.changes() {
+					zlog.Warn("takeover mode does not migrate the "+m.Env+" database: the table differs from your local model; push the model change and deploy the service, then the "+m.Env+" tables follow",
+						zlog.Str("table", p.table), zlog.Str("would", p.String()))
+				}
+			}
+			zlog.Info("auto migrate: off in takeover mode", zlog.Str("env", m.Env), zlog.Int("tables", int64(len(plan))))
+			return nil
+		}
 		for _, p := range plan {
 			if p.changes() {
 				zlog.Warn("auto migrate is off in this environment: the table differs from the model; run the migration step of the release",

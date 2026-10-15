@@ -60,3 +60,20 @@ func TestAgainstMySQL(t *testing.T) {
 	}
 	t.Run("resolve and open", func(t *testing.T) { testResolveAndOpen(t, root) })
 }
+
+func TestAutoMigrateNeverOnInTakeover(t *testing.T) {
+	t.Setenv("APP_ENV", "dev")
+	on := true
+	if !(Config{}).AutoMigrateOn() || !(Config{AutoMigrate: &on}).AutoMigrateOn() {
+		t.Fatal("dev without takeover migrates")
+	}
+	was := inTakeover
+	t.Cleanup(func() { inTakeover = was })
+	inTakeover = func() bool { return true }
+	if (Config{}).AutoMigrateOn() {
+		t.Error("takeover mode must not migrate the shared database")
+	}
+	if (Config{AutoMigrate: &on}).AutoMigrateOn() {
+		t.Error("auto_migrate: true must not override takeover mode")
+	}
+}
