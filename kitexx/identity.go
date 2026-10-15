@@ -39,7 +39,8 @@ func UID(ctx context.Context) (int64, bool) {
 	return uid, err == nil && uid > 0
 }
 
-// Realm of the request's principal: member, admin or agent; "" without one.
+// Realm of the request's principal (member, admin, agent, or a realm of the
+// project's own); "" without one.
 func Realm(ctx context.Context) authx.Realm {
 	v, _ := metainfo.GetPersistentValue(ctx, RealmKey)
 	return authx.Realm(v)

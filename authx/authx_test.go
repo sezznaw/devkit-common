@@ -3,6 +3,7 @@ package authx
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 	"time"
 
@@ -100,6 +101,26 @@ func TestSingleSessionAndRealm(t *testing.T) {
 	}
 	if err := (Config{Enabled: true, Secret: "short"}).Validate(false); err == nil {
 		t.Error("short secret accepted")
+	}
+}
+
+func TestGatewayRealm(t *testing.T) {
+	c := Config{Enabled: true, Secret: strings.Repeat("s", 32)}
+	for _, r := range []Realm{RealmMember, RealmAdmin, RealmAgent, "finance_admin", "ops2"} {
+		c.Realm = r
+		if err := c.Validate(true); err != nil {
+			t.Errorf("realm %q refused: %v", r, err)
+		}
+	}
+	for _, r := range []Realm{"", "Admin", "2fa", "a-b", "a:b", Realm(strings.Repeat("a", 33))} {
+		c.Realm = r
+		if err := c.Validate(true); err == nil {
+			t.Errorf("realm %q accepted", r)
+		}
+	}
+	c.Realm = ""
+	if err := c.Validate(false); err != nil {
+		t.Errorf("the issuing service needs no realm: %v", err)
 	}
 }
 

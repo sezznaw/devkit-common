@@ -22,7 +22,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
-| `authx`   | 登录态：一个认证服务按领域（member、admin、agent）签发 access（JWT，15 分钟）和 refresh（30 天，轮换、检测重放）令牌，会话在 Redis；每个网关本地校验自己领域的令牌加一次 Redis 读，把身份放进上下文（`kitexx.UID(ctx)`，随 RPC 透传）；`hertzx.RequireLogin` 保护 IDL 里没标 `// @public` 的所有接口；详见下文 |
+| `authx`   | 登录态：一个认证服务按领域（member、admin、agent，项目可自加如 finance_admin）签发 access（JWT，15 分钟）和 refresh（30 天，轮换、检测重放）令牌，会话在 Redis；每个网关本地校验自己领域的令牌加一次 Redis 读，把身份放进上下文（`kitexx.UID(ctx)`，随 RPC 透传）；`hertzx.RequireLogin` 保护 IDL 里没标 `// @public` 的所有接口；详见下文 |
 | `s3x`     | 对象存储（dev 是 SeaweedFS，以后可换任何 S3），按 `s3:` 配置：`rt.S3.Put/Get/Stat/List/Delete`、预签名下载和上传链接、公开桶 `rt.S3.Public()`（每个对象一个固定 `URL(key)`），所有文件在服务自己的前缀下；库里只存 key 不存 URL；source static 或本部署的数据源表；每次调用一个 span 和一条指标；详见下文 |
 | `httpx`   | 调外部 HTTP 接口（resty + otelhttp）：`providers:` 里登记 base URL、超时、重试、来自环境变量的头；`rt.Provider("odds-feed").GetJSON(ctx, path, &out)`；trace 带过去，每次调用一条不含密钥的日志，指标；有 providers 的服务必须部署在 provider namespace；详见下文 |
 | `webhookx` | 厂商回调我们（支付结果、赛果结算），在 provider namespace 的 Hertz 服务上：`webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`；来源 IP、验签（hmac-sha256、basic 或厂商私有 Verifier）、原始报文留档到 Kafka、按事件 id 用 Redis 去重、handler 出错回 500 让厂商重试、指标；详见下文 |
@@ -514,7 +514,7 @@ IDL 侧是 `common.Money {string amount, string currency}`（项目的 `idl/comm
 auth:
   enabled: true
   secret: "${AUTH_JWT_SECRET}"   # 认证服务和每个网关同一个值；至少 32 字符
-  realm: member                  # 网关填：服务哪类主体（member | admin | agent）
+  realm: member                  # 网关填：服务哪类主体（member | admin | agent，或项目自己的领域名，小写字母数字下划线）
   access_ttl: 15m
   refresh_ttl: 720h
   single_session: true           # 新登录顶掉旧会话

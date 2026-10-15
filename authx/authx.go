@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -29,8 +30,19 @@ import (
 )
 
 // Realm is the kind of principal a token stands for. Each gateway accepts
-// one realm; a member's token is never valid at the staff gateway.
+// one realm; a member's token is never valid at the staff gateway. The
+// three below are the usual ones; a project names more (a second back
+// office with its own accounts, say "finance_admin") by using them in the
+// issuing service and in a gateway's auth.realm: a realm is any name of
+// lowercase letters, digits and underscores, starting with a letter, up to
+// 32 characters (it goes into Redis keys and the token).
 type Realm string
+
+// realmName is the shape of a realm name.
+var realmName = regexp.MustCompile(`^[a-z][a-z0-9_]{0,31}$`)
+
+// Valid says whether r is a usable realm name.
+func (r Realm) Valid() bool { return realmName.MatchString(string(r)) }
 
 const (
 	RealmMember Realm = "member"
@@ -50,8 +62,9 @@ type Config struct {
 	Secret string `yaml:"secret"`
 	// Issuer is the `iss` claim, default "sportsbook".
 	Issuer string `yaml:"issuer"`
-	// Realm is the principal kind this gateway accepts: member, admin or
-	// agent. Required for a gateway; the issuing service leaves it empty.
+	// Realm is the principal kind this gateway accepts: member, admin,
+	// agent, or a realm of the project's own (see Realm). Required for a
+	// gateway; the issuing service leaves it empty.
 	Realm Realm `yaml:"realm"`
 	// AccessTTL is the life of an access token, default 15m.
 	AccessTTL config.Duration `yaml:"access_ttl"`
@@ -87,10 +100,11 @@ func (c Config) Validate(verifier bool) error {
 		return fmt.Errorf("authx: auth.secret must be at least 32 characters (it comes from AUTH_JWT_SECRET; is the variable set?)")
 	}
 	if verifier {
-		switch c.Realm {
-		case RealmMember, RealmAdmin, RealmAgent:
-		default:
-			return fmt.Errorf("authx: auth.realm %q: a gateway serves one of member, admin, agent", c.Realm)
+		if c.Realm == "" {
+			return fmt.Errorf("authx: auth.realm is required for a gateway (member, admin, agent, or a realm of the project's own)")
+		}
+		if !c.Realm.Valid() {
+			return fmt.Errorf("authx: auth.realm %q: lowercase letters, digits and underscores, starting with a letter, at most 32 characters", c.Realm)
 		}
 	}
 	return nil
