@@ -260,9 +260,27 @@ func (Bet) TableName() string { return "bet" }
 - 第一次还在执行中又来一次：业务码 1002
 - `request_id` 留空：业务码 1003
 - handler 返回 error：丢掉这个 id，调用方可以重试
-- 没有开 `redis.enabled`：业务码 5002，请求被拒绝——转账执行两次比拒绝更糟
+- 没有开 `redis.enabled`：服务启动时就拒绝启动并列出这些方法（v0.52.3 起）；万一跑起来了，请求一律 5002——转账执行两次比拒绝更糟
 
 没有 `request_id` 字段的方法不受影响。
+
+**往下游传 `request_id`**（v0.53.0 起）：handler 处理一个带 `request_id` 的请求时又调了别的服务的写方法，下游的 id
+必须是这个 id 或由它派生，上游重试时下游才认得出是同一次。框架把收到的 id 放进 ctx（RPC 由幂等中间件放，
+网关由 `hertzx.New` 装的 `RequestID()` 从请求体取），提供：
+
+- `kitexx.RequestID(ctx)`：当前请求的 id，照原样传下去
+- `kitexx.SubRequestID(ctx, "fee")`：同一请求里对同一个方法调两次时各用各的（`<id>:fee`、`<id>:stake`），part 是业务含义，不是重试计数
+- `kitexx.WithRequestID(ctx, id)`：job、事件消费者、延时任务没有上游 id，自己定一个每次重跑都相同的（`"settle:"+matchID`、`"event:"+ev.ID`）
+
+`ClientOptions` 装的客户端中间件 `ClientRequestID` 在发出前检查，不对就不发、返回错误并记 Error 日志：
+
+- id 为空
+- 在一个带 id 的请求里，传了不是由它派生的 id（新生成的 UUID、时间戳）——重试时下游会再执行一次
+- 同一请求里用同一个 id 调同一个方法第二次——下游只会回放第一次的结果
+- 调用失败后用同一个 id 重试是允许的，这正是幂等的用途
+
+`devkit lint` 的 `request-id-source` 规则在写代码时拦同样的错：`RequestId` 字段只能取自请求（`req.RequestId`、
+`req.GetRequestId()`）或这几个函数。
 
 ### 锁与缓存 `redisx`
 

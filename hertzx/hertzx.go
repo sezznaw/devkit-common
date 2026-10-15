@@ -90,6 +90,8 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 		debug = cfg.DevRoute.Timeout()
 	}
 	h.Use(Guard(h, cfg.Guard, rt.Redis, cfg.Service.Name, debug))
+	// after the guard's body limit: the request_id of the body, for the RPC calls
+	h.Use(RequestID())
 	zlog.Info("guard on", zlog.Int("max_body_bytes", int64(cfg.Guard.MaxBody())), zlog.Dur("timeout", cfg.Guard.RequestTimeout()), zlog.Str("rate_per_ip", cfg.Guard.PerIP().String()))
 	return h, nil
 }

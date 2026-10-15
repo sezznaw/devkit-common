@@ -64,6 +64,8 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 			if id == "" {
 				return BizError(ctx, kerrors.NewBizStatusError(CodeRequestIDRequired, "request_id is required"))
 			}
+			// the writes this handler makes downstream carry this id (ClientRequestID)
+			ctx = WithRequestID(ctx, id)
 			if rdb == nil {
 				zlog.Ctx(ctx).Error("idempotent request but redis.enabled is false", zlog.Str("request_id", id))
 				return BizError(ctx, kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store is not configured"))

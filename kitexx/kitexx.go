@@ -347,6 +347,7 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 		client.WithMetaHandler(transmeta.ClientTTHeaderHandler),
 		client.WithMiddleware(ClientTracing()),
 		client.WithMiddleware(ClientMetrics()),
+		client.WithMiddleware(ClientRequestID()),
 	}, rpcClientOptions(cfg)...)
 	if cfg.Service.Name != "" {
 		// Who is calling: the "from" of the request log of the service called.

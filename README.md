@@ -392,10 +392,42 @@ requests to carry a `request_id`. Give the Req struct in the IDL a
 - the same id while the first call is still running: business code 1002
 - an empty `request_id`: 1003
 - an error from the handler drops the id, so the caller can retry
-- `redis.enabled` false: 5002, the request is refused; running a transfer
-  twice is worse than refusing it
+- `redis.enabled` false: the service refuses to start and names those
+  methods (since v0.52.3); should one run anyway, every such request is
+  refused with 5002; running a transfer twice is worse than refusing it
 
 Methods without the field are untouched.
+
+**Passing `request_id` downstream** (since v0.53.0): a handler serving a
+request with a `request_id` that calls another service's write method passes
+that id, or one derived from it, so a retry of the request repeats the same
+downstream ids. The framework puts the incoming id into ctx (the idempotency
+middleware for an RPC, `hertzx.RequestID()` from the body for a gateway,
+installed by `hertzx.New`):
+
+- `kitexx.RequestID(ctx)`: the id of the request being handled; pass it on
+- `kitexx.SubRequestID(ctx, "fee")`: one id per call when one request calls
+  the same method more than once (`<id>:fee`, `<id>:stake`); the part names
+  the call, it is never an attempt counter
+- `kitexx.WithRequestID(ctx, id)`: a job, an event consumer or a delayed
+  task has no incoming id and sets one that is the same on every rerun
+  (`"settle:"+matchID`, `"event:"+ev.ID`)
+
+The client middleware `ClientRequestID` (in `ClientOptions`) checks every
+such call before it is sent and refuses it, with an error and an Error
+record, when:
+
+- the id is empty
+- inside a request with an id, the id is not derived from it (a fresh UUID,
+  a timestamp): a retry would run the call again
+- the same method is called twice with the same id in one request: the
+  service would only replay the first result
+- a failed call may be made again with the same id: that is the retry
+  idempotency is for
+
+`devkit lint` rule `request-id-source` catches the same at writing time: a
+`RequestId` field takes its value from the request (`req.RequestId`,
+`req.GetRequestId()`) or from these functions.
 
 ### Locks and caches with `redisx`
 
