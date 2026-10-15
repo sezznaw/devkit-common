@@ -6,10 +6,13 @@ import (
 	"errors"
 	"fmt"
 	"reflect"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/cloudwego/kitex/pkg/endpoint"
 	"github.com/cloudwego/kitex/pkg/kerrors"
+	"github.com/cloudwego/kitex/pkg/serviceinfo"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/sezznaw/devkit-common/zlog"
@@ -44,8 +47,9 @@ type requestWithID interface{ GetRequestId() string }
 // the API conventions ask of money and state-changing requests.
 //
 // The store is Runtime.Redis; a service that has such methods must enable
-// Redis, or every such request is refused (5002): executing a transfer twice
-// is worse than refusing it. Methods without the field pass through
+// Redis, or Runtime.Run refuses to start it (and, should one run anyway,
+// every such request is refused with 5002): executing a transfer twice is
+// worse than refusing it. Methods without the field pass through
 // untouched. An error from the handler drops the id, so the caller can retry.
 func (rt *Runtime) Idempotency() endpoint.Middleware {
 	rdb := rt.Redis
@@ -105,6 +109,38 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 			return nil
 		}
 	}
+}
+
+// checkIdempotencyStore refuses to start a service that has idempotent
+// methods (a request_id field) and no Redis: every call of those would be
+// refused with 5002, found at the first click instead of at deploy time.
+func (rt *Runtime) checkIdempotencyStore(svcs map[string]*serviceinfo.ServiceInfo) error {
+	if rt.Redis != nil {
+		return nil
+	}
+	methods := idempotentMethods(svcs)
+	if len(methods) == 0 {
+		return nil
+	}
+	return fmt.Errorf("kitexx: %s take a request_id (idempotent) and need Redis, which is off; set redis.enabled: true in conf/<env>.yaml", strings.Join(methods, ", "))
+}
+
+// idempotentMethods lists, sorted, the methods whose request has a request_id
+// field: the ones the Idempotency middleware handles.
+func idempotentMethods(svcs map[string]*serviceinfo.ServiceInfo) []string {
+	var names []string
+	for _, svc := range svcs {
+		for name, mi := range svc.Methods {
+			if mi == nil {
+				continue
+			}
+			if _, ok := firstArgument(mi.NewArgs()).(requestWithID); ok {
+				names = append(names, name)
+			}
+		}
+	}
+	sort.Strings(names)
+	return names
 }
 
 // pending marks a request_id whose first call is running.

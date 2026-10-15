@@ -381,6 +381,10 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 // gives in-flight requests up to drain_timeout. Only after all of that does
 // svr.Run return, which is when the OnShutdown hooks run.
 func (rt *Runtime) Run(svr server.Server) error {
+	if err := rt.checkIdempotencyStore(svr.GetServiceInfos()); err != nil {
+		zlog.Error("cannot start", zlog.Err(err))
+		return err
+	}
 	if err := RunStarters(rt); err != nil {
 		zlog.Error("cannot start", zlog.Err(err))
 		return err

@@ -3,8 +3,11 @@ package kitexx
 import (
 	"context"
 	"errors"
-	"github.com/cloudwego/kitex/pkg/rpcinfo"
+	"strings"
 	"testing"
+
+	"github.com/cloudwego/kitex/pkg/rpcinfo"
+	"github.com/cloudwego/kitex/pkg/serviceinfo"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/cloudwego/kitex/pkg/kerrors"
@@ -160,4 +163,27 @@ func bizOf(ctx context.Context, err error) int32 {
 		return biz.BizStatusCode()
 	}
 	return 0
+}
+
+func TestCheckIdempotencyStore(t *testing.T) {
+	newResult := func() any { return &transferResult{} }
+	svcs := map[string]*serviceinfo.ServiceInfo{"Wallet": {Methods: map[string]serviceinfo.MethodInfo{
+		"Transfer": serviceinfo.NewMethodInfo(nil, func() any { return &transferArgs{} }, newResult, false),
+		"Refund":   serviceinfo.NewMethodInfo(nil, func() any { return &transferArgs{} }, newResult, false),
+		"Balance":  serviceinfo.NewMethodInfo(nil, func() any { return &plainArgs{} }, newResult, false),
+	}}}
+
+	err := (&Runtime{}).checkIdempotencyStore(svcs)
+	if err == nil || !strings.Contains(err.Error(), "Refund, Transfer take a request_id") {
+		t.Fatalf("no redis, idempotent methods: %v", err)
+	}
+	delete(svcs["Wallet"].Methods, "Transfer")
+	delete(svcs["Wallet"].Methods, "Refund")
+	if err := (&Runtime{}).checkIdempotencyStore(svcs); err != nil {
+		t.Fatalf("no idempotent methods: %v", err)
+	}
+	svcs["Wallet"].Methods["Transfer"] = serviceinfo.NewMethodInfo(nil, func() any { return &transferArgs{} }, newResult, false)
+	if err := runtimeWithRedis(t).checkIdempotencyStore(svcs); err != nil {
+		t.Fatalf("with redis: %v", err)
+	}
 }
