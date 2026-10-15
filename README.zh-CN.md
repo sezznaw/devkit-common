@@ -23,7 +23,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
 | `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
 | `authx`   | 登录态：一个认证服务按领域（member、admin、agent）签发 access（JWT，15 分钟）和 refresh（30 天，轮换、检测重放）令牌，会话在 Redis；每个网关本地校验自己领域的令牌加一次 Redis 读，把身份放进上下文（`kitexx.UID(ctx)`，随 RPC 透传）；`hertzx.RequireLogin` 保护 IDL 里没标 `// @public` 的所有接口；详见下文 |
-| `s3x`     | 对象存储（dev 是 SeaweedFS，以后可换任何 S3），按 `s3:` 配置：`rt.S3.Put/Get/Stat/List/Delete`、预签名下载和上传链接，所有文件在服务自己的前缀下；source static 或本部署的数据源表；每次调用一个 span 和一条指标；详见下文 |
+| `s3x`     | 对象存储（dev 是 SeaweedFS，以后可换任何 S3），按 `s3:` 配置：`rt.S3.Put/Get/Stat/List/Delete`、预签名下载和上传链接、公开桶 `rt.S3.Public()`（每个对象一个固定 `URL(key)`），所有文件在服务自己的前缀下；库里只存 key 不存 URL；source static 或本部署的数据源表；每次调用一个 span 和一条指标；详见下文 |
 | `httpx`   | 调外部 HTTP 接口（resty + otelhttp）：`providers:` 里登记 base URL、超时、重试、来自环境变量的头；`rt.Provider("odds-feed").GetJSON(ctx, path, &out)`；trace 带过去，每次调用一条不含密钥的日志，指标；有 providers 的服务必须部署在 provider namespace；详见下文 |
 | `webhookx` | 厂商回调我们（支付结果、赛果结算），在 provider namespace 的 Hertz 服务上：`webhookx.Handle(rt, h, "pay", "/callbacks/pay/paid", onPaid)`；来源 IP、验签（hmac-sha256、basic 或厂商私有 Verifier）、原始报文留档到 Kafka、按事件 id 用 Redis 去重、handler 出错回 500 让厂商重试、指标；详见下文 |
 | `metricsx` | Prometheus 指标，单独端口（`metrics.enabled`，默认 9091）：Kitex/Hertz 每个方法的请求数、结果码、耗时直方图，对外 RPC 调用，Go 运行时，MySQL 连接池，Redis 命令，Kafka 事件；由部署抓取；详见下文 |
@@ -325,24 +325,34 @@ handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<�
 ```yaml
 s3:
   enabled: true
-  source: platform      # dev / uat / prod：数据源表 kind=s3 那行（地址、桶、密钥变量名）
-  # source: static      # 本机：docker run -d -p 8333:8333 chrislusf/seaweedfs server -s3
+  source: platform      # dev / uat / prod：数据源表 kind=s3 那行（地址、两个桶、对外地址、密钥变量名）
+  # source: static      # 本机：infra/local/local.sh up --full（SeaweedFS 8333，两个桶都建好）
   # endpoint: "http://127.0.0.1:8333"
-  # bucket: sportsbook-dev-assets
-  # prefix: ser-user    # 默认是服务名；所有 key 都在它下面
+  # bucket: sportsbook-local-assets          # 私密桶：证件、凭证、导出；用 PresignGet 临时链接给出去
+  # public_bucket: sportsbook-local-public   # 公开桶（谁都能读）：头像、banner、logo；直接给 URL
+  # public_endpoint: "http://127.0.0.1:8333" # 浏览器能访问到的 S3 地址（默认同 endpoint）
+  # public_url: ""                           # 公开桶前面有 CDN 时填它，替代 <public_endpoint>/<public_bucket>
+  # prefix: ser-user    # 默认是服务名；两个桶里的 key 都在它下面
 ```
 
 ```go
-err  := rt.S3.Put(ctx, "avatars/42.png", file, "image/png")
+// 私密文件（rt.S3）：只有服务和本人能看，客户端拿到的是带有效期的链接。
+err  := rt.S3.Put(ctx, "kyc/42/front.jpg", file, "image/jpeg")
 data, err := rt.S3.GetBytes(ctx, "kyc/42/front.jpg")                    // Get 是流式，Stat 看大小和类型，PutBytes 收 []byte
 url, err  := rt.S3.PresignGet(ctx, "exports/2026-10.xlsx", 10*time.Minute)   // 客户端直接下载
-url, err  := rt.S3.PresignPut(ctx, "avatars/42.png", "image/png", 5*time.Minute) // 客户端直接上传
-objs, err := rt.S3.List(ctx, "avatars", 100)
-err  = rt.S3.Delete(ctx, "avatars/42.png")
+url, err  := rt.S3.PresignPut(ctx, "kyc/42/front.jpg", "image/jpeg", 5*time.Minute) // 客户端直接上传，再把 key 提交上来
+objs, err := rt.S3.List(ctx, "kyc/42", 100)
+err  = rt.S3.Delete(ctx, "kyc/42/front.jpg")
+// 公开文件（rt.S3.Public()，没配公开桶时是 nil）：浏览器直接显示的东西。
+pub := rt.S3.Public()
+url, err  := pub.PresignPut(ctx, "avatars/42.png", "image/png", 5*time.Minute)   // 上传链接；客户端 PUT 完把 key 提交上来
+resp.AvatarUrl = pub.URL(row.AvatarKey)                                  // "http://s3.example.com/sportsbook-dev-public/ser-member/avatars/42.png"
 ```
 
-一套部署一个桶，一个服务一个前缀（默认服务名），服务之间碰不到彼此的文件；key 是 "avatars/42.png" 这样的路径。
-不存在返回 `s3x.ErrNotFound`。大文件走预签名链接，不经过服务。其他需求用 `rt.S3.Raw()` 拿 AWS SDK 客户端。
+一套部署两个桶，一个服务一个前缀（默认服务名，两个桶一样），服务之间碰不到彼此的文件；key 是 "avatars/42.png" 这样的路径。
+**库里只存 key，不存 URL**（列名 `avatar_key`，不是 `avatar_url`）：URL 在写响应时按配置拼出来，换域名、换桶、加 CDN 不用动任何一行数据。
+响应里给 `<名>_url`（公开文件用 `URL`，私密文件用 `PresignGet`），写请求里传 `<名>_key`。上传不经过网关（请求体限 1 MiB）：`PresignPut` 给客户端一个直接 PUT 的链接。
+不存在返回 `s3x.ErrNotFound`。其他需求用 `rt.S3.Raw()` 拿 AWS SDK 客户端。
 每次调用是一个 span（otelaws）、一条 debug 日志和 `s3_requests_total{op, status}` / `s3_request_duration_seconds`。
 dev 的凭证是 SeaweedFS 的 admin 身份，放在 `app-datasources`（S3_ACCESS_KEY_ID / S3_SECRET_ACCESS_KEY）；正式环境给业务
 单独建一个只能访问这个桶的身份。

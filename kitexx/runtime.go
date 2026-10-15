@@ -53,6 +53,9 @@ type Runtime struct {
 	Centrifugo *centrifugox.Client
 	// S3 is the object storage, nil when s3.enabled is false: Put, Get,
 	// Stat, List, Delete and presigned URLs, all under the service's prefix.
+	// Private files live here and go out as PresignGet URLs; files any
+	// browser may show go to S3.Public() (the public bucket), whose URL(key)
+	// is what a response carries. The database stores keys, never URLs.
 	S3 *s3x.Client
 	// Report is the report database (StarRocks, a copy of the business
 	// tables a few seconds behind), nil unless report.enabled: Query and
@@ -148,7 +151,11 @@ func (rt *Runtime) openS3() error {
 		return err
 	}
 	rt.S3 = cli
-	zlog.Info("s3 connected", zlog.Str("endpoint", target.Endpoint), zlog.Str("bucket", target.Bucket), zlog.Str("prefix", cli.Prefix()), zlog.Str("source", cfg.S3.SourceName()))
+	fields := []zlog.Field{zlog.Str("endpoint", target.Endpoint), zlog.Str("bucket", target.Bucket), zlog.Str("prefix", cli.Prefix()), zlog.Str("source", cfg.S3.SourceName())}
+	if pub := cli.Public(); pub != nil {
+		fields = append(fields, zlog.Str("public_bucket", pub.Bucket()), zlog.Str("public_url", pub.URL("")))
+	}
+	zlog.Info("s3 connected", fields...)
 	return nil
 }
 

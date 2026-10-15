@@ -4,6 +4,14 @@
 // whether a service has it (`s3.enabled`) and where (static, or the
 // deployment's datasource table); the Runtime opens it; `rt.S3` is the
 // client. Every call is a span, a log record at debug and a metric.
+//
+// Two buckets, one rule for the files of a product: the private bucket
+// (rt.S3) holds what only the service and the owner may see (documents,
+// exports) and hands it out as presigned URLs with a lifetime; the public
+// bucket (rt.S3.Public()) holds what any browser may show (avatars, banners,
+// logos) and has a plain URL per object (URL). The database stores the key
+// in both cases, never a URL: the URL is built when a response is written,
+// so a change of domain, bucket or CDN is a change of configuration.
 package s3x
 
 import (
@@ -51,6 +59,20 @@ type Config struct {
 	// service name. Every key a service uses is under it, so services do
 	// not step on each other's files.
 	Prefix string `yaml:"prefix"`
+	// PublicBucket is the bucket anyone may read (the deployment makes it
+	// anonymous-read): files a browser shows. Same prefix rule. Empty: no
+	// public bucket, Public() is nil. With source platform it comes from
+	// the datasource row (params public_bucket).
+	PublicBucket string `yaml:"public_bucket"`
+	// PublicEndpoint is the S3 address browsers reach, when Endpoint is an
+	// address inside the cluster: presigned URLs are signed for it and the
+	// public bucket's URLs are built on it. Default: Endpoint. With source
+	// platform: params public_endpoint.
+	PublicEndpoint string `yaml:"public_endpoint"`
+	// PublicURL replaces "<PublicEndpoint>/<PublicBucket>" as the base of
+	// the public bucket's URLs: a CDN in front of the bucket. With source
+	// platform: params public_url.
+	PublicURL string `yaml:"public_url"`
 	// Timeout of one request. Default 30s (uploads can be large).
 	Timeout config.Duration `yaml:"timeout"`
 }
@@ -91,23 +113,30 @@ type Target struct {
 	SecretKey string
 	Region    string
 	PathStyle bool
+	// PublicBucket, PublicEndpoint, PublicURL: see Config.
+	PublicBucket   string
+	PublicEndpoint string
+	PublicURL      string
 }
 
 // Static is the Target of a static configuration.
 func (c Config) Static() Target {
-	return Target{Endpoint: c.Endpoint, Bucket: c.Bucket, AccessKey: c.AccessKey, SecretKey: c.SecretKey, Region: c.Region, PathStyle: c.PathStyle == nil || *c.PathStyle}
+	return Target{Endpoint: c.Endpoint, Bucket: c.Bucket, AccessKey: c.AccessKey, SecretKey: c.SecretKey, Region: c.Region, PathStyle: c.PathStyle == nil || *c.PathStyle,
+		PublicBucket: c.PublicBucket, PublicEndpoint: c.PublicEndpoint, PublicURL: c.PublicURL}
 }
 
 // TargetFromRow builds the Target from a datasource row of kind s3: host and
 // port, db_name as the bucket, the access key from the variable named by
 // password_env (already read: accessKey), and params
-// "path_style=true&insecure=true&secret_env=S3_SECRET_ACCESS_KEY".
+// "path_style=true&insecure=true&secret_env=S3_SECRET_ACCESS_KEY
+// &public_bucket=<bucket>&public_endpoint=http://s3.example.com&public_url=https://cdn.example.com".
 func TargetFromRow(addr, bucket, accessKey, params string, getenv func(string) string) (Target, error) {
 	q, err := url.ParseQuery(params)
 	if err != nil {
 		return Target{}, fmt.Errorf("s3x: datasource params %q: %w", params, err)
 	}
-	t := Target{Bucket: bucket, AccessKey: accessKey, PathStyle: q.Get("path_style") != "false", Region: q.Get("region")}
+	t := Target{Bucket: bucket, AccessKey: accessKey, PathStyle: q.Get("path_style") != "false", Region: q.Get("region"),
+		PublicBucket: q.Get("public_bucket"), PublicEndpoint: q.Get("public_endpoint"), PublicURL: q.Get("public_url")}
 	scheme := "https"
 	if q.Get("insecure") == "true" {
 		scheme = "http"
@@ -131,6 +160,8 @@ type Client struct {
 	bucket  string
 	prefix  string
 	timeout time.Duration
+	public  *Client // the public bucket, nil without one
+	baseURL string  // the public bucket's URL base ("" on the private bucket)
 }
 
 // Object is what Stat and Get say about an object.
@@ -168,22 +199,88 @@ func Open(ctx context.Context, t Target, cfg Config, service string) (*Client, e
 		o.BaseEndpoint = aws.String(t.Endpoint)
 		o.UsePathStyle = t.PathStyle
 	})
+	// Presigned URLs are for browsers: signed for the public endpoint when
+	// the service reaches S3 by an address browsers cannot.
+	publicEndpoint := strings.TrimRight(t.PublicEndpoint, "/")
+	presign := s3.NewPresignClient(api)
+	if publicEndpoint != "" && publicEndpoint != strings.TrimRight(t.Endpoint, "/") {
+		ext := s3.NewFromConfig(awsCfg, func(o *s3.Options) {
+			o.BaseEndpoint = aws.String(publicEndpoint)
+			o.UsePathStyle = t.PathStyle
+		})
+		presign = s3.NewPresignClient(ext)
+	}
 	prefix := strings.Trim(cfg.Prefix, "/")
 	if prefix == "" {
 		prefix = service
 	}
-	c := &Client{api: api, presign: s3.NewPresignClient(api), bucket: t.Bucket, prefix: prefix, timeout: cfg.Timeout.Or(defaultTimeout)}
+	timeout := cfg.Timeout.Or(defaultTimeout)
+	c := &Client{api: api, presign: presign, bucket: t.Bucket, prefix: prefix, timeout: timeout}
 	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	if _, err := api.HeadBucket(hctx, &s3.HeadBucketInput{Bucket: aws.String(t.Bucket)}); err != nil {
 		return nil, fmt.Errorf("s3x: bucket %q at %s: %w (does it exist, and are the keys right?)", t.Bucket, t.Endpoint, err)
 	}
+	if t.PublicBucket != "" {
+		if t.PublicBucket == t.Bucket {
+			return nil, fmt.Errorf("s3x: the public bucket must not be the private one (%q): what is in it is readable by anyone", t.Bucket)
+		}
+		base := strings.TrimRight(t.PublicURL, "/")
+		if base == "" {
+			ep := publicEndpoint
+			if ep == "" {
+				ep = strings.TrimRight(t.Endpoint, "/")
+			}
+			base = publicBase(ep, t.PublicBucket, t.PathStyle)
+		}
+		if _, err := api.HeadBucket(hctx, &s3.HeadBucketInput{Bucket: aws.String(t.PublicBucket)}); err != nil {
+			return nil, fmt.Errorf("s3x: public bucket %q at %s: %w (does it exist, and are the keys right?)", t.PublicBucket, t.Endpoint, err)
+		}
+		c.public = &Client{api: api, presign: presign, bucket: t.PublicBucket, prefix: prefix, timeout: timeout, baseURL: base}
+	}
 	return c, nil
+}
+
+// publicBase is where the objects of a bucket are read without a signature:
+// "<endpoint>/<bucket>" in path style, "<scheme>://<bucket>.<host>" otherwise.
+func publicBase(endpoint, bucket string, pathStyle bool) string {
+	if pathStyle {
+		return endpoint + "/" + bucket
+	}
+	if u, err := url.Parse(endpoint); err == nil && u.Host != "" {
+		return u.Scheme + "://" + bucket + "." + u.Host
+	}
+	return endpoint + "/" + bucket
 }
 
 // Bucket and Prefix say where the files are.
 func (c *Client) Bucket() string { return c.bucket }
 func (c *Client) Prefix() string { return c.prefix }
+
+// Public is the public bucket through the same prefix: files any browser
+// may show. Put there what is for everyone; URL gives its address. Nil
+// when the configuration has no public bucket (s3.public_bucket, or the
+// datasource row's public_bucket param).
+func (c *Client) Public() *Client { return c.public }
+
+// IsPublic says whether this client is the public bucket.
+func (c *Client) IsPublic() bool { return c.baseURL != "" }
+
+// URL is the address of an object in the public bucket, what a response
+// carries in a `<name>_url` field (the database keeps the key). Built from
+// the configuration, so a change of domain or CDN changes nothing stored.
+// "" on the private bucket: its files go out through PresignGet.
+func (c *Client) URL(key string) string {
+	if c.baseURL == "" {
+		return ""
+	}
+	full := c.full(key)
+	parts := strings.Split(full, "/")
+	for i, p := range parts {
+		parts[i] = url.PathEscape(p)
+	}
+	return c.baseURL + "/" + strings.Join(parts, "/")
+}
 
 // Raw is the SDK client, for anything the methods below do not cover.
 func (c *Client) Raw() *s3.Client { return c.api }

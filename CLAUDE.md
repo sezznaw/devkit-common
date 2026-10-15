@@ -532,7 +532,17 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   that service must not carry the office-only middleware.
 - `s3x`: aws-sdk-go-v2 s3 with `otelaws.AppendMiddlewares`, BaseEndpoint +
   UsePathStyle (SeaweedFS), static credentials. `Open` does HeadBucket (the
-  bucket must exist; the chart's createBuckets makes them). `Client.full`
+  bucket must exist; the chart's createBuckets makes them). Since v0.52.0 a
+  second, public bucket (`public_bucket`, anonymous-read in the deployment)
+  is a second `Client` on the same api/prefix with `baseURL` set (`URL(key)`
+  builds `<public_url | public_endpoint/bucket>/<prefix>/<key>`, path
+  segments escaped); presigning uses a second SDK client on
+  `public_endpoint` when it differs from the in-cluster endpoint, because a
+  SigV4 URL is bound to the host it was signed for. The public bucket must
+  differ from the private one (refused at Open). The datasource row carries
+  all three as params (`public_bucket`, `public_endpoint`, `public_url`).
+  The rule the owner set on 2026-10-15: the database stores keys, responses
+  carry URLs built at write time, clients never concatenate. `Client.full`
   prefixes every key with the service's prefix (default service name); all
   methods go through `do` (timeout, metric `s3_requests_total{op,status}`
   with status ok / not_found / error, debug or error record). `Get` uses
