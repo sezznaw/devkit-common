@@ -508,6 +508,12 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   credentials are the deployment's environment (Secret `provider-secrets`),
   no per-tenant lookup; `TENANT_CODE` and the "platform" database were kept
   with their comments re-characterised as this deployment's registry.
+  `redact.go` (v0.53.1): query parameter values are masked (`key=***`) in
+  everything httpx logs or returns — the record's `err`, the resty logger
+  bridge, `do`'s wrapped error, `StatusError.Path/Body` — because vendors
+  put API keys in the query and net/http quotes the full URL in its errors;
+  found on 2026-10-16 when a Juhe key reached the dev logs. The cause stays
+  reachable through Unwrap (`redactedError`).
 - `webhookx` (inbound callbacks) and `httpx.Callback` (its config under
   the provider): `Handle(rt, h, provider, path, handler, opts...)` registers
   POST and PUT on the Hertz engine; order in `serve` is cidr → size →
