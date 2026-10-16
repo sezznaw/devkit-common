@@ -607,7 +607,7 @@ machine only (APP_ENV local); a deployment ignores it with a warning.
 Every call carries the trace (a client span `GET odds-feed /v1/odds`, the
 W3C traceparent in the request), writes one record with the trace_id
 (provider, method, path without the query string, status, latency,
-attempt; never headers or bodies), and counts
+attempt; never headers or bodies; query parameter values in error text are masked as `***`, since vendors keep API keys there, and the error handed back to the caller is masked the same way), and counts
 `http_client_requests_total{provider, http_method, status}` /
 `http_client_duration_seconds`. A non-2xx answer is a `*httpx.StatusError`
 with the status and the first bytes of the body. Only the business

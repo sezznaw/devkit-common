@@ -421,7 +421,7 @@ oauth2 是 client credentials 流程，token 缓存并在过期前刷新。hmac-
 deadline。`debug: true` 把每次请求响应连头和 body 打到日志，只在本机（APP_ENV local）生效；部署环境忽略并告警。
 
 每次调用都带 trace（client span `GET odds-feed /v1/odds`，请求头里有 W3C traceparent），写一条带 trace_id 的日志
-（provider、方法、不含查询串的路径、状态码、耗时、第几次尝试；绝不记头和 body），并计数
+（provider、方法、不含查询串的路径、状态码、耗时、第几次尝试；绝不记头和 body；错误文本里 URL 查询参数的值一律打成 `***`，因为厂商的 key 常放在那里，返回给调用方的错误也已打码），并计数
 `http_client_requests_total{provider, http_method, status}` / `http_client_duration_seconds`。
 非 2xx 的响应是 `*httpx.StatusError`，带状态码和 body 的前几百字节。业务 namespace 不能出网，所以有 `providers:` 的服务
 必须部署到 `-provider` namespace：`NewRuntime` 读 `POD_NAMESPACE`，放错了拒绝启动并告诉你搬到哪。

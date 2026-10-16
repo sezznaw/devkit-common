@@ -228,7 +228,7 @@ func (c *Client) record(req *resty.Request, status int, took time.Duration, err 
 	log := zlog.Ctx(req.Context())
 	switch {
 	case err != nil:
-		log.Error("http call failed", append(fields, zlog.Err(err))...)
+		log.Error("http call failed", append(fields, zlog.Err(redactErr(err)))...)
 	case status >= 500:
 		log.Error("http call", fields...)
 	case status >= 400:
@@ -256,23 +256,29 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 		r.SetBody(body).SetHeader("Content-Type", "application/json")
 	}
 	resp, err := r.Execute(method, path)
+	// What goes back to the caller has query values masked (see redact.go):
+	// the caller will log it, and the key is in the query.
+	// 返回给调用方的错误里查询参数的值已打码（见 redact.go）：调用方会把它记进日志，而 key 就在查询串里。
+	safePath := redactQuery(path)
 	if err != nil {
-		return fmt.Errorf("httpx: %s %s %s: %w", c.Name, method, path, err)
+		return fmt.Errorf("httpx: %s %s %s: %w", c.Name, method, safePath, redactErr(err))
 	}
 	if resp.IsError() {
-		return &StatusError{Provider: c.Name, Method: method, Path: path, Status: resp.StatusCode(), Body: clip(resp.String(), 512)}
+		return &StatusError{Provider: c.Name, Method: method, Path: safePath, Status: resp.StatusCode(), Body: redactQuery(clip(resp.String(), 512))}
 	}
 	// Decoded here, not by resty's SetResult, which only decodes when the
 	// vendor sets a JSON content type; many do not.
 	if out != nil && len(resp.Body()) > 0 {
 		if err := json.Unmarshal(resp.Body(), out); err != nil {
-			return fmt.Errorf("httpx: %s %s %s: decode %T: %w", c.Name, method, path, out, err)
+			return fmt.Errorf("httpx: %s %s %s: decode %T: %w", c.Name, method, safePath, out, err)
 		}
 	}
 	return nil
 }
 
-// StatusError: the provider answered, with a status that is not 2xx.
+// StatusError: the provider answered, with a status that is not 2xx. Path
+// and Body have query values masked (a vendor's error page often echoes the
+// request URL).
 type StatusError struct {
 	Provider, Method, Path string
 	Status                 int
@@ -291,10 +297,17 @@ func clip(s string, n int) string {
 }
 
 // restyLogger routes what resty itself says to zlog, under the provider.
+// resty prints the error of every failed attempt, and net/http's errors
+// carry the full URL, so the line is redacted first.
+// resty 会把每次失败尝试的错误打出来，而 net/http 的错误带完整 URL，所以先脱敏再记。
 type restyLogger struct{ name string }
 
-func (l restyLogger) Errorf(f string, v ...any) { zlog.Errorf("resty["+l.name+"]: "+f, v...) }
-func (l restyLogger) Warnf(f string, v ...any)  { zlog.Warnf("resty["+l.name+"]: "+f, v...) }
-func (l restyLogger) Debugf(f string, v ...any) { zlog.Debugf("resty["+l.name+"]: "+f, v...) }
+func (l restyLogger) Errorf(f string, v ...any) { zlog.Error(l.line(f, v...)) }
+func (l restyLogger) Warnf(f string, v ...any)  { zlog.Warn(l.line(f, v...)) }
+func (l restyLogger) Debugf(f string, v ...any) { zlog.Debug(l.line(f, v...)) }
+
+func (l restyLogger) line(f string, v ...any) string {
+	return redactQuery("resty[" + l.name + "]: " + fmt.Sprintf(f, v...))
+}
 
 func insecureTLS() *tls.Config { return &tls.Config{InsecureSkipVerify: true} } //nolint:gosec // opted in per provider, sandboxes only

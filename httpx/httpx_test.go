@@ -3,6 +3,7 @@ package httpx
 import (
 	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -196,5 +197,59 @@ func TestMaxConcurrentLimitsInFlight(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	if err := c.GetJSON(ctx, "/x", nil); err == nil {
 		t.Error("a call that cannot get a slot before its deadline fails")
+	}
+}
+
+// A vendor's key travels in the query string; net/http quotes the whole URL
+// in its errors and resty logs every failed attempt. None of that may reach
+// the log store or the caller unmasked.
+func TestQueryValuesAreRedactedInErrorsAndLogs(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	zero := 0
+
+	// Nothing listens here: a network error whose text carries the URL.
+	down, err := New("vendor", Provider{BaseURL: "http://127.0.0.1:1", Retries: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = down.GetJSON(context.Background(), "/mobile/get?key=sekrit-123&phone=13800138000", nil)
+	if err == nil {
+		t.Fatal("expected a connection error")
+	}
+	if strings.Contains(err.Error(), "sekrit-123") || strings.Contains(err.Error(), "13800138000") {
+		t.Fatalf("caller's error leaks query values: %v", err)
+	}
+	if !strings.Contains(err.Error(), "key=***") || !strings.Contains(err.Error(), "phone=***") {
+		t.Fatalf("parameter names should stay, values masked: %v", err)
+	}
+	var netErr net.Error
+	if !errors.As(err, &netErr) {
+		t.Fatalf("the cause must stay reachable through Unwrap: %v", err)
+	}
+
+	// The vendor answers with an error page that echoes the request URL.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusForbidden)
+		w.Write([]byte(`{"error":"bad key","url":"` + r.URL.String() + `"}`))
+	}))
+	defer srv.Close()
+	up, err := New("vendor", Provider{BaseURL: srv.URL, Retries: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = up.GetJSON(context.Background(), "/mobile/get?key=sekrit-456", nil)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusForbidden {
+		t.Fatalf("expected StatusError 403: %v", err)
+	}
+	if strings.Contains(err.Error(), "sekrit-456") || strings.Contains(se.Path, "sekrit") || strings.Contains(se.Body, "sekrit") {
+		t.Fatalf("StatusError leaks the key: %v", err)
+	}
+
+	if s := logs.String(); strings.Contains(s, "sekrit-123") || strings.Contains(s, "sekrit-456") || strings.Contains(s, "13800138000") {
+		t.Fatalf("logs leak query values:\n%s", s)
+	}
+	if !logs.Has("ERROR", "http call failed") {
+		t.Fatalf("the failed call should still be recorded:\n%s", logs.String())
 	}
 }
