@@ -404,14 +404,32 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   transaction, a poller per process (`Start` from the runtime's OnStart, only
   when `Handlers() > 0`, so a service that schedules nothing never polls a
   table it does not have) claims due rows with `FOR UPDATE SKIP LOCKED`, marks
-  them `running`, runs the handler with `delay.timeout`, then `done` /
-  `pending` with backoff (1m << n, cap 1h) / `failed` after `max_attempts`. A
-  `running` row older than timeout + 1m (the process died) is claimed again:
-  at least once, handlers must be idempotent. `Cancel` flips pending rows of
-  kind + key. Gauges `delay_tasks_pending/failed/overdue_seconds`, counter
-  `delay_tasks_run_total{kind,result}`. The post-deploy `delay` check uses
-  `Overdue` and `FailedCount`. Integration test `TestScheduler` needs
-  `MYSQL_TEST_DSN_ROOT` (CI's mysql job runs it).
+  them `running`, runs the handler with the kind's timeout (`Timeout(d)`
+  option, else `delay.timeout`), then `done` / `pending` with backoff (1m <<
+  n, cap 1h) / `failed` after `max_attempts`. Since v0.54.0 (the sportsbook
+  export, 2026-10-17): every running task heartbeats `locked_at` every
+  `delay.heartbeat` (30s) and the stale rule is "no heartbeat for 3
+  intervals" (was timeout + 1m), so a long run is not reclaimed; a kind
+  registered with `Long()` runs in a pool of `delay.long_workers` (default 1)
+  goroutines, claimed only up to the pool's room (`kind IN` / `NOT IN` split
+  in `RunOnce`), short kinds still run inline in the poller; `Abort(kind,
+  key)` flips pending and running rows to `cancelled` with no schema change:
+  the local run is cancelled through the `running` map (cause `ErrAborted`),
+  a run elsewhere notices when its heartbeat UPDATE `... WHERE status =
+  'running'` touches no row; every outcome write carries `WHERE status =
+  'running'` so an aborted or reclaimed row is never overwritten; `Stop`
+  cancels runs with cause `ErrShutdown` *before* stopping the poller (the
+  runs descend from the poller ctx, cancelling it first would give them
+  plain `Canceled`), and an interrupted run goes back to pending at once
+  without an attempt (before: the outcome write used the cancelled ctx and
+  silently failed, leaving the row `running` until stale). Bookkeeping
+  writes use `context.WithoutCancel` + 10s. `Running()` is an inflight
+  counter incremented at claim, which `testx.RunDue` waits on. Gauges
+  `delay_tasks_pending/failed/overdue_seconds`, counter
+  `delay_tasks_run_total{kind,result}` (ok, retry, failed, no_handler,
+  aborted, requeued). The post-deploy `delay` check uses `Overdue` and
+  `FailedCount`. Tests `TestScheduler` and `long_test.go` need
+  `MYSQL_TEST_DSN_ROOT` (CI's mysql job runs them).
 - `kafkax`: franz-go (Redpanda's recommendation), tracing through
   `kotel` (`kgo.WithHooks`; the produce span's parent is `Record.Context`, the
   consumer side `tracer.WithProcessSpan(r)` extracts the parent from the

@@ -262,6 +262,14 @@ func (rt *Runtime) RunDue() int {
 	if err != nil {
 		rt.t.Fatalf("testx: run due tasks: %v", err)
 	}
+	// long kinds (delayx.Long) run in their pool: wait for them too
+	deadline := time.Now().Add(30 * time.Second)
+	for rt.Delay.Running() > 0 {
+		if time.Now().After(deadline) {
+			rt.t.Fatal("testx: delayed tasks still running after 30s")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
 	return n
 }
 
