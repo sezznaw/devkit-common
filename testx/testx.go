@@ -392,7 +392,7 @@ func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 		if require {
 			t.Fatalf("testx: no MySQL at %s after %s: %v", dsn.Addr, wait, pingErr)
 		}
-		t.Skipf("testx: no MySQL at %s (%v); start the local stack (infra/local/local.sh up) to run database tests", dsn.Addr, pingErr)
+		t.Skipf("testx: no MySQL at %s (%v); start the project's local stack (its local/local.sh up) to run database tests", dsn.Addr, pingErr)
 	}
 	name := fmt.Sprintf("test_%s_%d", strings.ReplaceAll(service, "-", "_"), time.Now().UnixNano()%1_000_000_000)
 	if _, err := admin.Exec("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4"); err != nil {

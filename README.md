@@ -508,7 +508,7 @@ names. The client is `rt.Centrifugo`.
 s3:
   enabled: true
   source: platform      # dev / uat / prod: the datasource row of kind s3 (endpoint, buckets, public address, key variables)
-  # source: static      # a laptop: infra/local/local.sh up --full (SeaweedFS on 8333 with both buckets)
+  # source: static      # a laptop: the project's local stack (local/local.sh up --full: SeaweedFS on 8333 with both buckets)
   # endpoint: "http://127.0.0.1:8333"
   # bucket: sportsbook-local-assets          # private: documents, exports; out through PresignGet
   # public_bucket: sportsbook-local-public   # anyone may read: avatars, banners, logos; out as plain URLs

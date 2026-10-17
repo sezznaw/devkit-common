@@ -346,7 +346,7 @@ handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<�
 s3:
   enabled: true
   source: platform      # dev / uat / prod：数据源表 kind=s3 那行（地址、两个桶、对外地址、密钥变量名）
-  # source: static      # 本机：infra/local/local.sh up --full（SeaweedFS 8333，两个桶都建好）
+  # source: static      # 本机：项目的一键环境 local/local.sh up --full（SeaweedFS 8333，两个桶都建好）
   # endpoint: "http://127.0.0.1:8333"
   # bucket: sportsbook-local-assets          # 私密桶：证件、凭证、导出；用 PresignGet 临时链接给出去
   # public_bucket: sportsbook-local-public   # 公开桶（谁都能读）：头像、banner、logo；直接给 URL
