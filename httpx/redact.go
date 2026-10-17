@@ -18,21 +18,9 @@ var queryValue = regexp.MustCompile(`([?&][^=&\s"'<>]+)=([^&\s"'<>]*)`)
 // redactQuery masks the value of every query parameter in s.
 func redactQuery(s string) string { return queryValue.ReplaceAllString(s, "$1=***") }
 
-// redactErr returns err with query values masked in its message. The
-// original stays reachable through Unwrap, so errors.Is / errors.As on the
-// cause (net.Error, *StatusError, ...) keep working.
-func redactErr(err error) error {
-	if err == nil {
-		return nil
-	}
-	msg := err.Error()
-	clean := redactQuery(msg)
-	if clean == msg {
-		return err
-	}
-	return &redactedError{msg: clean, cause: err}
-}
-
+// redactedError is what Client.redactErr returns when a message had to be
+// masked: the clean text, with the cause reachable through Unwrap so
+// errors.Is / errors.As (net.Error, *StatusError, ...) keep working.
 type redactedError struct {
 	msg   string
 	cause error

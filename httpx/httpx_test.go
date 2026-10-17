@@ -253,3 +253,74 @@ func TestQueryValuesAreRedactedInErrorsAndLogs(t *testing.T) {
 		t.Fatalf("the failed call should still be recorded:\n%s", logs.String())
 	}
 }
+
+func TestSecretsInThePathStayOutOfLogsTracesAndErrors(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	rec := tracetest.NewSpanRecorder()
+	otel.SetTracerProvider(sdktrace.NewTracerProvider(sdktrace.WithSpanProcessor(rec)))
+	defer otel.SetTracerProvider(noop.NewTracerProvider())
+	zero := 0
+	const token = "8949977680:AAEaSjIlsZqhxz-MQ4CG"
+
+	var gotPath, gotQuery string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath, gotQuery = r.URL.Path, r.URL.RawQuery
+		if strings.HasSuffix(r.URL.Path, "/sendDocument") {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"ok":false,"description":"bot was kicked (` + r.URL.Path + `)"}`))
+			return
+		}
+		w.Write([]byte(`{"ok":true}`))
+	}))
+	defer srv.Close()
+
+	c, err := New("telegram", Provider{BaseURL: srv.URL, Retries: &zero})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Secret(token, "")
+	// The vendor must get the real URL; the request is also signed/traced on the way.
+	if err := c.PostJSON(context.Background(), "/bot"+token+"/sendMessage?chat_id=-100&key=k1", map[string]string{"text": "hi"}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if gotPath != "/bot"+token+"/sendMessage" || gotQuery != "chat_id=-100&key=k1" {
+		t.Fatalf("the wire must carry the real URL: %s?%s", gotPath, gotQuery)
+	}
+	// A 403 whose body echoes the path: the caller's error is clean too.
+	err = c.PostJSON(context.Background(), "/bot"+token+"/sendDocument", map[string]string{}, nil)
+	var se *StatusError
+	if !errors.As(err, &se) || se.Status != http.StatusForbidden {
+		t.Fatalf("expected StatusError 403: %v", err)
+	}
+	if strings.Contains(err.Error(), token) || strings.Contains(se.Path, token) || strings.Contains(se.Body, token) {
+		t.Fatalf("error leaks the token: %v", err)
+	}
+	if !strings.Contains(se.Path, "/bot***/sendDocument") {
+		t.Fatalf("the shape of the path should survive: %s", se.Path)
+	}
+
+	if s := logs.String(); strings.Contains(s, token) || strings.Contains(s, "key=k1") {
+		t.Fatalf("logs leak the token or a query value:\n%s", s)
+	}
+	if !logs.Has("INFO", "http call") || !logs.Has("WARN", "http call") {
+		t.Fatalf("both calls are still recorded:\n%s", logs.String())
+	}
+	spans := rec.Ended()
+	if len(spans) != 2 {
+		t.Fatalf("spans: %d", len(spans))
+	}
+	for _, sp := range spans {
+		if strings.Contains(sp.Name(), token) {
+			t.Fatalf("span name leaks the token: %s", sp.Name())
+		}
+		for _, a := range sp.Attributes() {
+			v := a.Value.Emit()
+			if strings.Contains(v, token) || strings.Contains(v, "key=k1") {
+				t.Fatalf("span attribute %s leaks: %s", a.Key, v)
+			}
+		}
+	}
+	if spans[0].Name() != "POST telegram /bot***/sendMessage" {
+		t.Fatalf("span name: %s", spans[0].Name())
+	}
+}

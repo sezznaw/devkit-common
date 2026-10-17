@@ -18,6 +18,7 @@ import (
 	"net/url"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-resty/resty/v2"
@@ -129,9 +130,111 @@ func (p Provider) Validate(name string) error {
 // anything resty can do, or the two helpers for the common case.
 type Client struct {
 	*resty.Client
-	Name string
-	base *url.URL
-	auth *authTransport
+	Name    string
+	base    *url.URL
+	auth    *authTransport
+	secrets atomic.Pointer[[]string] // see Secret
+}
+
+// Secret registers values that must never reach the log store or the trace
+// store through this client: a token the vendor wants in the URL path
+// (Telegram's /bot<token>/sendMessage), an account id in the host name.
+// Query values are masked anyway (see redact.go); this covers secrets
+// anywhere else in the URL. Call it once, right after New; it returns the
+// client for chaining.
+//
+// Secret 登记绝不能进日志库和 trace 库的值：厂商要求放在 URL 路径里的 token（Telegram 的
+// /bot<token>/sendMessage）、放在域名里的账号。查询参数的值本来就会打码（见 redact.go），
+// 这里管的是 URL 其他位置的密钥。New 之后调一次，返回客户端本身方便链式写。
+func (c *Client) Secret(values ...string) *Client {
+	var keep []string
+	if cur := c.secrets.Load(); cur != nil {
+		keep = append(keep, *cur...)
+	}
+	for _, v := range values {
+		if v == "" {
+			continue
+		}
+		keep = append(keep, v)
+		if e := url.PathEscape(v); e != v {
+			keep = append(keep, e)
+		}
+		if e := url.QueryEscape(v); e != v {
+			keep = append(keep, e)
+		}
+	}
+	c.secrets.Store(&keep)
+	return c
+}
+
+// redactSecrets masks the registered secrets in s (not the query values).
+func (c *Client) redactSecrets(s string) string {
+	cur := c.secrets.Load()
+	if cur == nil {
+		return s
+	}
+	for _, v := range *cur {
+		s = strings.ReplaceAll(s, v, "***")
+	}
+	return s
+}
+
+// redact masks query values and the registered secrets in s. Everything
+// this client logs or returns passes through here.
+func (c *Client) redact(s string) string { return c.redactSecrets(redactQuery(s)) }
+
+// redactErr is redactErr (redact.go) with the registered secrets masked too.
+func (c *Client) redactErr(err error) error {
+	if err == nil {
+		return nil
+	}
+	msg := err.Error()
+	clean := c.redact(msg)
+	if clean == msg {
+		return err
+	}
+	return &redactedError{msg: clean, cause: err}
+}
+
+// maskTransport hands the span (otelhttp: span name, url.full) a copy of the
+// request whose URL has query values and the registered secrets masked, and
+// remembers the real URL in the context; unmaskTransport puts it back right
+// before the wire. The vendor sees the real URL, the trace store never does.
+//
+// maskTransport 给 span（otelhttp：span 名、url.full）看的是查询值和登记密钥都打了码的
+// URL 副本，真 URL 记在 context 里；unmaskTransport 在上线路前换回来。厂商看到真 URL，
+// trace 库看不到。
+type maskTransport struct {
+	c    *Client
+	next http.RoundTripper
+}
+
+type realURLKey struct{}
+
+func (m maskTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	u := *r.URL
+	u.Path, u.RawPath, u.Host = m.c.redactSecrets(u.Path), m.c.redactSecrets(u.RawPath), m.c.redactSecrets(u.Host)
+	if u.RawQuery != "" {
+		u.RawQuery = m.c.redact("?" + u.RawQuery)[1:]
+	}
+	if u.String() == r.URL.String() {
+		return m.next.RoundTrip(r)
+	}
+	r2 := r.Clone(context.WithValue(r.Context(), realURLKey{}, r.URL))
+	r2.URL = &u
+	return m.next.RoundTrip(r2)
+}
+
+type unmaskTransport struct{ next http.RoundTripper }
+
+func (m unmaskTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	real, ok := r.Context().Value(realURLKey{}).(*url.URL)
+	if !ok {
+		return m.next.RoundTrip(r)
+	}
+	r2 := r.Clone(r.Context()) // keeps what otelhttp added (traceparent)
+	r2.URL = real
+	return m.next.RoundTrip(r2)
 }
 
 // New builds the client of one provider. Every call through it gets: the
@@ -144,12 +247,14 @@ func New(name string, p Provider) (*Client, error) {
 		return nil, err
 	}
 	base, _ := url.Parse(p.BaseURL)
-	// resty -> auth (sign each attempt) -> guard (concurrency, breaker) -> otelhttp (span) -> pooled transport
+	c := &Client{Name: name, base: base}
+	// resty -> auth (sign each attempt) -> guard (concurrency, breaker) -> mask (secrets out of the URL)
+	//   -> otelhttp (span) -> unmask (real URL back) -> pooled transport
 	pool := newTransport(p)
-	traced := otelhttp.NewTransport(pool,
+	traced := otelhttp.NewTransport(unmaskTransport{pool},
 		otelhttp.WithSpanNameFormatter(func(_ string, r *http.Request) string { return r.Method + " " + name + " " + r.URL.Path }),
 		otelhttp.WithSpanOptions(trace.WithAttributes(attribute.String("peer.service", name))))
-	auth := newAuthTransport(name, p.Auth, newGuard(name, p, traced), pool)
+	auth := newAuthTransport(name, p.Auth, newGuard(name, p, maskTransport{c, traced}), pool)
 	rc := resty.New().
 		SetTransport(auth).
 		SetBaseURL(p.BaseURL).
@@ -159,9 +264,9 @@ func New(name string, p Provider) (*Client, error) {
 		SetRetryWaitTime(200 * time.Millisecond).
 		SetRetryMaxWaitTime(2 * time.Second).
 		SetRetryResetReaders(true).
-		SetLogger(restyLogger{name}).
+		SetLogger(restyLogger{c}).
 		AddRetryCondition(retryCondition)
-	c := &Client{Client: rc, Name: name, base: base, auth: auth}
+	c.Client, c.auth = rc, auth
 	rc.OnAfterResponse(c.afterResponse)
 	rc.OnError(c.onError)
 	if p.Debug {
@@ -217,6 +322,7 @@ func (c *Client) record(req *resty.Request, status int, took time.Duration, err 
 	if req.RawRequest != nil && req.RawRequest.URL != nil {
 		path = req.RawRequest.URL.Path
 	}
+	path = c.redact(path)
 	statusLabel := "error"
 	if status > 0 {
 		statusLabel = strconv.Itoa(status)
@@ -228,7 +334,7 @@ func (c *Client) record(req *resty.Request, status int, took time.Duration, err 
 	log := zlog.Ctx(req.Context())
 	switch {
 	case err != nil:
-		log.Error("http call failed", append(fields, zlog.Err(redactErr(err)))...)
+		log.Error("http call failed", append(fields, zlog.Err(c.redactErr(err)))...)
 	case status >= 500:
 		log.Error("http call", fields...)
 	case status >= 400:
@@ -259,12 +365,12 @@ func (c *Client) do(ctx context.Context, method, path string, body, out any) err
 	// What goes back to the caller has query values masked (see redact.go):
 	// the caller will log it, and the key is in the query.
 	// 返回给调用方的错误里查询参数的值已打码（见 redact.go）：调用方会把它记进日志，而 key 就在查询串里。
-	safePath := redactQuery(path)
+	safePath := c.redact(path)
 	if err != nil {
-		return fmt.Errorf("httpx: %s %s %s: %w", c.Name, method, safePath, redactErr(err))
+		return fmt.Errorf("httpx: %s %s %s: %w", c.Name, method, safePath, c.redactErr(err))
 	}
 	if resp.IsError() {
-		return &StatusError{Provider: c.Name, Method: method, Path: safePath, Status: resp.StatusCode(), Body: redactQuery(clip(resp.String(), 512))}
+		return &StatusError{Provider: c.Name, Method: method, Path: safePath, Status: resp.StatusCode(), Body: c.redact(clip(resp.String(), 512))}
 	}
 	// Decoded here, not by resty's SetResult, which only decodes when the
 	// vendor sets a JSON content type; many do not.
@@ -300,14 +406,14 @@ func clip(s string, n int) string {
 // resty prints the error of every failed attempt, and net/http's errors
 // carry the full URL, so the line is redacted first.
 // resty 会把每次失败尝试的错误打出来，而 net/http 的错误带完整 URL，所以先脱敏再记。
-type restyLogger struct{ name string }
+type restyLogger struct{ c *Client }
 
 func (l restyLogger) Errorf(f string, v ...any) { zlog.Error(l.line(f, v...)) }
 func (l restyLogger) Warnf(f string, v ...any)  { zlog.Warn(l.line(f, v...)) }
 func (l restyLogger) Debugf(f string, v ...any) { zlog.Debug(l.line(f, v...)) }
 
 func (l restyLogger) line(f string, v ...any) string {
-	return redactQuery("resty[" + l.name + "]: " + fmt.Sprintf(f, v...))
+	return l.c.redact("resty[" + l.c.Name + "]: " + fmt.Sprintf(f, v...))
 }
 
 func insecureTLS() *tls.Config { return &tls.Config{InsecureSkipVerify: true} } //nolint:gosec // opted in per provider, sandboxes only

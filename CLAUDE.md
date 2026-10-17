@@ -531,7 +531,13 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   bridge, `do`'s wrapped error, `StatusError.Path/Body` — because vendors
   put API keys in the query and net/http quotes the full URL in its errors;
   found on 2026-10-16 when a Juhe key reached the dev logs. The cause stays
-  reachable through Unwrap (`redactedError`).
+  reachable through Unwrap (`redactedError`). v0.54.1: `Client.Secret(values...)`
+  registers secrets that live elsewhere in the URL (Telegram's
+  `/bot<token>/sendMessage`); they are masked in the same places, and a
+  mask/unmask transport pair around otelhttp gives the span (name, `url.full`,
+  which also carried the query) a masked URL while the wire gets the real
+  one. Found on 2026-10-17 when the dev bot token showed up in ser-vendor's
+  `http call` records.
 - `webhookx` (inbound callbacks) and `httpx.Callback` (its config under
   the provider): `Handle(rt, h, provider, path, handler, opts...)` registers
   POST and PUT on the Hertz engine; order in `serve` is cidr → size →
