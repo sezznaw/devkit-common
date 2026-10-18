@@ -346,18 +346,27 @@ func (Bet) TableName() string { return "bet" }
 ```
 
 What `rt.AutoMigrate` does: creates a table that is missing; adds the columns
-and indexes a table lacks; logs each difference it fixed (`auto migrate: bet:
-columns added [settle_time]`) or that there was nothing to do. It runs under a
-Redis lock (`lock:<service>:auto-migrate`) so replicas and services starting
-together take turns. A field without an explicit `type:` is refused before
-anything is touched: GORM's default types (`longtext` for a string, `double`
-for a float) are not what an amount column should be.
+and indexes a table lacks; alters a column whose type, nullability or default
+differs from the model (a wider varchar, a bigger integer, a new default);
+logs each difference it fixed (`auto migrate: bet: columns added
+[settle_time]; columns altered [remark: varchar(64) -> varchar(255)]`) or that
+there was nothing to do. It reads the tables in one snapshot (two
+`information_schema` queries, whatever the number of tables), compares in
+memory, and returns at once when nothing differs; only when something does
+it takes the Redis lock (`lock:<service>:auto-migrate`, so replicas and
+services starting together take turns), plans again inside it and hands
+**only the tables that differ** to GORM, which compares each column itself
+before altering anything. A field without an explicit `type:` is refused
+before anything is touched: GORM's default types (`longtext` for a string,
+`double` for a float) are not what an amount column should be.
 
 What it deliberately does **not** do, and a person must: drop or rename a
 column (GORM only adds; a rename becomes a new column next to the old one);
-change a column's type or narrow its length (an ALTER on a table with data
-can fail or truncate); any change that needs data backfilled. Those three go
-through a hand-written migration agreed with whoever runs the database.
+narrow a type (a shorter varchar, a smaller integer or a signed one made
+unsigned, fewer decimal digits, text to varchar: the service refuses to start
+and names the column, because the ALTER could truncate or reject rows); any
+change that needs data backfilled. Those go through a hand-written migration
+agreed with whoever runs the database.
 
 Where it is allowed: on in `local` and `dev`, where the schema follows the
 code; off in `uat` and `prod`, where it only logs what differs and the

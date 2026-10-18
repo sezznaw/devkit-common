@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -92,9 +93,15 @@ func (rt *Runtime) EnsureFrameworkTables() error {
 // It is the one way a service changes a schema. What it does, and what it
 // deliberately does not:
 //
-//   - Adds tables, columns and indexes. Never drops or renames a column,
-//     never narrows a type, never backfills data: those three kinds of
-//     change need a hand-written migration (the project's guide says who).
+//   - Adds tables, columns and indexes, and alters a column whose type,
+//     nullability or default differs from the model (a wider varchar, a
+//     bigger integer, a new default). Never drops or renames a column,
+//     never narrows a type (it refuses to start instead), never backfills
+//     data: those kinds of change need a hand-written migration (the
+//     project's guide says who).
+//   - Reads the tables in one snapshot (two information_schema queries)
+//     and compares in memory; when nothing differs it returns at once,
+//     without the lock. Only the tables that differ are handed to GORM.
 //   - Every field must carry an explicit `type:` in its gorm tag; the
 //     column type is a decision, not GORM's default. A model without one is
 //     refused before anything is touched.
@@ -156,32 +163,55 @@ func (rt *Runtime) AutoMigrate(models ...any) error {
 			zlog.Str("hint", "mysql.auto_migrate: true turns it on; local and dev have it on by default"))
 		return nil
 	}
+	// Nothing to do is the common case (every start after the first): say
+	// so and leave, without the lock and without planning again.
+	if len(plan.changed()) == 0 {
+		zlog.Info("auto migrate: tables match the models", zlog.Int("tables", int64(len(plan))))
+		return nil
+	}
+	if err := plan.refuseNarrowing(); err != nil {
+		return err
+	}
 	run := func(ctx context.Context) error {
 		// Re-plan inside the lock: another instance may have just done it.
 		plan, err = migratePlan(rt.DB, models)
 		if err != nil {
 			return err
 		}
-		todo := 0
-		for _, p := range plan {
-			if p.changes() {
-				todo++
-			}
+		if err := plan.refuseNarrowing(); err != nil {
+			return err
 		}
-		if todo == 0 {
+		todo := plan.changed()
+		if len(todo) == 0 {
 			zlog.Info("auto migrate: tables match the models", zlog.Int("tables", int64(len(plan))))
 			return nil
 		}
 		start := time.Now()
-		if err := rt.DB.WithContext(ctx).AutoMigrate(models...); err != nil {
+		// Only the tables the plan found different are handed to GORM, which
+		// compares each column itself and alters what differs; the tables
+		// that match are not touched at all.
+		changed := make([]any, 0, len(todo))
+		tables := make([]string, 0, len(todo))
+		for _, p := range todo {
+			changed = append(changed, p.model)
+			tables = append(tables, p.table)
+		}
+		if err := rt.DB.WithContext(ctx).AutoMigrate(changed...); err != nil {
 			return fmt.Errorf("kitexx: auto migrate: %w", err)
 		}
-		for _, p := range plan {
-			if p.changes() {
-				zlog.Info("auto migrate: "+p.String(), zlog.Str("table", p.table))
+		// What happened, from the database, not from the plan.
+		after, err := snapshot(rt.DB.WithContext(ctx), tables)
+		if err != nil {
+			return err
+		}
+		for _, p := range todo {
+			if did := p.applied(after); did != "" {
+				zlog.Info("auto migrate: "+did, zlog.Str("table", p.table))
+			} else {
+				zlog.Info("auto migrate: "+p.table+": checked, nothing to change", zlog.Str("table", p.table), zlog.Str("planned", p.String()))
 			}
 		}
-		zlog.Info("auto migrate: done", zlog.Int("tables", int64(len(plan))), zlog.Int("changed", int64(todo)), zlog.Dur("took", time.Since(start)))
+		zlog.Info("auto migrate: done", zlog.Int("tables", int64(len(plan))), zlog.Int("changed", int64(len(todo))), zlog.Dur("took", time.Since(start)))
 		return nil
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
@@ -203,13 +233,22 @@ func (rt *Runtime) AutoMigrate(models ...any) error {
 
 // tablePlan is what AutoMigrate would do to one table.
 type tablePlan struct {
-	table      string
-	create     bool
-	addColumns []string
-	addIndexes []string
+	table string
+	model any
+	// before is the table as the database had it when the plan was made
+	// (nil when the table does not exist), for the "what happened" record.
+	before *tableSnapshot
+
+	create       bool
+	addColumns   []string
+	addIndexes   []string
+	alterColumns []string // "name: have -> want"
+	narrowing    []string // the alterations that would narrow a type
 }
 
-func (p tablePlan) changes() bool { return p.create || len(p.addColumns) > 0 || len(p.addIndexes) > 0 }
+func (p tablePlan) changes() bool {
+	return p.create || len(p.addColumns) > 0 || len(p.addIndexes) > 0 || len(p.alterColumns) > 0
+}
 
 func (p tablePlan) String() string {
 	if p.create {
@@ -218,6 +257,9 @@ func (p tablePlan) String() string {
 	var parts []string
 	if len(p.addColumns) > 0 {
 		parts = append(parts, "columns added ["+strings.Join(p.addColumns, ", ")+"]")
+	}
+	if len(p.alterColumns) > 0 {
+		parts = append(parts, "columns altered ["+strings.Join(p.alterColumns, ", ")+"]")
 	}
 	if len(p.addIndexes) > 0 {
 		parts = append(parts, "indexes added ["+strings.Join(p.addIndexes, ", ")+"]")
@@ -228,36 +270,217 @@ func (p tablePlan) String() string {
 	return p.table + ": " + strings.Join(parts, "; ")
 }
 
-// migratePlan parses the models and compares them with the database. It
-// refuses a model whose field has no explicit column type.
-func migratePlan(db *gorm.DB, models []any) ([]tablePlan, error) {
-	m := db.Migrator()
-	var plans []tablePlan
+// applied describes what changed between the plan's snapshot of the table
+// and the database now; "" when nothing did.
+func (p tablePlan) applied(after schemaSnapshot) string {
+	now, ok := after[strings.ToLower(p.table)]
+	if !ok {
+		return ""
+	}
+	if p.before == nil {
+		return p.table + ": table created"
+	}
+	var added, altered, indexes []string
+	for name, col := range now.columns {
+		old, had := p.before.columns[name]
+		switch {
+		case !had:
+			added = append(added, name)
+		case old.Type != col.Type:
+			altered = append(altered, name+": "+old.Type+" -> "+col.Type)
+		case old.Nullable != col.Nullable:
+			altered = append(altered, name+": "+nullability(old.Nullable)+" -> "+nullability(col.Nullable))
+		case !sameDefault(old.Default, col.Default):
+			altered = append(altered, name+": default "+defaultText(old.Default)+" -> "+defaultText(col.Default))
+		}
+	}
+	for name := range now.indexes {
+		if !p.before.indexes[name] {
+			indexes = append(indexes, name)
+		}
+	}
+	sort.Strings(added)
+	sort.Strings(altered)
+	sort.Strings(indexes)
+	var parts []string
+	if len(added) > 0 {
+		parts = append(parts, "columns added ["+strings.Join(added, ", ")+"]")
+	}
+	if len(altered) > 0 {
+		parts = append(parts, "columns altered ["+strings.Join(altered, ", ")+"]")
+	}
+	if len(indexes) > 0 {
+		parts = append(parts, "indexes added ["+strings.Join(indexes, ", ")+"]")
+	}
+	if len(parts) == 0 {
+		return ""
+	}
+	return p.table + ": " + strings.Join(parts, "; ")
+}
+
+// migrationPlan is the plan for every model handed to AutoMigrate.
+type migrationPlan []tablePlan
+
+func (ps migrationPlan) changed() []tablePlan {
+	var out []tablePlan
+	for _, p := range ps {
+		if p.changes() {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+// refuseNarrowing is the rule "never narrows a type" as code: a column whose
+// model type holds less than the column does (a shorter varchar, a smaller
+// integer, fewer decimal digits, text to varchar, signed to unsigned) is
+// not altered, because the ALTER would truncate or reject existing rows.
+// The service does not start; someone writes the migration.
+func (ps migrationPlan) refuseNarrowing() error {
+	var all []string
+	for _, p := range ps {
+		all = append(all, p.narrowing...)
+	}
+	if len(all) == 0 {
+		return nil
+	}
+	return fmt.Errorf("kitexx: auto migrate refuses to narrow a column, it could truncate data: %s. Convert the data and alter the column with a hand-written migration, then start the service", strings.Join(all, "; "))
+}
+
+// columnInfo is a column as information_schema describes it.
+type columnInfo struct {
+	Type     string // COLUMN_TYPE, normalized (normalizeType)
+	Nullable bool
+	Default  *string
+}
+
+// tableSnapshot is one table's columns and index names, keys lowercase.
+type tableSnapshot struct {
+	columns map[string]columnInfo
+	indexes map[string]bool
+}
+
+// schemaSnapshot holds the tables that exist, by lowercase name.
+type schemaSnapshot map[string]tableSnapshot
+
+// snapshot reads the columns and indexes of these tables from
+// information_schema in two queries, whatever the number of tables; the
+// plan is then made in memory. (GORM's HasColumn / HasIndex are one query
+// each, which for a service with twenty tables was a few hundred queries
+// at every start.)
+func snapshot(db *gorm.DB, tables []string) (schemaSnapshot, error) {
+	out := schemaSnapshot{}
+	if len(tables) == 0 {
+		return out, nil
+	}
+	var cols []struct {
+		TableName     string  `gorm:"column:table_name"`
+		ColumnName    string  `gorm:"column:column_name"`
+		ColumnType    string  `gorm:"column:column_type"`
+		IsNullable    string  `gorm:"column:is_nullable"`
+		ColumnDefault *string `gorm:"column:column_default"`
+	}
+	if err := db.Raw("SELECT table_name AS table_name, column_name AS column_name, column_type AS column_type, is_nullable AS is_nullable, column_default AS column_default FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name IN ?", tables).Scan(&cols).Error; err != nil {
+		return nil, fmt.Errorf("kitexx: auto migrate: read columns: %w", err)
+	}
+	for _, c := range cols {
+		t := strings.ToLower(c.TableName)
+		ts, ok := out[t]
+		if !ok {
+			ts = tableSnapshot{columns: map[string]columnInfo{}, indexes: map[string]bool{}}
+			out[t] = ts
+		}
+		ts.columns[strings.ToLower(c.ColumnName)] = columnInfo{Type: normalizeType(c.ColumnType), Nullable: strings.EqualFold(c.IsNullable, "YES"), Default: c.ColumnDefault}
+	}
+	var idx []struct {
+		TableName string `gorm:"column:table_name"`
+		IndexName string `gorm:"column:index_name"`
+	}
+	if err := db.Raw("SELECT DISTINCT table_name AS table_name, index_name AS index_name FROM information_schema.statistics WHERE table_schema = DATABASE() AND table_name IN ?", tables).Scan(&idx).Error; err != nil {
+		return nil, fmt.Errorf("kitexx: auto migrate: read indexes: %w", err)
+	}
+	for _, i := range idx {
+		if ts, ok := out[strings.ToLower(i.TableName)]; ok {
+			ts.indexes[strings.ToLower(i.IndexName)] = true
+		}
+	}
+	return out, nil
+}
+
+// migratePlan parses the models, reads the tables in one snapshot and
+// compares the two. It refuses a model whose field has no explicit column
+// type. A column whose type, nullability or default differs from the model
+// is planned as an alteration: GORM applies it, except a narrowing, which
+// refuseNarrowing stops. The comparison errs on the side of flagging a
+// table: GORM compares again before it alters anything.
+func migratePlan(db *gorm.DB, models []any) (migrationPlan, error) {
+	type parsed struct {
+		model any
+		s     *schema.Schema
+	}
+	var all []parsed
+	var tables []string
 	for _, model := range models {
 		stmt := &gorm.Statement{DB: db}
 		if err := stmt.Parse(model); err != nil {
 			return nil, fmt.Errorf("kitexx: auto migrate: %T: %w", model, err)
 		}
-		s := stmt.Schema
-		if err := checkModel(s); err != nil {
+		if err := checkModel(stmt.Schema); err != nil {
 			return nil, err
 		}
-		p := tablePlan{table: s.Table}
-		if !m.HasTable(model) {
+		all = append(all, parsed{model, stmt.Schema})
+		tables = append(tables, stmt.Schema.Table)
+	}
+	snap, err := snapshot(db, tables)
+	if err != nil {
+		return nil, err
+	}
+	var plans migrationPlan
+	for _, m := range all {
+		s := m.s
+		p := tablePlan{table: s.Table, model: m.model}
+		ts, ok := snap[strings.ToLower(s.Table)]
+		if !ok {
 			p.create = true
 			plans = append(plans, p)
 			continue
 		}
+		p.before = &ts
 		for _, f := range s.Fields {
 			if f.DBName == "" || f.IgnoreMigration {
 				continue
 			}
-			if !m.HasColumn(model, f.DBName) {
+			name := strings.ToLower(f.DBName)
+			col, has := ts.columns[name]
+			if !has {
 				p.addColumns = append(p.addColumns, f.DBName)
+				continue
+			}
+			want := normalizeType(f.TagSettings["TYPE"])
+			if want != col.Type {
+				p.alterColumns = append(p.alterColumns, f.DBName+": "+col.Type+" -> "+want)
+				if narrows(col.Type, want) {
+					p.narrowing = append(p.narrowing, s.Table+"."+f.DBName+": "+col.Type+" -> "+want)
+				}
+				continue
+			}
+			wantNullable := !(f.NotNull || f.PrimaryKey)
+			if wantNullable != col.Nullable {
+				p.alterColumns = append(p.alterColumns, f.DBName+": "+nullability(col.Nullable)+" -> "+nullability(wantNullable))
+				continue
+			}
+			// Defaults: only when both sides state one; a column with a
+			// default the model does not mention is left to GORM's judgement
+			// when the table is migrated for another reason.
+			if d, ok := f.TagSettings["DEFAULT"]; ok && col.Default != nil {
+				want := strings.Trim(strings.TrimSpace(d), "'\"")
+				if want != *col.Default {
+					p.alterColumns = append(p.alterColumns, f.DBName+": default "+defaultText(col.Default)+" -> "+defaultText(&want))
+				}
 			}
 		}
 		for _, idx := range s.ParseIndexes() {
-			if !m.HasIndex(model, idx.Name) {
+			if !ts.indexes[strings.ToLower(idx.Name)] {
 				p.addIndexes = append(p.addIndexes, idx.Name)
 			}
 		}
@@ -265,6 +488,108 @@ func migratePlan(db *gorm.DB, models []any) ([]tablePlan, error) {
 		plans = append(plans, p)
 	}
 	return plans, nil
+}
+
+func nullability(nullable bool) string {
+	if nullable {
+		return "NULL"
+	}
+	return "NOT NULL"
+}
+
+func defaultText(d *string) string {
+	if d == nil {
+		return "(none)"
+	}
+	return "'" + *d + "'"
+}
+
+func sameDefault(a, b *string) bool {
+	if a == nil || b == nil {
+		return a == nil && b == nil
+	}
+	return *a == *b
+}
+
+// normalizeType makes a column type from a gorm tag and one from
+// information_schema comparable: lowercase, no spaces around commas, no
+// display width on integers (MySQL 8 reports none, except tinyint(1)),
+// bool spelled as MySQL stores it.
+func normalizeType(t string) string {
+	t = strings.ToLower(strings.TrimSpace(t))
+	t = strings.Join(strings.Fields(t), " ")
+	t = strings.ReplaceAll(t, ", ", ",")
+	t = strings.ReplaceAll(t, " ,", ",")
+	t = strings.ReplaceAll(t, " (", "(")
+	switch t {
+	case "bool", "boolean":
+		return "tinyint(1)"
+	}
+	base, params, rest := splitType(t)
+	if intRank[base] > 0 && !(base == "tinyint" && len(params) == 1 && params[0] == 1) {
+		return strings.TrimSpace(base + " " + rest)
+	}
+	return t
+}
+
+// splitType: "decimal(24,3) unsigned" -> "decimal", [24 3], "unsigned".
+func splitType(t string) (base string, params []int, rest string) {
+	rest = ""
+	open := strings.IndexByte(t, '(')
+	if open < 0 {
+		f := strings.Fields(t)
+		if len(f) == 0 {
+			return "", nil, ""
+		}
+		return f[0], nil, strings.Join(f[1:], " ")
+	}
+	base = strings.TrimSpace(t[:open])
+	closeAt := strings.IndexByte(t, ')')
+	if closeAt < open {
+		return base, nil, ""
+	}
+	for _, p := range strings.Split(t[open+1:closeAt], ",") {
+		n, err := strconv.Atoi(strings.TrimSpace(p))
+		if err != nil {
+			return base, nil, strings.TrimSpace(t[closeAt+1:])
+		}
+		params = append(params, n)
+	}
+	return base, params, strings.TrimSpace(t[closeAt+1:])
+}
+
+var (
+	intRank  = map[string]int{"tinyint": 1, "smallint": 2, "mediumint": 3, "int": 4, "integer": 4, "bigint": 5}
+	textRank = map[string]int{"tinytext": 1, "text": 2, "mediumtext": 3, "longtext": 4, "tinyblob": 1, "blob": 2, "mediumblob": 3, "longblob": 4}
+	sized    = map[string]bool{"varchar": true, "char": true, "varbinary": true, "binary": true}
+)
+
+// narrows reports whether changing a column from have to want (both
+// normalized) could lose data: a shorter string, a smaller integer or a
+// signed one made unsigned, fewer decimal digits, text to a sized string,
+// or a smaller text kind. Anything else is allowed.
+func narrows(have, want string) bool {
+	hb, hp, hr := splitType(have)
+	wb, wp, wr := splitType(want)
+	switch {
+	case sized[hb] && sized[wb]:
+		return len(hp) == 1 && len(wp) == 1 && wp[0] < hp[0]
+	case intRank[hb] > 0 && intRank[wb] > 0:
+		if intRank[wb] < intRank[hb] {
+			return true
+		}
+		return !strings.Contains(hr, "unsigned") && strings.Contains(wr, "unsigned")
+	case (hb == "decimal" || hb == "numeric") && (wb == "decimal" || wb == "numeric"):
+		if len(hp) == 2 && len(wp) == 2 {
+			return wp[0] < hp[0] || wp[1] < hp[1]
+		}
+		return false
+	case textRank[hb] > 0 && textRank[wb] > 0:
+		return textRank[wb] < textRank[hb]
+	case textRank[hb] > 0 && sized[wb]:
+		return true
+	}
+	return false
 }
 
 // checkModel: every column has an explicit type. GORM would otherwise pick

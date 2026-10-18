@@ -314,6 +314,17 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   kind `valkey` (`db_name` is the database index, `TargetFromRow`); the
   platform database lookup is `platformDatabase` in `kitexx/runtime.go`, shared
   with MySQL. Tests run on miniredis (`RunT`, `RequireAuth`).
+- `kitexx/migrate.go` (v0.55.2): `migratePlan` reads the models' tables in ONE snapshot (two
+  information_schema queries filtered by table name; `snapshot`) and compares in memory, keys
+  lowercase. Plan kinds: create, addColumns, addIndexes, alterColumns (type / nullability /
+  default differ; `normalizeType` strips integer display widths, maps bool to tinyint(1)) and
+  `narrowing` (`narrows`: shorter sized string, smaller int rank or signed->unsigned, fewer decimal
+  digits, text->sized, smaller text kind) which `refuseNarrowing` turns into a start-up error.
+  No change -> return before the lock; otherwise lock, re-plan, `DB.AutoMigrate(only the changed
+  models)` and log what the database shows afterwards (`tablePlan.applied`), so a planner false
+  positive costs one GORM pass and a `checked, nothing to change` line, never a spurious ALTER.
+  Before: HasColumn / HasIndex per column, planned twice -> ~800 queries for ser-admin's 20
+  tables, 2.6s per start and per test (the owner asked why a handler package took 60s).
 - `kitexx/idldeps.go`: the dependency gate. `make gen` writes `idl.deps` (IDL generation =
   `git rev-list --count <idl.lock> -- <service>/`, for the service and each IDLS dependency; the
   template copies it to `cmd/<svc>/idl.deps`, main.go embeds it, `SetIDLDeps`). Instances register

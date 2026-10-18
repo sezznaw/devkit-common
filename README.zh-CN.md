@@ -231,12 +231,15 @@ type Bet struct {
 func (Bet) TableName() string { return "bet" }
 ```
 
-`rt.AutoMigrate` 做的事：缺表建表，缺列、缺索引补上，每处差异打一条日志（`auto migrate: bet: columns added
-[settle_time]`），没差异也说一句。在 Redis 锁（`lock:<服务>:auto-migrate`）里跑，多副本、多服务同时启动也只有一个在改表。
-字段没有显式 `type:` 直接拒绝、不碰库：GORM 的默认类型（string 变 longtext、float 变 double）不是金额列该有的样子。
+`rt.AutoMigrate` 做的事：缺表建表，缺列、缺索引补上，列的类型、可空、默认值和模型不一致就改过来（放宽 varchar、int 变 bigint、
+换默认值），每处差异打一条日志（`auto migrate: bet: columns added [settle_time]; columns altered [remark: varchar(64) -> varchar(255)]`），
+没差异也说一句。它用两条 `information_schema` 查询一次读完这批表的列和索引（和表数无关），在内存里比对，没差异立刻返回；
+有差异才拿 Redis 锁（`lock:<服务>:auto-migrate`，多副本、多服务同时启动也只有一个在改表），锁内再规划一次，**只把有差异的表**交给
+GORM，GORM 改之前还会逐列再比一遍。字段没有显式 `type:` 直接拒绝、不碰库：GORM 的默认类型（string 变 longtext、float 变 double）不是金额列该有的样子。
 
-它**故意不做**、必须由人来做的三类改动：删字段或改字段名（GORM 只加不删，改名会变成旧列旁边多一列）；改字段类型或收窄长度
-（有数据时 ALTER 可能失败或截断）；需要回填数据的变更。这三类走人工迁移，和管数据库的人商量。
+它**故意不做**、必须由人来做的改动：删字段或改字段名（GORM 只加不删，改名会变成旧列旁边多一列）；收窄类型（varchar 变短、
+整数变小或有符号变无符号、decimal 位数变少、text 变 varchar：服务拒绝启动并指出是哪一列，因为 ALTER 可能截断或拒绝已有数据）；
+需要回填数据的变更。这些走人工迁移，和管数据库的人商量。
 
 在哪开着：`local` 和 `dev` 开，表结构跟着代码走；`uat` 和 `prod` 关，只打印差异，由发布流程把迁移当独立一步跑。
 `mysql.auto_migrate: true|false` 可覆盖。`--verify` 下什么都不做。接管模式（`devkit takeover`）下不管怎么配都不改表：本机实例连的是共享的 dev 库，本地模型里可能有没推送的改动，所以只打印差异（推送模型、发布服务后 dev 的表自然跟上）。一张表只由一个服务迁移（它所属的领域），别的服务只读。
