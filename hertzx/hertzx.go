@@ -135,6 +135,16 @@ func run(h *server.Hertz, cfg Config, stop <-chan os.Signal) error {
 	}
 	zlog.Info("server starting", zlog.Str("addr", addr.String()), zlog.Str("kind", "http"), zlog.Bool("registry", !cfg.RegistryDisabled))
 
+	// The dependency gate (kitexx/idldeps.go): the RPC services this gateway
+	// calls must be there, at the IDL generation this release was built
+	// against, before it listens; until then the deployment's startupProbe
+	// fails and the old pods keep serving.
+	if err := kitexx.WaitIDLDeps(cfg); err != nil {
+		kitexx.RunShutdownHooks()
+		zlog.Error("server stopped with error", zlog.Err(err))
+		return err
+	}
+
 	// Hertz panics, with a goroutine dump, when the port is taken. Two services
 	// of a project on the same port is the most likely mistake on a developer's
 	// machine, so it gets a sentence instead.
@@ -166,7 +176,7 @@ func run(h *server.Hertz, cfg Config, stop <-chan os.Signal) error {
 	if !cfg.RegistryDisabled {
 		cli, advertise, err := kitexx.Registration(cfg, addr.Port)
 		if err == nil {
-			reg := nacosx.Registration{Service: cfg.Service.Name, Addr: addr.String(), Metadata: map[string]string{"protocol": "http"}}
+			reg := nacosx.Registration{Service: cfg.Service.Name, Addr: addr.String(), Metadata: kitexx.RegistrationMetadata(map[string]string{"protocol": "http"})}
 			if advertise != "" {
 				reg.Addr = advertise
 			}

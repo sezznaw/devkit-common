@@ -194,7 +194,8 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		return nil, err
 	}
 	opts := []server.Option{
-		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name}),
+		// Tags become the instance's Nacos metadata: the IDL generation (idldeps.go).
+		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name, Tags: RegistrationMetadata(nil)}),
 		server.WithServiceAddr(addr),
 		// the limits first: a refused request costs no tracing, no log line
 		// beyond the once-a-minute warning
@@ -383,6 +384,13 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 // svr.Run return, which is when the OnShutdown hooks run.
 func (rt *Runtime) Run(svr server.Server) error {
 	if err := rt.checkIdempotencyStore(svr.GetServiceInfos()); err != nil {
+		zlog.Error("cannot start", zlog.Err(err))
+		return err
+	}
+	// The dependency gate (idldeps.go): the services this one calls must be
+	// there, at the IDL generation this release was built against, before
+	// anything starts — the consumers included.
+	if err := WaitIDLDeps(rt.Config); err != nil {
 		zlog.Error("cannot start", zlog.Err(err))
 		return err
 	}

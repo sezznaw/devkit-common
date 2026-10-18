@@ -37,6 +37,38 @@ func TestRun(t *testing.T) {
 	}
 }
 
+func TestRunRetries(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	fails := 2
+	flaky := Check{Name: "flaky", Run: func(ctx context.Context) error {
+		if fails > 0 {
+			fails--
+			return errors.New("not yet")
+		}
+		return nil
+	}}
+	err := Run(context.Background(), []Check{flaky}, Options{Timeout: 50 * time.Millisecond, RetryFor: time.Second, RetryEvery: time.Millisecond})
+	if err != nil || fails != 0 {
+		t.Fatalf("passes within the window: %v (fails left %d)", err, fails)
+	}
+	if !logs.Has("WARN", "verify retrying") || !logs.Has("INFO", "verify ok") {
+		t.Fatalf("retries are logged: %s", logs)
+	}
+
+	n := 0
+	bad := Check{Name: "bad", Run: func(ctx context.Context) error { n++; return errors.New("nope") }}
+	start := time.Now()
+	err = Run(context.Background(), []Check{bad}, Options{Timeout: 50 * time.Millisecond, RetryFor: 30 * time.Millisecond, RetryEvery: 5 * time.Millisecond})
+	if err == nil || n < 2 || time.Since(start) > time.Second {
+		t.Fatalf("fails after the window: %v after %d attempts", err, n)
+	}
+	// Without RetryFor a check gets one attempt, as before.
+	n = 0
+	if err := Run(context.Background(), []Check{bad}, Options{}); err == nil || n != 1 {
+		t.Fatalf("one attempt: %v %d", err, n)
+	}
+}
+
 func TestGateway(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {

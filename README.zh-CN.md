@@ -585,7 +585,11 @@ metrics:
 
 ### 部署后验证 `verifyx`
 
-每次发布后，部署用新镜像再起一次 `<二进制> --verify`（ArgoCD 的 PostSync Job）：框架的检查和服务自己的检查对刚上线的部署跑一遍，失败就是 Job 失败，几分钟内触发告警。框架按配置检查：MySQL 能应答且迁移不是 dirty、Redis 能应答、outbox 没有超过两分钟还没发出的事件、Nacos 里至少有一个本服务实例、网关的 `VERIFY_BASE_URL/ping` 能应答。服务在 `app/verify.go`（`Checks(cfg, rt) []verifyx.Check`）加自己的几条：用测试账号登录读一条、调一个 RPC。检查必须对线上无害：只读，或对测试账号自己数据的幂等写。`verifyx.NewGateway(rt.GatewayURL())` 是网关调自己接口的客户端（`Get`、带响应壳的 `Post`、登录后带 Bearer）。`make verify` 在本机对本地环境跑同一套。
+每次发布后，部署用新镜像再起一次 `<二进制> --verify`（ArgoCD 的 PostSync Job）：框架的检查和服务自己的检查对刚上线的部署跑一遍，失败就是 Job 失败，几分钟内触发告警。框架按配置检查：MySQL 能应答且迁移不是 dirty、Redis 能应答、outbox 没有超过两分钟还没发出的事件、Nacos 里至少有一个本服务实例、网关的 `VERIFY_BASE_URL/ping` 能应答。服务在 `app/verify.go`（`Checks(cfg, rt) []verifyx.Check`）加自己的几条：用测试账号登录读一条、调一个 RPC。检查必须对线上无害：只读，或对测试账号自己数据的幂等写。`verifyx.NewGateway(rt.GatewayURL())` 是网关调自己接口的客户端（`Get`、带响应壳的 `Post`、登录后带 Bearer）。`make verify` 在本机对本地环境跑同一套。失败的检查每 10 秒重试一次、持续两分钟才算失败（Job 在滚动刚健康时就开跑，外面的世界可能慢几秒）；每次重试记一条 `verify retrying`。
+
+### 发布不用排顺序：依赖闸门（`idl.deps`）
+
+一个改动横跨几个服务（新 RPC 方法加调用它的网关）时，结果曾取决于各条流水线谁先跑完：网关先于 RPC 服务上线，就回 5001、验证失败。框架把顺序去掉了。`make gen` 在 `idl.lock` 旁写 `idl.deps`：本服务和它调用的每个 RPC 服务的 **IDL 代数**——IDL 仓库里改过该服务目录的提交数（截至生成代码的那个提交，沿主干单调递增）。`main.go` 把它嵌进二进制（`kitexx.SetIDLDeps`）。每个实例把自己的代数注册进 Nacos 元数据 `idl.gen`（另有 `idl.deps`：它调用的服务名单）；服务监听之前，`kitexx.WaitIDLDeps` 等到它调用的每个服务都至少有一个可用实例、且全部实例的代数不低于生成客户端时的代数。部署的 startupProbe 让等待中的 Pod 既不进 Service 也不被杀，旧 Pod 继续服务；依赖的版本一到，闸门几秒内打开，验证在之后才跑（并再查一次，检查名 `idl-deps`）。依赖一直不来，滚动就停在那里，部署在 progress deadline 后报出来；日志 `deps gate waiting` 写明等哪个服务、哪个实例、两边的代数。本机、没有 Nacos、`DEPS_GATE=off` 时闸门关闭；没有 `idl.gen` 的实例（在 `idl.deps` 之前构建的）不等，把本服务列为自己依赖的服务也不等（互等会等到天荒地老）。`devkit lint`（规则 `idl-deps`）在 `idl.deps` 缺失或没随 `idl.lock` 重新生成时报错。
 
 ### 用 `testx` 写测试
 

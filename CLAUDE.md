@@ -314,6 +314,18 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   kind `valkey` (`db_name` is the database index, `TargetFromRow`); the
   platform database lookup is `platformDatabase` in `kitexx/runtime.go`, shared
   with MySQL. Tests run on miniredis (`RunT`, `RequireAuth`).
+- `kitexx/idldeps.go`: the dependency gate. `make gen` writes `idl.deps` (IDL generation =
+  `git rev-list --count <idl.lock> -- <service>/`, for the service and each IDLS dependency; the
+  template copies it to `cmd/<svc>/idl.deps`, main.go embeds it, `SetIDLDeps`). Instances register
+  `idl.gen` / `idl.deps` in Nacos (Kitex: `EndpointBasicInfo.Tags`; hertzx: the registration
+  metadata); `WaitIDLDeps` runs before listening in `hertzx.run` and at the top of `Runtime.Run`
+  and waits (poll 2s, log every 30s, give up after 10m with exit 1 so the deployment restarts the
+  pod and the startupProbe keeps waiting) until every dependency has usable instances at
+  `idl.gen >= need`. Rules decided with the owner (2026-10-18): off on local / registry_disabled /
+  `DEPS_GATE=off`; an instance without `idl.gen` is *not* waited for (transition), neither is a
+  dependency whose `idl.deps` names this service (cycle); `--verify` has the same check
+  (`idl-deps`). `verifyx.Run` retries a failing check for `RetryFor` (RunVerify: 2m every 10s).
+  Tests fake the lookup (`waitIDLDeps(d, lookup, ...)`), nothing needs a Nacos.
 - `kitexx/idempotency.go`: the owner's API rule "money and state-changing
   requests carry a request_id" made automatic. A method is idempotent when its
   Req has a `request_id` field (Kitex getter `GetRequestId`); the middleware

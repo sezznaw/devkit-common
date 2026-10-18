@@ -46,8 +46,15 @@ type Check struct {
 
 // Options of the runner.
 type Options struct {
-	// Timeout per check. Default 30s.
+	// Timeout per attempt of a check. Default 30s.
 	Timeout time.Duration
+	// RetryFor, when set, is how long a failing check is retried before it
+	// counts as failed: the Job starts the moment the rollout is healthy,
+	// and a Service endpoint, a Nacos list or a downstream release can be a
+	// few seconds behind. Each retry is logged. Zero: one attempt.
+	RetryFor time.Duration
+	// RetryEvery is the pause between attempts. Default 10s.
+	RetryEvery time.Duration
 }
 
 // Run runs every check in order and returns an error naming the failed
@@ -58,21 +65,38 @@ func Run(ctx context.Context, checks []Check, opts Options) error {
 	if timeout <= 0 {
 		timeout = 30 * time.Second
 	}
+	every := opts.RetryEvery
+	if every <= 0 {
+		every = 10 * time.Second
+	}
 	var failed []string
 	for _, c := range checks {
 		if c.Name == "" || c.Run == nil {
 			return errors.New("verifyx: a check needs a name and a function")
 		}
 		start := time.Now()
-		cctx, cancel := context.WithTimeout(ctx, timeout)
-		err := safely(cctx, c.Run)
-		cancel()
+		var err error
+		attempt := 0
+		for {
+			attempt++
+			cctx, cancel := context.WithTimeout(ctx, timeout)
+			err = safely(cctx, c.Run)
+			cancel()
+			if err == nil || ctx.Err() != nil || time.Since(start)+every > opts.RetryFor {
+				break
+			}
+			zlog.Warn("verify retrying", zlog.Str("check", c.Name), zlog.Int("attempt", int64(attempt)), zlog.Dur("in", every), zlog.Err(err))
+			select {
+			case <-ctx.Done():
+			case <-time.After(every):
+			}
+		}
 		if err != nil {
 			failed = append(failed, c.Name)
-			zlog.Error("verify failed", zlog.Str("check", c.Name), zlog.Str("description", c.Description), zlog.Dur("took", time.Since(start)), zlog.Err(err))
+			zlog.Error("verify failed", zlog.Str("check", c.Name), zlog.Str("description", c.Description), zlog.Int("attempts", int64(attempt)), zlog.Dur("took", time.Since(start)), zlog.Err(err))
 			continue
 		}
-		zlog.Info("verify ok", zlog.Str("check", c.Name), zlog.Dur("took", time.Since(start)))
+		zlog.Info("verify ok", zlog.Str("check", c.Name), zlog.Int("attempts", int64(attempt)), zlog.Dur("took", time.Since(start)))
 	}
 	if len(failed) > 0 {
 		return fmt.Errorf("verifyx: %d of %d checks failed: %s", len(failed), len(checks), strings.Join(failed, ", "))

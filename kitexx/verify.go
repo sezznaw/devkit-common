@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/sezznaw/devkit-common/kafkax"
@@ -41,7 +42,9 @@ func (rt *Runtime) RunVerify(checks []verifyx.Check) int {
 	defer zlog.Sync()
 	all := append(rt.frameworkChecks(), checks...)
 	zlog.Info("verify starting", zlog.Str("service", rt.Config.Service.Name), zlog.Int("checks", int64(len(all))))
-	err := verifyx.Run(context.Background(), all, verifyx.Options{Timeout: 30 * time.Second})
+	// A failing check is retried for two minutes: the Job starts the moment
+	// the rollout is healthy and the world can be a few seconds behind.
+	err := verifyx.Run(context.Background(), all, verifyx.Options{Timeout: 30 * time.Second, RetryFor: 2 * time.Minute, RetryEvery: 10 * time.Second})
 	RunShutdownHooks()
 	nacosCloseShared()
 	if err != nil {
@@ -109,6 +112,22 @@ func (rt *Runtime) frameworkChecks() []verifyx.Check {
 			}
 			if n > 0 {
 				return fmt.Errorf("%d delayed tasks failed for good (status failed): fix and reschedule", n)
+			}
+			return nil
+		}})
+	}
+	if d := idlDeps; !cfg.RegistryDisabled && !d.Empty() && len(d.Deps) > 0 {
+		out = append(out, verifyx.Check{Name: "idl-deps", Description: "every RPC service this release calls is registered at an IDL generation at least as new as the clients it was built with (idl.deps)", Run: func(ctx context.Context) error {
+			cli, err := nacosx.Shared(cfg.Nacos)
+			if err != nil {
+				return err
+			}
+			unmet, warnings := d.unmet(cli.Lookup)
+			if len(warnings) > 0 {
+				zlog.Ctx(ctx).Warn("idl-deps: not judged", zlog.Any("instances", warnings))
+			}
+			if len(unmet) > 0 {
+				return errors.New(strings.Join(unmet, "; "))
 			}
 			return nil
 		}})
