@@ -80,7 +80,10 @@ func PublicMethods(src []byte) map[string]bool {
 	return out
 }
 
-var methodLine = regexp.MustCompile(`^\s*\w+\s+(\w+)\s*\(`)
+// methodLine is a Thrift method declaration: `<return type> <Name>(`. The
+// return type may be qualified (`common.Empty`), so the directive comments
+// above a method that returns nothing are not lost.
+var methodLine = regexp.MustCompile(`^\s*[\w.]+\s+(\w+)\s*\(`)
 
 var auditLine = regexp.MustCompile(`@(audit|noaudit)\b`)
 

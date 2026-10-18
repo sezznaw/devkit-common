@@ -141,6 +141,18 @@ func TestPermMethods(t *testing.T) {
 	if len(got) != 1 || got["AdminList"] != "admin.view" {
 		t.Fatalf("%v", got)
 	}
+	// A qualified return type (common.Empty: a method that returns nothing)
+	// is a method too; its directives were silently dropped before v0.55.1.
+	qualified := []byte("service S {\n    // 删角色\n    // @perm role.manage\n    common.Empty Delete(1: DeleteReq req) (api.post=\"/v1/role/delete\")\n    // 重置密码\n    // @public\n    // @limit 10/m\n    common.Empty Reset(1: ResetReq req) (api.post=\"/v1/auth/reset\")\n}\n")
+	if p := PermMethods(qualified); len(p) != 1 || p["Delete"] != "role.manage" {
+		t.Fatalf("perm on a common.Empty method: %v", p)
+	}
+	if pub := PublicMethods(qualified); !pub["Reset"] || pub["Delete"] {
+		t.Fatalf("public on a common.Empty method: %v", pub)
+	}
+	if l := LimitMethods(qualified); l["Reset"] != "10/m" {
+		t.Fatalf("limit on a common.Empty method: %v", l)
+	}
 	doc := "openapi: 3.0.3\ninfo:\n  title: x\n  version: '1'\npaths:\n  /v1/admin/list:\n    post:\n      operationId: S_AdminList\n      responses: {}\n  /v1/auth/me:\n    post:\n      operationId: S_AuthMe\n      responses: {}\n"
 	out, err := Patch([]byte(doc), "", "", "", "x", Directives{}, nil, got, nil, nil)
 	if err != nil {
