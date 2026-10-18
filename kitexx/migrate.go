@@ -474,7 +474,7 @@ func migratePlan(db *gorm.DB, models []any) (migrationPlan, error) {
 			// when the table is migrated for another reason.
 			if d, ok := f.TagSettings["DEFAULT"]; ok && col.Default != nil {
 				want := strings.Trim(strings.TrimSpace(d), "'\"")
-				if want != *col.Default {
+				if !sameDefault(&want, col.Default) {
 					p.alterColumns = append(p.alterColumns, f.DBName+": default "+defaultText(col.Default)+" -> "+defaultText(&want))
 				}
 			}
@@ -504,11 +504,18 @@ func defaultText(d *string) string {
 	return "'" + *d + "'"
 }
 
+// sameDefault compares two column defaults. A number is compared as a
+// number: MySQL stores `default:0` on a decimal(24,3) column as "0.000".
 func sameDefault(a, b *string) bool {
 	if a == nil || b == nil {
 		return a == nil && b == nil
 	}
-	return *a == *b
+	if *a == *b {
+		return true
+	}
+	x, errX := strconv.ParseFloat(strings.TrimSpace(*a), 64)
+	y, errY := strconv.ParseFloat(strings.TrimSpace(*b), 64)
+	return errX == nil && errY == nil && x == y
 }
 
 // normalizeType makes a column type from a gorm tag and one from

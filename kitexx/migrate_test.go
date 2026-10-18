@@ -189,10 +189,14 @@ func TestAutoMigrateNoChangeIsTwoQueriesAndNoLock(t *testing.T) {
 	}
 }
 
-// A second, typed table for the two-tables test.
+// A second, typed table for the two-tables test. The decimal default is
+// the case that bit on dev: MySQL reports `default:0` as "0.000".
 type migUntypedOK struct {
-	ID   int64  `gorm:"column:id;type:bigint;primaryKey"`
-	Note string `gorm:"column:note;type:varchar(64);not null;default:''"`
+	ID     int64  `gorm:"column:id;type:bigint;primaryKey"`
+	Note   string `gorm:"column:note;type:varchar(64);not null;default:''"`
+	Amount string `gorm:"column:amount;type:decimal(24,3);not null;default:0"`
+	Rate   string `gorm:"column:rate;type:decimal(24,3);not null;default:1"`
+	Flag   bool   `gorm:"column:flag;type:tinyint(1);not null;default:0"`
 }
 
 func (migUntypedOK) TableName() string { return "mig_other" }
