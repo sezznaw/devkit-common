@@ -38,6 +38,13 @@ func Bearer(token string) Header { return Header{Key: "Authorization", Value: "B
 // rate limits count per IP).
 func From(ip string) Header { return Header{Key: "X-Forwarded-For", Value: ip} }
 
+// Device is the X-Device-Type header: the client's device type, read by
+// hertzx.Client into kitexx.Device(ctx).
+func Device(deviceType string) Header { return Header{Key: "X-Device-Type", Value: deviceType} }
+
+// DeviceID is the X-Device-Id header, read into kitexx.DeviceID(ctx).
+func DeviceID(id string) Header { return Header{Key: "X-Device-Id", Value: id} }
+
 // Post sends body (JSON-encoded) to path of the server in-process, no
 // network, and returns the parsed response. A body that is not JSON
 // (a 413, a 429 from the guard) leaves Code -1 and the text in Body.

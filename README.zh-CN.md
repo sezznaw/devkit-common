@@ -14,7 +14,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `zlog`    | 公司统一日志，基于 zap：由编译器检查的强类型字段；给人看的控制台格式（颜色、可点击的 `文件:行号`）和给采集系统的 JSON 格式；带 `trace_id` 的请求级 logger；详见下文 |
 | `config`  | 读取 `conf/<APP_ENV>.yaml`，支持 `${VAR}` 展开（`${VAR:-默认值}` 未设时取默认）；`Dir`/`LoadDefault` 定位 conf 目录；`Duration` 支持 `3s` 这类写法 |
 | `kitexx`  | 服务的 Runtime：配置里开了什么就在注册前打开（`rt.DB`、`rt.Redis`、`rt.Kafka`、`rt.Centrifugo`、`rt.S3`、`rt.Delay`、`rt.ID`、`rt.Report`、`rt.Provider(名字)`），Kitex 服务端/客户端选项（Nacos 注册发现、trace、指标、请求日志、参数校验、幂等、`limits:`），优雅停机，`--job`、`--verify`、`--dlq`；见下文 |
-| `hertzx`  | API（HTTP）服务的同一套：和 `kitexx` 共用配置，带 trace_id 的请求日志一路传到 RPC 服务，recovery、CORS、网关防护（`guard:` 请求体、时限、限流）、按 IDL 注解的 `RequireLogin` / `RequirePermission` / `Audit`、`Bind` 校验、加 `{code, msg, data}` 壳的 `OK` / `Fail` / `FailCode`、`/docs`；见下文 |
+| `hertzx`  | API（HTTP）服务的同一套：和 `kitexx` 共用配置，带 trace_id 的请求日志一路传到 RPC 服务，recovery、CORS、网关防护（`guard:` 请求体、时限、限流）、客户端设备与 IP（`client:`、`X-Device-Type`）、按 IDL 注解的 `RequireLogin` / `RequirePermission` / `Audit`、`Bind` 校验、加 `{code, msg, data}` 壳的 `OK` / `Fail` / `FailCode`、`/docs`；见下文 |
 | `devroute` | 从开发者本机接管 dev 的一个服务：`X-Dev-Tag` 作为 metainfo 持久值 `DEV_TAG` 跨每一跳，负载均衡器把带 tag 的请求送到同 tag 的接管实例（Nacos 分组 `DEV_TAKEOVER`），带 tag 的请求用调试超时；只在 `APP_ENV=dev` 开。工具是 `devkit takeover`；见下文 |
 | `pagex`   | 分页：`Normalize(req.Page)` 返回 page、size、offset，默认值（第 1 页、20 条、最多 100）只在这一处；见下文 |
 | `cmd/apidoc`、`cmd/errgen` | `make gen` 跑的两个生成器：网关从 IDL 目录生成 OpenAPI 文档（壳、required、x-error-codes）；每个服务从 `idl/errors/*.thrift` 的注释生成 `Message` / `Err` / `Errf`；见下文 |
@@ -487,6 +487,19 @@ Kitex 服务的一个实例拒绝超出能力的请求，让过载变成快速�
 ### 网关防护（`guard:`）
 
 API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 取代理转发的（X-Forwarded-For），即 Hertz 的 ClientIP。
+
+### 客户端设备与 IP（`client:`）
+
+请求的客户端是什么，是调用方的属性而不是某个操作的参数，所以走请求头和 context，不进请求体：`hertzx.Client`（`New` 装上，排在限流之后）从 `c.ClientIP()` 取 IP（代理的 `X-Forwarded-For`，没有就是连接地址），从 `X-Device-Type` 取设备类型、`X-Device-Id` 取设备号，写成 metainfo 持久值（`CLIENT_IP`、`DEVICE`、`DEVICE_ID`），和 uid 一样跨每一跳 RPC。网关和 RPC 服务的任何 handler 用 `kitexx.ClientIP(ctx)`、`kitexx.Device(ctx)`、`kitexx.DeviceID(ctx)`（或 `kitexx.ClientOf(ctx)`）读；请求体里不许再有 IP 或设备字段。
+
+```yaml
+client:
+  device:
+    required: true                               # 没带合法 X-Device-Type 的请求回 code 1001
+    types: [PC, H5, Android, iOS, Telegram]      # 允许的取值，匹配不分大小写，存的是这里的写法
+```
+
+没配 `types` 就完全不读这个头（后台网关）；配了，值不在列表里的不管是否 required 都回 1001（`X-Device-Type: 不合要求`），`required` 时没带也回 1001（`X-Device-Type: 必填`）。`/ping`、`/docs`、`/openapi.*` 永远不拒。`X-Device-Id` 可选，1 到 128 位 `[A-Za-z0-9._:-]`，别的拒绝。请求日志和这次请求的每条 RPC 记录都带 `device`。`ServeDocs` 把这两个头写进对外提供的 OpenAPI 文档（一个参数组件，每个接口引用，取值是 enum），前端生成器看得到；`/docs` 页默认带第一个取值。测试：网关测试用 `testx.Device("iOS")` / `testx.DeviceID(id)` 两个请求头，RPC handler 测试用 `kitexx.WithClient(ctx, kitexx.Client{Device: "iOS", IP: ...})` 扮演某个设备的请求；部署后检查把 `X-Device-Type` 放进 `verifyx.Gateway.Headers`。
 
 ### 接口文档（`cmd/apidoc`、`hertzx.ServeDocs`）
 

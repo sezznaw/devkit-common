@@ -117,6 +117,11 @@ type Config struct {
 	// limits per client IP (429, code 1008), service-wide and per route
 	// (`// @limit` in the IDL). Defaults apply without the section.
 	Guard GuardConfig `yaml:"guard"`
+	// Client: what an API service learns about the caller and passes on
+	// to the RPC services as metainfo (Device, DeviceID, ClientIP): the IP
+	// always, the device type from X-Device-Type when client.device.types
+	// is set (client.device.required refuses a request without one).
+	Client ClientConfig `yaml:"client"`
 	// Limits: what one instance of an RPC service refuses with code 5003
 	// (max_in_flight, default 1000; max_qps, off; max_connections, 10000).
 	Limits LimitsConfig `yaml:"limits"`
@@ -459,6 +464,9 @@ func LoggingMiddleware() endpoint.Middleware {
 			}
 			if tag := devroute.TagString(ctx); tag != "" {
 				ctx = zlog.CtxWith(ctx, zlog.Str("dev_tag", tag))
+			}
+			if d := Device(ctx); d != "" {
+				ctx = zlog.CtxWith(ctx, zlog.Str("device", d))
 			}
 
 			err := next(ctx, req, resp)

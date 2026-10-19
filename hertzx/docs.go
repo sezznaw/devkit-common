@@ -34,6 +34,17 @@ func ServeDocs(h *server.Hertz, cfg kitexx.Config, spec []byte) {
 		zlog.Warn("docs.enabled but the OpenAPI document is empty: run make gen")
 		return
 	}
+	device := ""
+	if d := cfg.Client.Device; d.Enabled() {
+		// the headers hertzx.Client reads, for readers and the front end's generator
+		patched, err := withDeviceHeaders(spec, d)
+		if err != nil {
+			zlog.Warn("openapi.yaml does not parse; device headers not documented", zlog.Err(err))
+		} else {
+			spec = patched
+		}
+		device = d.Types[0]
+	}
 	specJSON, err := yamlToJSON(spec)
 	if err != nil {
 		zlog.Warn("openapi.yaml does not parse; /openapi.json not served", zlog.Err(err))
@@ -42,7 +53,7 @@ func ServeDocs(h *server.Hertz, cfg kitexx.Config, spec []byte) {
 	if title == "" {
 		title = cfg.Service.Name
 	}
-	page := []byte(strings.NewReplacer("{{title}}", title+" · API 文档").Replace(docsPage))
+	page := []byte(strings.NewReplacer("{{title}}", title+" · API 文档", "{{device}}", device).Replace(docsPage))
 	h.GET("/openapi.yaml", func(_ context.Context, c *app.RequestContext) {
 		c.Data(200, "application/yaml; charset=utf-8", spec)
 	})
@@ -63,8 +74,9 @@ func ServeDocs(h *server.Hertz, cfg kitexx.Config, spec []byte) {
 
 // docsPage is the documentation page: Scalar reading /openapi.yaml. The
 // configuration keeps the IDL's field order and remembers the auth a reader
-// entered. A hook for a login flow (store the token, attach it, refresh it)
-// is where the project's auth lands once there is one.
+// entered. The page's fetch hook attaches the access token a login answered
+// and, when the gateway reads X-Device-Type, that header with the first
+// configured type unless the reader filled it in.
 const docsPage = `<!doctype html>
 <html lang="zh-CN">
   <head>
@@ -76,8 +88,10 @@ const docsPage = `<!doctype html>
     <script>
       // 登录后自动带 token：拦截页面发出的 fetch，把登录 / 刷新接口返回的 data.access_token 记住，
       // 之后每个没有 Authorization 的请求自动加上。token 只存在这个浏览器的 localStorage 里。
+      // 网关要求 X-Device-Type 时（DEVICE 非空），没填的请求自动带配置里的第一个值。
       (function () {
         var KEY = 'sportsbook_docs_access_token';
+        var DEVICE = '{{device}}';
         var orig = window.fetch.bind(window);
         function remember(resp) {
           try {
@@ -91,9 +105,11 @@ const docsPage = `<!doctype html>
           var req = input instanceof Request ? input : new Request(input, init);
           var tok = localStorage.getItem(KEY);
           var sameOrigin = req.url.indexOf(location.origin) === 0;
-          if (tok && sameOrigin && !req.headers.get('Authorization')) {
-            var h = new Headers(req.headers); h.set('Authorization', 'Bearer ' + tok);
-            req = new Request(req, { headers: h });
+          if (sameOrigin) {
+            var h = new Headers(req.headers), changed = false;
+            if (tok && !h.get('Authorization')) { h.set('Authorization', 'Bearer ' + tok); changed = true; }
+            if (DEVICE && !h.get('X-Device-Type')) { h.set('X-Device-Type', DEVICE); changed = true; }
+            if (changed) req = new Request(req, { headers: h });
           }
           return orig(req).then(function (resp) { if (sameOrigin) remember(resp); return resp; });
         };

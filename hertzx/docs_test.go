@@ -31,6 +31,16 @@ func TestServeDocs(t *testing.T) {
 	if w := ut.PerformRequest(h.Engine, "GET", "/docs/scalar.js", nil); w.Code != 200 || w.Body.Len() < 1_000_000 {
 		t.Errorf("/docs/scalar.js: %d %d bytes", w.Code, w.Body.Len())
 	}
+	// with client.device.types the served document carries the headers and the page the default
+	withDev := server.New(server.WithDisablePrintRoute(true))
+	cfg.Client.Device.Types = []string{"PC", "H5"}
+	ServeDocs(withDev, cfg, []byte("openapi: 3.0.3\ninfo: {title: t, version: v}\npaths:\n  /v1/x:\n    post:\n      summary: x\n"))
+	if w := ut.PerformRequest(withDev.Engine, "GET", "/openapi.json", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `"X-Device-Type"`) || !strings.Contains(w.Body.String(), `"enum":["PC","H5"]`) {
+		t.Errorf("openapi.json without device header: %d %s", w.Code, w.Body.String())
+	}
+	if w := ut.PerformRequest(withDev.Engine, "GET", "/docs", nil); !strings.Contains(w.Body.String(), "var DEVICE = 'PC';") {
+		t.Errorf("/docs page without the default device")
+	}
 	off := server.New(server.WithDisablePrintRoute(true))
 	ServeDocs(off, kitexx.Config{}, spec)
 	if w := ut.PerformRequest(off.Engine, "GET", "/openapi.yaml", nil); w.Code != 404 {

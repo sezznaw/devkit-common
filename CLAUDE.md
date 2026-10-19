@@ -636,6 +636,18 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   (0.15.0) installs the plugin in `make tools`, runs apidoc in `make gen`
   into cmd/<svc>/openapi.yaml (gitignored, embedded with go:embed by
   main.go) and calls ServeDocs after hertzx.New.
+- `kitexx/client.go` + `hertzx/client.go` (v0.56.0, owner's decision 2026-10-19 for
+  sportsbook): the caller's device type, device id and IP are properties of the client,
+  not of an operation, so they are request headers (`X-Device-Type`, `X-Device-Id`) and
+  `c.ClientIP()`, carried as persistent metainfo (`DEVICE`, `DEVICE_ID`, `CLIENT_IP`)
+  exactly like UID / DEV_TAG, read with `kitexx.Device/DeviceID/ClientIP(ctx)`; request
+  bodies must not carry them. The allowed types are configuration (`client.device.types`,
+  a project fact), the mechanism is here. `hertzx.Client` sits after `Guard` (a client
+  without the header is still rate limited) and refuses with the 1001 envelope like
+  `Bind`; framework paths are exempt. The request log learns the device through
+  `c.Set(deviceCtxKey)` because `RequestLog` runs before and logs after. `ServeDocs`
+  patches the served OpenAPI (yaml.Node, order kept) with the header parameters, since
+  apidoc does not see the configuration; the docs page sends the first type by default.
 - `authx` (v0.25.0; owner's design decisions 2026-10-08: a dedicated
   ser-auth, authentication for every realm, authorization elsewhere; members
   single-session, no guest login; access 15m, refresh 30d): HS256 JWT with

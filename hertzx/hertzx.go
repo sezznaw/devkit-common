@@ -90,6 +90,11 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 		debug = cfg.DevRoute.Timeout()
 	}
 	h.Use(Guard(h, cfg.Guard, rt.Redis, cfg.Service.Name, debug))
+	// after the rate limit, so a client without the header is still counted
+	h.Use(Client(cfg.Client))
+	if cfg.Client.Device.Enabled() {
+		zlog.Info("client device on", zlog.Any("types", cfg.Client.Device.Types), zlog.Any("required", cfg.Client.Device.Required))
+	}
 	// after the guard's body limit: the request_id of the body, for the RPC calls
 	h.Use(RequestID())
 	zlog.Info("guard on", zlog.Int("max_body_bytes", int64(cfg.Guard.MaxBody())), zlog.Dur("timeout", cfg.Guard.RequestTimeout()), zlog.Str("rate_per_ip", cfg.Guard.PerIP().String()))
@@ -279,6 +284,9 @@ func RequestLog() app.HandlerFunc {
 
 		status := c.Response.StatusCode()
 		fields := []zlog.Field{zlog.Int("status", status), zlog.Dur("latency", time.Since(start)), zlog.Str("client", c.ClientIP())}
+		if d := c.GetString(deviceCtxKey); d != "" {
+			fields = append(fields, zlog.Str("device", d))
+		}
 		switch {
 		case status >= 500:
 			zlog.Ctx(ctx).Error("http", fields...)

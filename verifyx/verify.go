@@ -125,6 +125,9 @@ const BaseURLEnv = "VERIFY_BASE_URL"
 type Gateway struct {
 	BaseURL string
 	Token   string // Authorization: Bearer, after a login check sets it
+	// Headers go on every request: what the gateway requires of a client,
+	// such as X-Device-Type when client.device.required is on.
+	Headers map[string]string
 	client  *http.Client
 }
 
@@ -151,6 +154,7 @@ func (g *Gateway) Get(ctx context.Context, path string) ([]byte, error) {
 	if err != nil {
 		return nil, err
 	}
+	g.setHeaders(req)
 	return g.do(req)
 }
 
@@ -166,6 +170,7 @@ func (g *Gateway) Post(ctx context.Context, path string, body any) (*Envelope, e
 		return nil, err
 	}
 	req.Header.Set("Content-Type", "application/json")
+	g.setHeaders(req)
 	if g.Token != "" {
 		req.Header.Set("Authorization", "Bearer "+g.Token)
 	}
@@ -181,6 +186,12 @@ func (g *Gateway) Post(ctx context.Context, path string, body any) (*Envelope, e
 		return &env, fmt.Errorf("%s: code %d: %s", path, env.Code, env.Msg)
 	}
 	return &env, nil
+}
+
+func (g *Gateway) setHeaders(req *http.Request) {
+	for k, v := range g.Headers {
+		req.Header.Set(k, v)
+	}
 }
 
 func (g *Gateway) do(req *http.Request) ([]byte, error) {
