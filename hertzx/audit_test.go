@@ -53,6 +53,7 @@ func TestAuditMiddleware(t *testing.T) {
 	h := server.New(server.WithDisablePrintRoute(true))
 	h.Use(func(ctx context.Context, c *app.RequestContext) {
 		ctx = kitexx.WithIdentity(ctx, authx.Identity{Realm: authx.RealmAdmin, UID: 7})
+		ctx = kitexx.WithClient(ctx, kitexx.Client{DeviceID: "dev-1", IP: "203.0.113.9"})
 		c.Next(ctx)
 	})
 	Audit(h, []byte(auditSpec), func(ctx context.Context, e AuditEntry) {
@@ -61,7 +62,7 @@ func TestAuditMiddleware(t *testing.T) {
 		mu.Unlock()
 	})
 	h.POST("/v1/admin/create", func(ctx context.Context, c *app.RequestContext) {
-		c.JSON(200, map[string]any{"code": 10002, "msg": "username is taken"})
+		c.JSON(200, map[string]any{"code": 10002, "msg": "username is taken", "data": map[string]any{"token": "t", "uid": 9}})
 	})
 	h.POST("/v1/admin/list", func(ctx context.Context, c *app.RequestContext) { c.JSON(200, map[string]any{"code": 0}) })
 	h.POST("/v1/auth/login", func(ctx context.Context, c *app.RequestContext) { c.JSON(200, map[string]any{"code": 0}) })
@@ -83,6 +84,13 @@ func TestAuditMiddleware(t *testing.T) {
 	}
 	if !strings.Contains(e.Request, `"password":"***"`) || !strings.Contains(e.Request, `"username":"bob"`) {
 		t.Fatalf("redaction: %s", e.Request)
+	}
+	// the answer is kept too, redacted the same way, and the client's device id
+	if !strings.Contains(e.Response, `"code":10002`) || !strings.Contains(e.Response, `"uid":9`) || !strings.Contains(e.Response, `"token":"***"`) {
+		t.Fatalf("response: %s", e.Response)
+	}
+	if e.DeviceID != "dev-1" {
+		t.Fatalf("device id: %q", e.DeviceID)
 	}
 	if got[1].Action != "登录" || !strings.Contains(got[1].Request, `"password":"***"`) {
 		t.Fatalf("%+v", got[1])

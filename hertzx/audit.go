@@ -43,12 +43,14 @@ type AuditEntry struct {
 	Path       string    `json:"path"`       // route
 	Permission string    `json:"permission"` // the operation's permission point, if any
 	Request    string    `json:"request"`    // JSON body, secrets redacted, at most 4 KiB
+	Response   string    `json:"response"`   // JSON body of the answer, secrets redacted, at most 4 KiB
 	Status     int       `json:"status"`     // HTTP status
 	Code       int32     `json:"code"`       // business code of the envelope, -1 when there is none
 	Msg        string    `json:"msg"`
 	TraceID    string    `json:"trace_id"`
 	ClientIP   string    `json:"client_ip"`
 	UserAgent  string    `json:"user_agent"`
+	DeviceID   string    `json:"device_id"` // X-Device-Id the client sent (kitexx.DeviceID), "" when none
 	DurationMS int64     `json:"duration_ms"`
 }
 
@@ -101,9 +103,14 @@ const auditBodyLimit = 4096
 // Audit installs the audit middleware: install it after RequireLogin so
 // the entry carries the login. Every audited operation produces one
 // entry, whatever its outcome (a refused write is worth knowing about).
+// The entry keeps both bodies, request and response, redacted and cut to
+// 4 KiB each, so a back office can show what was asked and what was
+// answered; and the device id the client sent (the Client middleware put
+// it in the context), for a login log.
 //
 // Audit 装审计中间件，放在 RequireLogin 之后以带上登录身份。每个被审计的接口每次调用记一条，
-// 不论成功失败（被拒的写操作也值得记）。
+// 不论成功失败（被拒的写操作也值得记）。请求体和响应体都记（打码、各截 4 KiB），后台的
+// 「请求 / 响应参数」弹窗用；还记客户端送来的设备号（Client 中间件放进 ctx 的），登录日志用。
 func Audit(h *server.Hertz, spec []byte, sink AuditSink) {
 	ops := auditedOperations(spec)
 	if len(ops) == 0 {
@@ -126,11 +133,13 @@ func Audit(h *server.Hertz, spec []byte, sink AuditSink) {
 			Path:       string(c.Path()),
 			Permission: op.permission,
 			Request:    request,
+			Response:   Redact(c.Response.Body()),
 			Status:     c.Response.StatusCode(),
 			Code:       -1,
 			TraceID:    otelx.TraceID(ctx),
 			ClientIP:   c.ClientIP(),
 			UserAgent:  string(c.UserAgent()),
+			DeviceID:   kitexx.DeviceID(ctx),
 			DurationMS: time.Since(start).Milliseconds(),
 		}
 		if uid, logged := kitexx.UID(ctx); logged {
