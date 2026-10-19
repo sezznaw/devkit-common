@@ -803,8 +803,9 @@ through the owning service (members: ser-member) and uses
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` for `Login`, `Refresh` (the old
 refresh token is retired; using it again is a leak and revokes every session
 of the principal), `Logout` (session ended, access token blacklisted) and
-`RevokeAll` (password changed, account frozen, kicked by staff). Sessions
-live in its Redis keys (`auth:*`).
+`RevokeAll(ctx, realm, uid, reason)` (password changed, account frozen,
+kicked by staff; reason is a word of the project's own, such as `disabled` or
+`password_reset`, saying why). Sessions live in its Redis keys (`auth:*`).
 
 A gateway verifies, it does not call ser-auth per request:
 `authx.NewVerifier(rt.Config.Auth, rt.Redis)` checks the signature and
@@ -813,7 +814,11 @@ claims locally and reads Redis once (session alive, token not blacklisted);
 except the ones the IDL marks `// @public` (apidoc leaves those without a
 security requirement) and the framework's paths (/ping, /docs, /openapi.*).
 A request without a token is HTTP 401 `{code: 1004}`, a revoked session
-`{code: 1005}`. The identity travels with the context: `kitexx.UID(ctx)` (or `kitexx.MustUID(ctx)` where the login check already ran, and `kitexx.Realm(ctx)`) in
+`{code: 1005}` with `data.reason` saying why: `replaced` (a newer login of
+the same principal), `logout`, `refresh_replayed` (the library's own three)
+or the word passed to `RevokeAll`, so the front end can tell the user
+"logged in elsewhere" or "account disabled" rather than a generic "please
+log in again". The identity travels with the context: `kitexx.UID(ctx)` (or `kitexx.MustUID(ctx)` where the login check already ran, and `kitexx.Realm(ctx)`) in
 the gateway handler and in every RPC service it calls, so `uid` is never a
 request field. Authorization (what a principal may do) is not here.
 

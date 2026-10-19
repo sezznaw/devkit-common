@@ -17,7 +17,7 @@ import (
 // Business codes of the login state (idl/errors/common.thrift).
 const (
 	CodeUnauthenticated = 1004 // no token, or invalid / expired
-	CodeSessionRevoked  = 1005 // logged out, replaced by a newer login, or revoked
+	CodeSessionRevoked  = 1005 // logged out, replaced by a newer login, or revoked; data.reason says which
 )
 
 // RequireLogin makes every endpoint require a valid access token except the
@@ -46,7 +46,7 @@ func RequireLogin(h *server.Hertz, v *authx.Verifier, spec []byte, publicPaths .
 		id, err := v.Verify(ctx, token)
 		switch {
 		case errors.Is(err, authx.ErrSessionRevoked):
-			reject(c, CodeSessionRevoked, "会话已失效，请重新登录")
+			rejectRevoked(c, authx.RevokeReason(err))
 			return
 		case err != nil:
 			reject(c, CodeUnauthenticated, "登录已过期，请重新登录")
@@ -60,6 +60,14 @@ func RequireLogin(h *server.Hertz, v *authx.Verifier, spec []byte, publicPaths .
 
 func reject(c *app.RequestContext, code int, msg string) {
 	c.AbortWithStatusJSON(401, map[string]any{"code": code, "msg": msg})
+}
+
+// rejectRevoked is the 1005 answer; data.reason says why the session ended
+// (authx.ReasonReplaced, authx.ReasonLogout, or whatever the project passed
+// to RevokeAll: disabled, password_reset...; "" when unknown), so the front
+// end can tell the user what happened instead of a generic "please log in".
+func rejectRevoked(c *app.RequestContext, reason string) {
+	c.AbortWithStatusJSON(401, map[string]any{"code": CodeSessionRevoked, "msg": "会话已失效，请重新登录", "data": map[string]string{"reason": reason}})
 }
 
 func isFrameworkPath(p string) bool {

@@ -558,12 +558,14 @@ auth:
 
 一个服务负责所有人的认证（`ser-auth`）：通过账号所属的服务校验密码（会员是 ser-member），用
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` 做 `Login`、`Refresh`（旧 refresh 作废；再用它就是泄露，吊销该主体全部会话）、
-`Logout`（结束会话、拉黑 access）和 `RevokeAll`（改密码、封号、后台踢人）。会话数据在它的 Redis 键里（`auth:*`）。
+`Logout`（结束会话、拉黑 access）和 `RevokeAll(ctx, realm, uid, reason)`（改密码、封号、后台踢人；reason 是项目自己定的一个词，如
+`disabled`、`password_reset`，说明为什么吊销）。会话数据在它的 Redis 键里（`auth:*`）。
 
 网关只校验、不按请求调 ser-auth：`authx.NewVerifier(rt.Config.Auth, rt.Redis)` 本地验签名和声明，再读一次 Redis
 （会话是否还活着、令牌是否被拉黑）；`hertzx.RequireLogin(h, verifier, openAPI, publicPaths...)` 把它装到所有接口上，除了 IDL 里标了
 `// @public` 的（apidoc 不给它们加安全要求）和框架自己的路径（/ping、/docs、/openapi.*）。没带令牌回 HTTP 401
-`{code: 1004}`，会话已失效回 `{code: 1005}`。身份随上下文走：网关 handler 和它调用的每个 RPC 服务里 `kitexx.UID(ctx)`（登录校验已经跑过的地方用 `kitexx.MustUID(ctx)`；`kitexx.Realm(ctx)` 取领域）
+`{code: 1004}`，会话已失效回 `{code: 1005}`，并在 `data.reason` 里说明为什么：`replaced`（被同一账号的新登录顶掉）、`logout`、
+`refresh_replayed`（库自己写的三种），或 `RevokeAll` 传入的词；前端按它给出「此账号已在其他位置登录」「账号已停用」这类准确提示，而不是一句笼统的「请重新登录」。身份随上下文走：网关 handler 和它调用的每个 RPC 服务里 `kitexx.UID(ctx)`（登录校验已经跑过的地方用 `kitexx.MustUID(ctx)`；`kitexx.Realm(ctx)` 取领域）
 都能拿到，`uid` 永远不再是请求字段。授权（能做什么）不在这里。
 
 ### 后台操作审计 `hertzx.Audit`

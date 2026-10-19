@@ -56,7 +56,7 @@ func TestLoginVerifyRefreshLogout(t *testing.T) {
 	if _, err := iss.Refresh(ctx, tk.RefreshToken); !errors.Is(err, ErrRefreshReplayed) {
 		t.Fatalf("replay: %v", err)
 	}
-	if _, err := ver.Verify(ctx, tk2.AccessToken); !errors.Is(err, ErrSessionRevoked) {
+	if _, err := ver.Verify(ctx, tk2.AccessToken); !errors.Is(err, ErrSessionRevoked) || RevokeReason(err) != ReasonRefreshReplayed {
 		t.Fatalf("after replay every session is dead: %v", err)
 	}
 	if _, err := iss.Refresh(ctx, "nope"); !errors.Is(err, ErrRefreshInvalid) {
@@ -67,11 +67,20 @@ func TestLoginVerifyRefreshLogout(t *testing.T) {
 	if err := iss.Logout(ctx, tk3.RefreshToken, tk3.AccessToken); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := ver.Verify(ctx, tk3.AccessToken); !errors.Is(err, ErrSessionRevoked) {
+	if _, err := ver.Verify(ctx, tk3.AccessToken); !errors.Is(err, ErrSessionRevoked) || RevokeReason(err) != ReasonLogout {
 		t.Errorf("after logout: %v", err)
 	}
 	if _, err := iss.Refresh(ctx, tk3.RefreshToken); err == nil {
 		t.Error("refresh after logout must fail")
+	}
+	// a refresh of a session ended by RevokeAll says why as well
+	tk4, _ := iss.Login(ctx, RealmMember, 42)
+	iss.RevokeAll(ctx, RealmMember, 42, "password_reset")
+	if _, err := iss.Refresh(ctx, tk4.RefreshToken); !errors.Is(err, ErrSessionRevoked) || RevokeReason(err) != "password_reset" {
+		t.Errorf("refresh after revoke: %v", err)
+	}
+	if RevokeReason(ErrInvalidToken) != "" || RevokeReason(nil) != "" {
+		t.Error("RevokeReason on a non-revocation")
 	}
 }
 
@@ -92,9 +101,13 @@ func TestSingleSessionAndRealm(t *testing.T) {
 		t.Errorf("wrong realm: %v", err)
 	}
 	// RevokeAll ends the live session.
-	iss.RevokeAll(ctx, RealmMember, 7)
-	if _, err := ver.Verify(ctx, b.AccessToken); !errors.Is(err, ErrSessionRevoked) {
-		t.Errorf("after revoke all: %v", err)
+	iss.RevokeAll(ctx, RealmMember, 7, "disabled")
+	if _, err := ver.Verify(ctx, b.AccessToken); !errors.Is(err, ErrSessionRevoked) || RevokeReason(err) != "disabled" {
+		t.Errorf("after revoke all: %v (reason %q)", err, RevokeReason(err))
+	}
+	// the reason the first login was kicked
+	if _, err := ver.Verify(ctx, a.AccessToken); RevokeReason(err) != ReasonReplaced {
+		t.Errorf("replaced reason: %v", err)
 	}
 	if BearerToken("Bearer abc") != "abc" || BearerToken("Basic x") != "" {
 		t.Error("BearerToken")

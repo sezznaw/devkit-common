@@ -153,6 +153,7 @@ func keyRefresh(hash string) string     { return "auth:rt:" + hash }
 func keyUsed(hash string) string        { return "auth:rtused:" + hash }
 func keyBlacklist(jti string) string    { return "auth:bl:" + jti }
 func keySessionAlive(sid string) string { return "auth:sid:" + sid }
+func keyEnded(sid string) string        { return "auth:ended:" + sid } // why the session ended, kept as long as a refresh token could live
 
 type claims struct {
 	jwt.RegisteredClaims
@@ -192,6 +193,44 @@ func NewIssuer(cfg Config, rdb *redis.Client) (*Issuer, error) {
 	return &Issuer{cfg: cfg, rdb: rdb, now: time.Now}, nil
 }
 
+// Why a session ended. The verifier hands the reason back with
+// ErrSessionRevoked (RevokeReason) and the gateway puts it in the 1005
+// answer, so the front end can tell "logged in elsewhere" from "your account
+// was disabled". These three are the library's own; RevokeAll takes any
+// string the project defines (disabled, password_reset, ...).
+//
+// 会话为什么结束：校验时随 ErrSessionRevoked 带回（RevokeReason），网关放进 1005 的响应里，前端据此区分
+// 「在别处登录」和「账号被停用」。这三个是库自己写的；RevokeAll 的 reason 由项目自定（disabled、password_reset……）。
+const (
+	ReasonReplaced        = "replaced"         // single_session：同一主体的新登录顶掉了它
+	ReasonLogout          = "logout"           // 主体自己登出
+	ReasonRefreshReplayed = "refresh_replayed" // 作废的 refresh 被再次使用，判定泄露，全部会话吊销
+)
+
+// RevokedError is the ErrSessionRevoked of a session whose end was recorded
+// with a reason. errors.Is(err, ErrSessionRevoked) stays true.
+type RevokedError struct{ Reason string }
+
+func (e *RevokedError) Error() string {
+	if e.Reason == "" {
+		return ErrSessionRevoked.Error()
+	}
+	return ErrSessionRevoked.Error() + ": " + e.Reason
+}
+
+// Unwrap makes errors.Is(err, ErrSessionRevoked) hold.
+func (e *RevokedError) Unwrap() error { return ErrSessionRevoked }
+
+// RevokeReason is why the session behind err ended; "" when unknown or when
+// err is not a revocation.
+func RevokeReason(err error) string {
+	var r *RevokedError
+	if errors.As(err, &r) {
+		return r.Reason
+	}
+	return ""
+}
+
 type refreshRecord struct {
 	Realm Realm  `json:"realm"`
 	UID   int64  `json:"uid"`
@@ -205,9 +244,10 @@ func (i *Issuer) Login(ctx context.Context, realm Realm, uid int64) (Tokens, err
 	sid := randomID(16)
 	if i.cfg.singleSession() {
 		if old, err := i.rdb.Get(ctx, keySession(realm, uid)).Result(); err == nil && old != "" {
-			if err := i.endSession(ctx, old); err != nil {
+			if err := i.endSession(ctx, old, ReasonReplaced); err != nil {
 				return Tokens{}, err
 			}
+			i.rdb.SRem(ctx, keySessionSet(realm, uid), old)
 		}
 	}
 	pipe := i.rdb.TxPipeline()
@@ -257,7 +297,7 @@ func (i *Issuer) Refresh(ctx context.Context, refreshToken string) (Tokens, erro
 		if used, _ := i.rdb.Get(ctx, keyUsed(h)).Result(); used != "" {
 			var rec refreshRecord
 			if json.Unmarshal([]byte(used), &rec) == nil {
-				_ = i.RevokeAll(ctx, rec.Realm, rec.UID)
+				_ = i.RevokeAll(ctx, rec.Realm, rec.UID, ReasonRefreshReplayed)
 			}
 			return Tokens{}, ErrRefreshReplayed
 		}
@@ -273,7 +313,7 @@ func (i *Issuer) Refresh(ctx context.Context, refreshToken string) (Tokens, erro
 	// The session must still be alive (not logged out, not replaced).
 	if alive, _ := i.rdb.Exists(ctx, keySessionAlive(rec.SID)).Result(); alive == 0 {
 		i.rdb.Del(ctx, keyRefresh(h))
-		return Tokens{}, ErrSessionRevoked
+		return Tokens{}, revoked(ctx, i.rdb, rec.SID)
 	}
 	pipe := i.rdb.TxPipeline()
 	pipe.Del(ctx, keyRefresh(h))
@@ -292,7 +332,7 @@ func (i *Issuer) Logout(ctx context.Context, refreshToken, accessToken string) e
 	if err == nil {
 		var rec refreshRecord
 		if json.Unmarshal([]byte(raw), &rec) == nil {
-			if err := i.endSession(ctx, rec.SID); err != nil {
+			if err := i.endSession(ctx, rec.SID, ReasonLogout); err != nil {
 				return err
 			}
 			cur, _ := i.rdb.Get(ctx, keySession(rec.Realm, rec.UID)).Result()
@@ -315,19 +355,36 @@ func (i *Issuer) Logout(ctx context.Context, refreshToken, accessToken string) e
 
 // RevokeAll ends every session of a principal: password changed, account
 // frozen, kicked by staff. Access tokens die at the next request, because
-// the gateway checks the session.
-func (i *Issuer) RevokeAll(ctx context.Context, realm Realm, uid int64) error {
+// the gateway checks the session. reason is the project's word for why
+// (disabled, password_reset, ...); the gateway's 1005 answer carries it.
+// Empty means unknown.
+func (i *Issuer) RevokeAll(ctx context.Context, realm Realm, uid int64, reason string) error {
 	sids, _ := i.rdb.SMembers(ctx, keySessionSet(realm, uid)).Result()
 	for _, sid := range sids {
-		if err := i.endSession(ctx, sid); err != nil {
+		if err := i.endSession(ctx, sid, reason); err != nil {
 			return err
 		}
 	}
 	return i.rdb.Del(ctx, keySession(realm, uid), keySessionSet(realm, uid)).Err()
 }
 
-func (i *Issuer) endSession(ctx context.Context, sid string) error {
-	return i.rdb.Del(ctx, keySessionAlive(sid)).Err()
+// endSession kills the session and records why, for as long as a refresh
+// token of it could still come back.
+func (i *Issuer) endSession(ctx context.Context, sid, reason string) error {
+	pipe := i.rdb.TxPipeline()
+	pipe.Del(ctx, keySessionAlive(sid))
+	if reason != "" {
+		// 第一次记下的原因才是它结束的原因（被顶掉的会话之后再被整体吊销，不改写成后者）。
+		pipe.SetNX(ctx, keyEnded(sid), reason, i.cfg.RefreshTTL.Or(defaultRefreshTTL))
+	}
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// revoked is the ErrSessionRevoked for sid, with the recorded reason when there is one.
+func revoked(ctx context.Context, rdb *redis.Client, sid string) error {
+	reason, _ := rdb.Get(ctx, keyEnded(sid)).Result()
+	return &RevokedError{Reason: reason}
 }
 
 func parse(cfg Config, token string) (*claims, error) {
@@ -385,8 +442,11 @@ func (v *Verifier) Verify(ctx context.Context, accessToken string) (Identity, er
 	if _, err := pipe.Exec(ctx); err != nil {
 		return Identity{}, fmt.Errorf("authx: session check: %w", err)
 	}
-	if bl.Val() > 0 || alive.Val() == 0 {
-		return Identity{}, ErrSessionRevoked
+	if bl.Val() > 0 {
+		return Identity{}, &RevokedError{Reason: ReasonLogout}
+	}
+	if alive.Val() == 0 {
+		return Identity{}, revoked(ctx, v.rdb, c.SID)
 	}
 	return Identity{Realm: c.Realm, UID: uid, SID: c.SID, JTI: c.ID, Exp: c.ExpiresAt.Time}, nil
 }

@@ -60,8 +60,16 @@ func TestRequireLogin(t *testing.T) {
 	if w := ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil, ut.Header{Key: "Authorization", Value: "Bearer " + tk.AccessToken}); w.Code != 200 || seen != 42 {
 		t.Errorf("with token: %d uid=%d", w.Code, seen)
 	}
-	iss.RevokeAll(context.Background(), authx.RealmMember, 42)
-	if w := ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil, ut.Header{Key: "Authorization", Value: "Bearer " + tk.AccessToken}); w.Code != 401 || !strings.Contains(w.Body.String(), `"code":1005`) {
+	iss.RevokeAll(context.Background(), authx.RealmMember, 42, "disabled")
+	w := ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil, ut.Header{Key: "Authorization", Value: "Bearer " + tk.AccessToken})
+	if w.Code != 401 || !strings.Contains(w.Body.String(), `"code":1005`) || !strings.Contains(w.Body.String(), `"reason":"disabled"`) {
 		t.Errorf("revoked: %d %s", w.Code, w.Body.String())
+	}
+	// kicked by a newer login: the answer says so
+	tk, _ = iss.Login(context.Background(), authx.RealmMember, 42)
+	_, _ = iss.Login(context.Background(), authx.RealmMember, 42)
+	w = ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil, ut.Header{Key: "Authorization", Value: "Bearer " + tk.AccessToken})
+	if !strings.Contains(w.Body.String(), `"reason":"replaced"`) {
+		t.Errorf("replaced: %s", w.Body.String())
 	}
 }
