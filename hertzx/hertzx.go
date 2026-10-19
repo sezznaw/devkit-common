@@ -108,9 +108,12 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 // such as curl or a mobile app, are not affected).
 func CORS(cfg kitexx.CORSConfig) app.HandlerFunc {
 	return cors.New(cors.Config{
-		AllowOrigins:     cfg.AllowedOrigins,
-		AllowMethods:     []string{"POST", "GET", "OPTIONS"},
-		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-Id", devroute.HeaderKey},
+		AllowOrigins: cfg.AllowedOrigins,
+		AllowMethods: []string{"POST", "GET", "OPTIONS"},
+		// the client's device headers (Client middleware, v0.56.0) are custom headers: a browser
+		// front end sends them only when the preflight lists them (found on 2026-10-19: web-admin
+		// could not log in once it sent X-Device-Id)
+		AllowHeaders:     []string{"Authorization", "Content-Type", "X-Request-Id", devroute.HeaderKey, DeviceHeader, DeviceIDHeader},
 		ExposeHeaders:    []string{"x-trace-id"},
 		AllowCredentials: false,
 		MaxAge:           12 * time.Hour,

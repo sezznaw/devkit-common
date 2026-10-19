@@ -28,8 +28,10 @@ func TestCORS(t *testing.T) {
 	if got := string(w.Header().Peek("Access-Control-Allow-Origin")); got != "https://tester.example.com" {
 		t.Fatalf("allow-origin %q", got)
 	}
-	if got := string(w.Header().Peek("Access-Control-Allow-Headers")); got == "" {
-		t.Fatal("no allow-headers")
+	// the device headers of the Client middleware must be in the list, or a browser front end
+	// that sends X-Device-Id / X-Device-Type never gets past the preflight
+	if got := string(w.Header().Peek("Access-Control-Allow-Headers")); got == "" || !strings.Contains(got, DeviceHeader) || !strings.Contains(got, DeviceIDHeader) {
+		t.Fatalf("allow-headers %q", got)
 	}
 
 	// the request itself carries the origin back and exposes x-trace-id
