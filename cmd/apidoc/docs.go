@@ -413,7 +413,8 @@ func setTag(op *yaml.Node, tag string) {
 }
 
 // splitSummary: the first sentence of the first line (up to the first 。 or
-// ". ") is the summary, the rest the description. Directive lines (`@public`,
+// ". ") is the summary, the rest the description. A first line that is one
+// sentence keeps nothing but its text: the closing 。 is not part of a title. Directive lines (`@public`,
 // `@docs ...`) are the IDL's, not the reader's, and are dropped: the plugin
 // copies every comment line above a method, directives included.
 func splitSummary(s string) (summary, rest string) {
@@ -438,7 +439,7 @@ func splitSummary(s string) (summary, rest string) {
 			return summary, after
 		}
 	}
-	return first, tail
+	return strings.TrimSpace(strings.TrimRight(first, "。.")), tail
 }
 
 // Envelope wraps every 200 response schema in the gateway's envelope

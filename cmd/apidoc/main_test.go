@@ -125,7 +125,9 @@ func TestSplitSummaryDropsDirectives(t *testing.T) {
 		{"健康检查。返回 pong: <message>。\n@public", "健康检查", "返回 pong: <message>。"},
 		{"取资料\n第二行说明", "取资料", "第二行说明"},
 		{"@public", "", ""},
-		{"只有标题。", "只有标题。", ""},
+		{"只有标题。", "只有标题", ""},
+		{"角色列表。\n@perm role.view", "角色列表", ""},
+		{"Ping.", "Ping", ""},
 	}
 	for _, c := range cases {
 		s, r := splitSummary(c.in)
