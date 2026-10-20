@@ -480,6 +480,19 @@ handler 仍要幂等：厂商可能用两个 id 发同一件事。
 至少 200 次调用里错误超过一半就立刻以 `kerrors.ErrCircuitBreak` 失败，直到下游恢复。写操作要重试的话由调用方自己带同一个
 request_id 再调，幂等中间件会回放结果。
 
+### 按调用方放行（`callers:`）
+
+动钱、持密钥的服务只让该调它的服务调它：`callers.rules` 每条列出一组方法和允许的调用方服务名（Kitex 客户端在 TTHeader 里带的服务名，就是请求日志里的 `from`）。写进规则的方法只接受列出的服务和本服务自己（部署后检查用自己的客户端），没带名字的调用在这些方法上被拒；没写进任何规则的方法谁都能调。被拒回业务码 1007（`kitexx.CodeForbidden`），日志一条 WARN，指标 `rpc_server_rejected_total{rpc_method,reason="caller"}`。中间件排在请求日志之后、参数校验之前。
+
+```yaml
+callers:
+  rules:
+    - methods: [DebitBet, CreditSettle, ReverseBet]
+      allow: [ser-bet]
+    - methods: [ManualAdjust, ReviewApproval, ClearVenueBonus]
+      allow: [ser-admin-api]
+```
+
 ### RPC 服务过载保护（`limits:`）
 
 Kitex 服务的一个实例拒绝超出能力的请求，让过载变成快速的"忙"而不是一堆慢请求：同时处理不超过 `limits.max_in_flight`（默认 1000），每秒不超过 `limits.max_qps`（默认关，服务知道自己容量后再开；按 100ms 窗口计）, 连接不超过 `limits.max_connections`（10000）。被拒的请求不执行，回业务码 5003（`kitexx.CodeBusy`），网关像别的码一样透传，调用方稍后重试；指标 `rpc_server_rejected_total{rpc_method,reason}`，日志每分钟一条 WARN。Kitex 自带的限流器只用来限连接：限 QPS 时它直接断连接，客户端分不出是过载还是崩了（`devkit lint` 拦 `server.WithLimit`）。中间件排在链的最前面，拒绝一次不花别的代价。

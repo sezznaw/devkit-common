@@ -125,6 +125,10 @@ type Config struct {
 	// Limits: what one instance of an RPC service refuses with code 5003
 	// (max_in_flight, default 1000; max_qps, off; max_connections, 10000).
 	Limits LimitsConfig `yaml:"limits"`
+	// Callers: which services may call which methods of this one (code 1007
+	// for anybody else). Methods in no rule accept every caller. For the
+	// services that move money or hold secrets.
+	Callers CallersConfig `yaml:"callers"`
 	// Report: report.enabled opens the StarRocks report database (a CDC copy
 	// of the business tables, seconds behind) as rt.Report, query only, for
 	// the report service alone (devkit lint, rule report-only).
@@ -198,6 +202,9 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := cfg.Callers.Validate(); err != nil {
+		return nil, err
+	}
 	opts := []server.Option{
 		// Tags become the instance's Nacos metadata: the IDL generation (idldeps.go).
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name, Tags: RegistrationMetadata(nil)}),
@@ -208,6 +215,8 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithMiddleware(ServerTracing()),
 		server.WithMiddleware(ServerMetrics()),
 		server.WithMiddleware(LoggingMiddleware()),
+		// callers.rules: after the log line (a refusal is logged as an rpc error), before any work
+		server.WithMiddleware(Callers(cfg.Service.Name, cfg.Callers)),
 		server.WithMiddleware(ValidationMiddleware()),
 		server.WithMiddleware(rt.Idempotency()),
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),
