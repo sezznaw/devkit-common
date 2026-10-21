@@ -7,6 +7,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
@@ -142,7 +143,70 @@ func TestRedact(t *testing.T) {
 	if !strings.Contains(got, `"old_password":"***"`) || !strings.Contains(got, `"api_key":"***"`) || !strings.Contains(got, `"name":"n"`) || !strings.Contains(got, `"amount":"1.00"`) {
 		t.Fatal(got)
 	}
-	if Redact(nil) != "" || Redact([]byte("not json")) != "not json" {
+	if Redact(nil) != "" || Redact([]byte("not json")) != "<non-JSON body, 8 bytes, not recorded>" {
 		t.Fatal("edge cases")
+	}
+	// arrays, at the top and inside, are redacted too
+	got = Redact([]byte(`[{"password":"a","n":1},{"items":[{"bank_account":"6222","id_no":"x","phone":"138"}]}]`))
+	if strings.Contains(got, `"a"`) || strings.Contains(got, "6222") || strings.Contains(got, `"x"`) || !strings.Contains(got, `"phone":"138"`) || !strings.Contains(got, `"n":1`) {
+		t.Fatal(got)
+	}
+	// a form body is redacted like JSON (it used to be stored as is, password and all)
+	got = Redact([]byte("username=sean&password=plain-text&tag=a&tag=b"))
+	if strings.Contains(got, "plain-text") || !strings.Contains(got, `"username":"sean"`) || !strings.Contains(got, `"tag":["a","b"]`) {
+		t.Fatal(got)
+	}
+	// big numbers keep their digits
+	if got = Redact([]byte(`{"id":9007199254740993}`)); got != `{"id":9007199254740993}` {
+		t.Fatal(got)
+	}
+}
+
+// A body over the limit is cut at a character boundary and marked: MySQL in
+// strict mode refuses half a character, and with it the whole batch.
+func TestRedactCutsAtCharacterBoundary(t *testing.T) {
+	for pad := 0; pad < 3; pad++ {
+		body := `{"remark":"` + strings.Repeat("x", pad) + strings.Repeat("备注", 2000) + `"}`
+		got := Redact([]byte(body))
+		if len(got) > auditBodyLimit || !utf8.ValidString(got) || !strings.HasSuffix(got, AuditTruncated) {
+			t.Fatalf("pad %d: len %d valid %v suffix %v", pad, len(got), utf8.ValidString(got), strings.HasSuffix(got, AuditTruncated))
+		}
+	}
+	if got := cutUTF8(strings.Repeat("浏", 200), auditUALimit, ""); len(got) > auditUALimit || !utf8.ValidString(got) {
+		t.Fatal(len(got))
+	}
+	if got := cutUTF8("a\xffb", 10, ""); !utf8.ValidString(got) {
+		t.Fatal(got)
+	}
+}
+
+// One entry the store refuses (a column too long, say) does not take the rest of its batch with it.
+func TestAsyncSinkStoresAroundABadEntry(t *testing.T) {
+	zlogtest.Capture(t)
+	var mu sync.Mutex
+	var stored []string
+	sink := NewAsyncSink(func(ctx context.Context, batch []AuditEntry) error {
+		mu.Lock()
+		defer mu.Unlock()
+		for _, e := range batch {
+			if e.Action == "bad" {
+				return errors.New("Data too long")
+			}
+		}
+		for _, e := range batch {
+			stored = append(stored, e.Action)
+		}
+		return nil
+	})
+	sink.Sink(context.Background(), AuditEntry{Action: "a"})
+	sink.Sink(context.Background(), AuditEntry{Action: "bad"})
+	sink.Sink(context.Background(), AuditEntry{Action: "b"})
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if strings.Join(stored, ",") != "a,b" {
+		t.Fatalf("stored %v", stored)
 	}
 }

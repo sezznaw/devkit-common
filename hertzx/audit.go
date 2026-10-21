@@ -2,17 +2,22 @@ package hertzx
 
 import (
 	"context"
+	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/url"
 	"regexp"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/cloudwego/hertz/pkg/app"
 	"github.com/cloudwego/hertz/pkg/app/server"
 	"gopkg.in/yaml.v3"
 
 	"github.com/sezznaw/devkit-common/kitexx"
+	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/otelx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
@@ -42,14 +47,14 @@ type AuditEntry struct {
 	Method     string    `json:"method"`     // HTTP method
 	Path       string    `json:"path"`       // route
 	Permission string    `json:"permission"` // the operation's permission point, if any
-	Request    string    `json:"request"`    // JSON body, secrets redacted, at most 4 KiB
-	Response   string    `json:"response"`   // JSON body of the answer, secrets redacted, at most 4 KiB
+	Request    string    `json:"request"`    // body as JSON, secrets redacted, at most 4 KiB (AuditTruncated at the end when cut)
+	Response   string    `json:"response"`   // the answer, likewise
 	Status     int       `json:"status"`     // HTTP status
 	Code       int32     `json:"code"`       // business code of the envelope, -1 when there is none
 	Msg        string    `json:"msg"`
 	TraceID    string    `json:"trace_id"`
 	ClientIP   string    `json:"client_ip"`
-	UserAgent  string    `json:"user_agent"`
+	UserAgent  string    `json:"user_agent"` // at most 255 bytes
 	DeviceID   string    `json:"device_id"` // X-Device-Id the client sent (kitexx.DeviceID), "" when none
 	DurationMS int64     `json:"duration_ms"`
 }
@@ -98,7 +103,16 @@ func AuditedOperations(spec []byte) []string {
 	return out
 }
 
-const auditBodyLimit = 4096
+const (
+	auditBodyLimit = 4096
+	auditUALimit   = 255
+)
+
+// AuditTruncated ends a body that was longer than the limit and cut (at a
+// character boundary), so a viewer can say so instead of showing broken JSON.
+//
+// AuditTruncated 是超长被截断的报文末尾的标记（在字符边界上截），查看页据此提示「已截断」。
+const AuditTruncated = "…[truncated]"
 
 // Audit installs the audit middleware: install it after RequireLogin so
 // the entry carries the login. Every audited operation produces one
@@ -138,7 +152,7 @@ func Audit(h *server.Hertz, spec []byte, sink AuditSink) {
 			Code:       -1,
 			TraceID:    otelx.TraceID(ctx),
 			ClientIP:   c.ClientIP(),
-			UserAgent:  string(c.UserAgent()),
+			UserAgent:  cutUTF8(string(c.UserAgent()), auditUALimit, ""),
 			DeviceID:   kitexx.DeviceID(ctx),
 			DurationMS: time.Since(start).Milliseconds(),
 		}
@@ -159,53 +173,112 @@ func Audit(h *server.Hertz, spec []byte, sink AuditSink) {
 	})
 }
 
-var secretKey = regexp.MustCompile(`(?i)(password|passwd|secret|token|key|otp|pin|card)`)
+// secretKey matches the keys whose values never reach the audit log:
+// credentials, and the identity documents and bank accounts a back office handles.
+var secretKey = regexp.MustCompile(`(?i)(password|passwd|secret|token|key|otp|pin|card|credential|authorization|cookie|session|signature|ticket|id_?no|id_?number|identity|bank_?account)`)
 
-// Redact returns the JSON body with the values of secret-looking keys
-// replaced by "***", cut to 4 KiB. A body that is not a JSON object is
-// kept as is (cut) unless it is empty.
+// Redact returns a request or response body for the audit log: JSON (any
+// shape: objects, arrays, at any depth) and form bodies come back as JSON
+// with the values of secret-looking keys replaced by "***"; anything else
+// is not recorded, only its size, since nothing in it can be redacted. The
+// result is at most 4 KiB, cut at a character boundary and ended with
+// AuditTruncated when longer, so it is always valid UTF-8.
+//
+// Redact 把请求 / 响应体整理成审计用的文字：JSON（对象、数组、任意层级）和表单都转成 JSON，
+// 密钥类键的值换成 "***"；其他格式无法打码，只记大小不记内容。结果最多 4 KiB，在字符边界上截，
+// 截了就以 AuditTruncated 结尾，保证是合法 UTF-8（MySQL 严格模式会拒绝半个字符，整批写不进去）。
 func Redact(body []byte) string {
 	if len(body) == 0 {
 		return ""
 	}
-	var m map[string]any
-	if err := json.Unmarshal(body, &m); err != nil {
-		s := string(body)
-		if len(s) > auditBodyLimit {
-			s = s[:auditBodyLimit]
+	var v any
+	dec := json.NewDecoder(bytes.NewReader(body))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil || dec.More() {
+		form, ok := parseForm(body)
+		if !ok {
+			return fmt.Sprintf("<non-JSON body, %d bytes, not recorded>", len(body))
 		}
-		return s
+		v = form
 	}
-	redact(m)
-	b, _ := json.Marshal(m)
-	if len(b) > auditBodyLimit {
-		b = b[:auditBodyLimit]
+	b, err := json.Marshal(redactValue(v))
+	if err != nil {
+		return fmt.Sprintf("<body, %d bytes, not recorded>", len(body))
 	}
-	return string(b)
+	return cutUTF8(string(b), auditBodyLimit, AuditTruncated)
 }
 
-func redact(m map[string]any) {
-	for k, v := range m {
-		if secretKey.MatchString(k) {
-			m[k] = "***"
-			continue
+func redactValue(v any) any {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, sub := range x {
+			if secretKey.MatchString(k) {
+				x[k] = "***"
+				continue
+			}
+			x[k] = redactValue(sub)
 		}
-		if sub, ok := v.(map[string]any); ok {
-			redact(sub)
+	case []any:
+		for i, sub := range x {
+			x[i] = redactValue(sub)
 		}
 	}
+	return v
+}
+
+// parseForm reads an application/x-www-form-urlencoded body (one value:
+// a string, several: a list).
+func parseForm(body []byte) (map[string]any, bool) {
+	if !bytes.Contains(body, []byte("=")) || !utf8.Valid(body) {
+		return nil, false
+	}
+	q, err := url.ParseQuery(string(body))
+	if err != nil || len(q) == 0 {
+		return nil, false
+	}
+	out := make(map[string]any, len(q))
+	for k, vs := range q {
+		if len(vs) == 1 {
+			out[k] = vs[0]
+			continue
+		}
+		list := make([]any, len(vs))
+		for i, s := range vs {
+			list[i] = s
+		}
+		out[k] = list
+	}
+	return out, true
+}
+
+// cutUTF8 makes s valid UTF-8 and at most limit bytes, cutting at a
+// character boundary and ending a cut string with mark (counted in limit).
+func cutUTF8(s string, limit int, mark string) string {
+	s = strings.ToValidUTF8(s, "\uFFFD")
+	if len(s) <= limit {
+		return s
+	}
+	n := limit - len(mark)
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
+	}
+	return s[:n] + mark
 }
 
 // AsyncSink turns a function that stores a batch (an RPC, a table) into a
 // sink that never blocks a request: entries queue in memory (buffer
 // 1000) and a worker flushes them in batches of up to 100 or every
-// second. On overflow entries are dropped and counted in the log; on a
-// store error the batch is retried once, then dropped and logged. Close
-// flushes what is queued; register it with kitexx.OnShutdown.
+// second. On overflow entries are dropped. On a store error the batch is
+// retried once, then stored entry by entry, so one entry the store refuses
+// does not take the others with it; only the refused ones are dropped.
+// Every drop is logged and counted (metric audit_entries_dropped_total by
+// reason) for an alert. Close flushes what is queued; register it with
+// kitexx.OnShutdown.
 //
 // AsyncSink 把"存一批"的函数（RPC、表）变成不阻塞请求的 sink：内存队列 1000 条，后台每满
-// 100 条或每秒刷一次；队列满丢弃并记日志，存储失败重试一次后丢弃并记日志。Close 刷完队列，
-// 用 kitexx.OnShutdown 注册。
+// 100 条或每秒刷一次；队列满丢弃。存储失败先整批重试一次，再逐条存，一条被拒不连累同批的其他
+// 记录，只丢被拒的那条。每次丢弃都记日志并计数（指标 audit_entries_dropped_total，按原因），
+// 可配告警。Close 刷完队列，用 kitexx.OnShutdown 注册。
 type AsyncSinkT struct {
 	store  func(ctx context.Context, batch []AuditEntry) error
 	queue  chan AuditEntry
@@ -228,12 +301,14 @@ func (s *AsyncSinkT) Sink(ctx context.Context, e AuditEntry) {
 	defer s.mu.RUnlock()
 	if s.closed {
 		zlog.Ctx(ctx).Error("audit entry dropped: sink closed", zlog.Str("action", e.Action), zlog.Int("uid", e.UID))
+		metricsx.AuditEntriesDropped.WithLabelValues("closed").Inc()
 		return
 	}
 	select {
 	case s.queue <- e:
 	default:
 		zlog.Ctx(ctx).Error("audit entry dropped: queue full", zlog.Str("action", e.Action), zlog.Int("uid", e.UID))
+		metricsx.AuditEntriesDropped.WithLabelValues("queue_full").Inc()
 	}
 }
 
@@ -252,8 +327,19 @@ func (s *AsyncSinkT) run() {
 			err = s.store(ctx, batch)
 		}
 		cancel()
-		if err != nil {
-			zlog.Error("audit batch not stored", zlog.Int("entries", int64(len(batch))), zlog.Err(err))
+		if err != nil && len(batch) > 1 {
+			zlog.Warn("audit batch not stored, storing one by one", zlog.Int("entries", int64(len(batch))), zlog.Err(err))
+			for _, e := range batch {
+				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+				if err := s.store(ctx, []AuditEntry{e}); err != nil {
+					zlog.Error("audit entry not stored", zlog.Str("action", e.Action), zlog.Int("uid", e.UID), zlog.Err(err))
+					metricsx.AuditEntriesDropped.WithLabelValues("store_error").Inc()
+				}
+				cancel()
+			}
+		} else if err != nil {
+			zlog.Error("audit entry not stored", zlog.Str("action", batch[0].Action), zlog.Int("uid", batch[0].UID), zlog.Err(err))
+			metricsx.AuditEntriesDropped.WithLabelValues("store_error").Inc()
 		}
 		batch = nil
 	}

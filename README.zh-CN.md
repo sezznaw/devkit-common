@@ -583,7 +583,7 @@ auth:
 
 ### 后台操作审计 `hertzx.Audit`
 
-后台网关记录谁做了什么：`hertzx.Audit(h, openAPI, sink)`（app.Setup 里装在 RequireLogin 之后）对每个被审计的接口每次调用记一条 `AuditEntry`，不论成功失败：时间、realm 与 uid、IDL 里的接口标题、方法、路径、权限点、请求体和响应体（password、token、key 等键的值打码，各截 4 KiB）、HTTP 状态与业务码、trace id、来源 IP、User-Agent 与客户端送来的设备号（`X-Device-Id`，经 Client 中间件）、耗时。哪些接口记：IDL 方法注释 `// @audit` 一定记（登录），`// @noaudit` 不记，其余看权限点——有且不以 `.view` 结尾就记。handler 不写任何东西。sink 决定记到哪；`hertzx.NewAsyncSink(store)` 把"存一批"的函数（调账号服务的 RPC、写表）变成不阻塞请求的 sink：队列 1000、每秒或满 100 条刷一次、失败重试一次、丢弃计入日志；用 kitexx.OnShutdown 注册 Close 以便退出前刷完。
+后台网关记录谁做了什么：`hertzx.Audit(h, openAPI, sink)`（app.Setup 里装在 RequireLogin 之后）对每个被审计的接口每次调用记一条 `AuditEntry`，不论成功失败：时间、realm 与 uid、IDL 里的接口标题、方法、路径、权限点、请求体和响应体（JSON 任意层级含数组、表单都打码：password、token、key、card、证件号、银行账号等键的值换成 ***；其他格式不记内容只记大小；各最多 4 KiB，在字符边界上截并以 `hertzx.AuditTruncated` 结尾）、HTTP 状态与业务码、trace id、来源 IP、User-Agent 与客户端送来的设备号（`X-Device-Id`，经 Client 中间件）、耗时。哪些接口记：IDL 方法注释 `// @audit` 一定记（登录），`// @noaudit` 不记，其余看权限点——有且不以 `.view` 结尾就记。handler 不写任何东西。sink 决定记到哪；`hertzx.NewAsyncSink(store)` 把"存一批"的函数（调账号服务的 RPC、写表）变成不阻塞请求的 sink：队列 1000、每秒或满 100 条刷一次、失败整批重试一次后逐条存（一条被拒不连累同批）、丢弃记日志并计入指标 `audit_entries_dropped_total{reason}`；用 kitexx.OnShutdown 注册 Close 以便退出前刷完。
 
 ### 用 `metricsx` 出指标
 
