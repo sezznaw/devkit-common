@@ -2,6 +2,8 @@ package kitexx
 
 import (
 	"context"
+	"fmt"
+	"net"
 	"strings"
 
 	"github.com/bytedance/gopkg/cloud/metainfo"
@@ -77,6 +79,38 @@ func ClientIP(ctx context.Context) string {
 // X-Forwarded-For); the device type only when client.device.types is set.
 type ClientConfig struct {
 	Device DeviceConfig `yaml:"device"`
+	// TrustedProxies lists, as CIDRs, the proxies in front of the service
+	// besides the private networks and loopback, which are always trusted
+	// (the ingress, a load balancer in the VPC): a CDN the traffic comes
+	// through, such as Cloudflare's ranges. The client IP is the rightmost
+	// address of X-Forwarded-For that is not a trusted proxy; whatever a
+	// client puts in front of it is ignored. X-Real-IP is never read.
+	TrustedProxies []string `yaml:"trusted_proxies"`
+}
+
+// defaultTrustedProxies are always trusted: the cluster, the VPC, loopback.
+var defaultTrustedProxies = []string{"10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16", "127.0.0.0/8", "::1/128", "fc00::/7"}
+
+// Trusted returns the trusted proxy networks: the defaults plus
+// client.trusted_proxies; an entry that is not a CIDR or an IP is an error.
+func (c ClientConfig) Trusted() ([]*net.IPNet, error) {
+	out := make([]*net.IPNet, 0, len(defaultTrustedProxies)+len(c.TrustedProxies))
+	for _, s := range append(append([]string{}, defaultTrustedProxies...), c.TrustedProxies...) {
+		s = strings.TrimSpace(s)
+		if !strings.Contains(s, "/") {
+			if ip := net.ParseIP(s); ip != nil && ip.To4() != nil {
+				s += "/32"
+			} else {
+				s += "/128"
+			}
+		}
+		_, n, err := net.ParseCIDR(s)
+		if err != nil {
+			return nil, fmt.Errorf("client.trusted_proxies: %q is not a CIDR: %w", s, err)
+		}
+		out = append(out, n)
+	}
+	return out, nil
 }
 
 // DeviceConfig is `client.device`: the device types the API service

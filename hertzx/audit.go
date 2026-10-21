@@ -1,8 +1,8 @@
 package hertzx
 
 import (
-	"context"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -55,7 +55,7 @@ type AuditEntry struct {
 	TraceID    string    `json:"trace_id"`
 	ClientIP   string    `json:"client_ip"`
 	UserAgent  string    `json:"user_agent"` // at most 255 bytes
-	DeviceID   string    `json:"device_id"` // X-Device-Id the client sent (kitexx.DeviceID), "" when none
+	DeviceID   string    `json:"device_id"`  // X-Device-Id the client sent (kitexx.DeviceID), "" when none
 	DurationMS int64     `json:"duration_ms"`
 }
 

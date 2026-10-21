@@ -499,11 +499,11 @@ Kitex 服务的一个实例拒绝超出能力的请求，让过载变成快速�
 
 ### 网关防护（`guard:`）
 
-API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 取代理转发的（X-Forwarded-For），即 Hertz 的 ClientIP。
+API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 只采信可信代理转发的（见下节 `client.trusted_proxies`）。
 
 ### 客户端设备与 IP（`client:`）
 
-请求的客户端是什么，是调用方的属性而不是某个操作的参数，所以走请求头和 context，不进请求体：`hertzx.Client`（`New` 装上，排在限流之后）从 `c.ClientIP()` 取 IP（代理的 `X-Forwarded-For`，没有就是连接地址），从 `X-Device-Type` 取设备类型、`X-Device-Id` 取设备号，写成 metainfo 持久值（`CLIENT_IP`、`DEVICE`、`DEVICE_ID`），和 uid 一样跨每一跳 RPC。网关和 RPC 服务的任何 handler 用 `kitexx.ClientIP(ctx)`、`kitexx.Device(ctx)`、`kitexx.DeviceID(ctx)`（或 `kitexx.ClientOf(ctx)`）读；请求体里不许再有 IP 或设备字段。
+请求的客户端是什么，是调用方的属性而不是某个操作的参数，所以走请求头和 context，不进请求体：`hertzx.Client`（`New` 装上，排在限流之后）从 `c.ClientIP()` 取 IP：连接方不是可信代理就用连接地址；是可信代理就从 `X-Forwarded-For` 右往左取第一个不是可信代理的地址，客户端自己带的转发头只会出现在左边，伪造无效；不读 `X-Real-IP`。可信代理 = 内网（10/8、172.16/12、192.168/16、fc00::/7）与本机，加 `client.trusted_proxies` 列的网段：服务前面有 CDN（如 Cloudflare）时把它的网段列上，否则取到的是 CDN 节点地址。hertz 默认信任一切、取最左边的值，经 Cloudflare 填办公室 IP 就能冒充（2026-10-21 实测，v0.61.0 改）。webhookx 的回调监听用同一个规则，从 `X-Device-Type` 取设备类型、`X-Device-Id` 取设备号，写成 metainfo 持久值（`CLIENT_IP`、`DEVICE`、`DEVICE_ID`），和 uid 一样跨每一跳 RPC。网关和 RPC 服务的任何 handler 用 `kitexx.ClientIP(ctx)`、`kitexx.Device(ctx)`、`kitexx.DeviceID(ctx)`（或 `kitexx.ClientOf(ctx)`）读；请求体里不许再有 IP 或设备字段。
 
 ```yaml
 client:

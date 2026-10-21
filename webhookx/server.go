@@ -36,6 +36,13 @@ func Server(rt *kitexx.Runtime) *server.Hertz {
 		panic(err)
 	}
 	h := server.New(server.WithHostPorts(addr), server.WithDisablePrintRoute(true), server.WithExitWaitTime(kitexx.DrainTimeout(rt.Config)))
+	// allow_cidrs and the logs need the vendor's real address: only the
+	// trusted proxies' X-Forwarded-For entries count (client.trusted_proxies).
+	trusted, err := rt.Config.Client.Trusted()
+	if err != nil {
+		panic(err)
+	}
+	h.SetClientIPFunc(hertzx.ClientIP(trusted))
 	h.Use(hertzx.Tracing(), hertzx.Metrics(), hertzx.RequestLog(), hertzx.Recovery())
 	if prev, loaded := servers.LoadOrStore(rt, h); loaded {
 		return prev.(*server.Hertz)

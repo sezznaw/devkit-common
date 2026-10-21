@@ -77,6 +77,11 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 		server.WithDisablePrintRoute(true),
 	}, opts...)
 	h := server.New(all...)
+	trusted, err := cfg.Client.Trusted()
+	if err != nil {
+		return nil, err
+	}
+	h.SetClientIPFunc(ClientIP(trusted))
 	// CORS first: a preflight is answered before the login check sees it.
 	if cfg.CORS.Enabled {
 		h.Use(CORS(cfg.CORS))
