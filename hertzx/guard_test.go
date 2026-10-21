@@ -4,6 +4,8 @@ import (
 	"context"
 	"github.com/cloudwego/kitex/pkg/discovery"
 	"github.com/cloudwego/kitex/pkg/loadbalance"
+	"net"
+	"net/http"
 	"strings"
 	"testing"
 	"time"
@@ -29,6 +31,10 @@ paths:
   /v1/member/getProfile:
     post:
       operationId: S_MemberGetProfile
+  /v1/agency/addMembers:
+    post:
+      operationId: S_AgencyAddMembers
+      x-max-body: 1k
 `
 
 func TestParseRate(t *testing.T) {
@@ -78,6 +84,7 @@ func newGuardedWith(t *testing.T, cfg kitexx.GuardConfig, withRedis bool, debug 
 	ok := func(ctx context.Context, c *app.RequestContext) { c.JSON(200, map[string]any{"code": 0}) }
 	h.POST("/v1/auth/login", ok)
 	h.POST("/v1/member/getProfile", ok)
+	h.POST("/v1/agency/addMembers", ok)
 	h.POST("/slow", func(ctx context.Context, c *app.RequestContext) {
 		select {
 		case <-ctx.Done():
@@ -183,5 +190,82 @@ func TestRouteLimits(t *testing.T) {
 	}
 	if _, ok := m["POST /v1/member/getProfile"]; ok {
 		t.Fatal("no limit expected")
+	}
+}
+
+func TestParseSize(t *testing.T) {
+	for in, want := range map[string]int{"16384": 16384, "64k": 64 << 10, "384K": 384 << 10, "1m": 1 << 20} {
+		if n, err := kitexx.ParseSize(in); err != nil || n != want {
+			t.Fatalf("%q -> %d %v", in, n, err)
+		}
+	}
+	for _, bad := range []string{"", "x", "0", "-1", "512kb", "65m", "1g"} {
+		if _, err := kitexx.ParseSize(bad); err == nil {
+			t.Fatalf("%q accepted", bad)
+		}
+	}
+}
+
+func TestGuardBodyLimitPerRoute(t *testing.T) {
+	h := newGuarded(t, kitexx.GuardConfig{MaxBodyBytes: 100}, false)
+	post := func(path string, n int) *ut.ResponseRecorder {
+		return ut.PerformRequest(h.Engine, "POST", path, &ut.Body{Body: strings.NewReader(strings.Repeat("x", n)), Len: n})
+	}
+	// a route without @maxbody keeps guard.max_body_bytes; the one with @maxbody 1k takes up to 1024
+	if w := post("/v1/member/getProfile", 100); w.Code != 200 {
+		t.Fatalf("at the limit: %d", w.Code)
+	}
+	if w := post("/v1/member/getProfile", 101); w.Code != 413 || !strings.Contains(w.Body.String(), `"code":1001`) {
+		t.Fatalf("over the default: %d %s", w.Code, w.Body.String())
+	}
+	if w := post("/v1/agency/addMembers", 1024); w.Code != 200 {
+		t.Fatalf("within @maxbody: %d", w.Code)
+	}
+	if w := post("/v1/agency/addMembers", 1025); w.Code != 413 {
+		t.Fatalf("over @maxbody: %d", w.Code)
+	}
+}
+
+// The server's limit raised by SetSpec after server.New is the one a running
+// server applies (Hertz reads the option when it starts).
+func TestSetSpecRaisesTheRunningServersLimit(t *testing.T) {
+	zlogtest.Discard(t)
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	addr := l.Addr().String()
+	l.Close()
+	h := server.New(server.WithHostPorts(addr), server.WithMaxRequestBodySize(100), server.WithDisablePrintRoute(true))
+	SetSpec(h, []byte(guardSpec))
+	h.Use(Guard(h, kitexx.GuardConfig{MaxBodyBytes: 100}, nil, "api"))
+	ok := func(ctx context.Context, c *app.RequestContext) { c.JSON(200, map[string]any{"code": 0}) }
+	h.POST("/v1/agency/addMembers", ok)
+	h.POST("/v1/member/getProfile", ok)
+	go h.Spin()
+	t.Cleanup(func() { _ = h.Shutdown(context.Background()) })
+	for i := 0; i < 50; i++ {
+		if c, err := net.Dial("tcp", addr); err == nil {
+			c.Close()
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	post := func(path string, n int) int {
+		resp, err := http.Post("http://"+addr+path, "application/json", strings.NewReader(strings.Repeat("x", n)))
+		if err != nil {
+			return -1
+		}
+		resp.Body.Close()
+		return resp.StatusCode
+	}
+	if code := post("/v1/agency/addMembers", 900); code != 200 {
+		t.Fatalf("900 bytes to the @maxbody 1k route: %d", code)
+	}
+	if code := post("/v1/member/getProfile", 900); code != 413 {
+		t.Fatalf("900 bytes to a default route: %d", code)
+	}
+	if code := post("/v1/agency/addMembers", 2000); code != 413 {
+		t.Fatalf("2000 bytes, above every limit: %d", code)
 	}
 }

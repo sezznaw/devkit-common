@@ -95,10 +95,10 @@ var (
 		Name: "http_server_duration_seconds", Help: "Time to handle an HTTP request.", Buckets: DurationBuckets,
 	}, []string{"http_method", "http_route"})
 	HTTPRequestsRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
-		Name: "http_requests_rejected_total", Help: "Requests the gateway's guard refused, by reason: rate_limit (429), timeout (504).",
+		Name: "http_requests_rejected_total", Help: "Requests the gateway's guard refused, by reason: rate_limit (429), timeout (504), body_too_large (413).",
 	}, []string{"reason"})
 	AuditEntriesDropped = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
-		Name: "audit_entries_dropped_total", Help: "Audit entries a gateway lost, by reason: queue_full, closed, store_error.",
+		Name: "audit_entries_dropped_total", Help: "Audit entries a gateway lost, by reason: queue_full, closed, store_error, store_down.",
 	}, []string{"reason"})
 	HTTPClientRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "http_client_requests_total", Help: "Calls to external HTTP APIs (httpx), by provider, method and status (\"error\": no response).",

@@ -499,7 +499,7 @@ Kitex 服务的一个实例拒绝超出能力的请求，让过载变成快速�
 
 ### 网关防护（`guard:`）
 
-API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）读之前就 413；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 只采信可信代理转发的（见下节 `client.trusted_proxies`）。
+API 服务在 handler 之前就拒绝一些请求，不配置也有默认值：请求体超过 `guard.max_body_bytes`（1 MiB）回 413、code 1001——个别要收大批量的接口在 IDL 方法注释里写 `// @maxbody 384k`（apidoc 写成 x-max-body，单位 k / m 或字节）单独放大，其余接口仍按 `guard.max_body_bytes`；服务器读请求体之前按其中最大的那个拒（`hertzx.SetSpec` 在启动前把服务器级上限抬到最大的 @maxbody），所以默认值可以定得很小；每个请求通过 ctx 带 `guard.timeout`（10s）的截止时间，它发起的 RPC 调用到时放弃，到时还没产生响应的回 504、code 1010；一个客户端 IP 对本服务每个窗口最多 `guard.rate.per_ip` 个请求（默认 "600/m"，也可 "20/s"、"5000/h"、"off"），IDL 里标了 `// @limit 10/m` 的接口（apidoc 写成 x-rate-limit）再按 IP 单独限一次——登录、注册、改密码、验证码这些接口 `devkit lint` 的 `limit` 规则要求必须标。超限回 429、code 1008、带 Retry-After。有 Redis 时按固定窗口在 Redis 里计数（副本共用），没有就在内存里。限流故意放在登录校验之前，猜密码也受限；`/ping`、`/docs` 不限。指标 `http_requests_rejected_total{reason}`（rate_limit、timeout）。在代理后面客户端 IP 只采信可信代理转发的（见下节 `client.trusted_proxies`）。
 
 ### 客户端设备与 IP（`client:`）
 
@@ -523,7 +523,7 @@ CloudWeGo 的 `thrift-gen-http-swagger` 插件生成，然后合并（schema 名
 `/docs`（Scalar 文档页，"Send request" 直接打本服务）。
 
 方法的 IDL 返回类型就是数据结构体；apidoc 给每个响应包上网关要加的 `{code, msg, data}` 壳（见下一节），返回 `common.Empty` 的方法合成一个 200，
-没写 `optional` 的字段标成 `required`，`// @limit` 写成 `x-rate-limit`，`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。
+没写 `optional` 的字段标成 `required`，`// @limit` 写成 `x-rate-limit`，`// @maxbody` 写成 `x-max-body`，`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。
 IDL 里方法和字段的注释就是文档说明：方法注释的第一句是接口标题，其余是说明。`// @docs` 行（`// @docs title: ...`、`// @docs description: ...`、`// @docs tag member: 会员`）
 放在一个没有 `service` 的文件里，约定叫 `docs.thrift`；`@public`、`@perm`、`@audit`、`@limit` 从全部文件读。接口按路径第二段 `/v1/<领域>/...` 分组，`/ping` 归到"系统"。
 local 和 dev 开，生产关。
@@ -583,7 +583,7 @@ auth:
 
 ### 后台操作审计 `hertzx.Audit`
 
-后台网关记录谁做了什么：`hertzx.Audit(h, openAPI, sink)`（app.Setup 里装在 RequireLogin 之后）对每个被审计的接口每次调用记一条 `AuditEntry`，不论成功失败：时间、realm 与 uid、IDL 里的接口标题、方法、路径、权限点、请求体和响应体（JSON 任意层级含数组、表单都打码：password、token、key、card、证件号、银行账号等键的值换成 ***；其他格式不记内容只记大小；各最多 4 KiB，在字符边界上截并以 `hertzx.AuditTruncated` 结尾）、HTTP 状态与业务码、trace id、来源 IP、User-Agent 与客户端送来的设备号（`X-Device-Id`，经 Client 中间件）、耗时。哪些接口记：IDL 方法注释 `// @audit` 一定记（登录），`// @noaudit` 不记，其余看权限点——有且不以 `.view` 结尾就记。handler 不写任何东西。sink 决定记到哪；`hertzx.NewAsyncSink(store)` 把"存一批"的函数（调账号服务的 RPC、写表）变成不阻塞请求的 sink：队列 1000、每秒或满 100 条刷一次、失败整批重试一次后逐条存（一条被拒不连累同批）、丢弃记日志并计入指标 `audit_entries_dropped_total{reason}`；用 kitexx.OnShutdown 注册 Close 以便退出前刷完。
+后台网关记录谁做了什么：`hertzx.Audit(h, openAPI, sink)`（app.Setup 里装在 RequireLogin 之后）对每个被审计的接口每次调用记一条 `AuditEntry`，不论成功失败：时间、realm 与 uid、IDL 里的接口标题、方法、路径、权限点、请求体和响应体（JSON 任意层级含数组、表单都打码：password、token、key、card、证件号、银行账号等键的值换成 ***；其他格式不记内容只记大小；各最多 4 KiB，在字符边界上截并以 `hertzx.AuditTruncated` 结尾）、HTTP 状态与业务码、trace id、来源 IP、User-Agent 与客户端送来的设备号（`X-Device-Id`，经 Client 中间件）、耗时。哪些接口记：IDL 方法注释 `// @audit` 一定记（登录），`// @noaudit` 不记，其余看权限点——有且不以 `.view` 结尾就记。handler 不写任何东西。sink 决定记到哪；`hertzx.NewAsyncSink(store)` 把"存一批"的函数（调账号服务的 RPC、写表）变成不阻塞请求的 sink：队列 1000、每秒或满 100 条刷一次、失败整批重试一次后逐条存（一条被拒不连累同批；连续 3 条被拒判定存储宕了，同批剩下的直接丢弃，原因 `store_down`）、丢弃记日志并计入指标 `audit_entries_dropped_total{reason}`；用 kitexx.OnShutdown 注册 Close 以便退出前刷完。
 
 ### 用 `metricsx` 出指标
 

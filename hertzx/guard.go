@@ -22,8 +22,11 @@ import (
 // Guard is the middleware of the `guard:` section (New installs it): a
 // request deadline, and request-rate limits per client IP, both for the
 // whole service (guard.rate.per_ip) and per route (`// @limit 10/m` in the
-// IDL, written to the OpenAPI document as x-rate-limit). The body size
-// limit is a server option New sets (413 before the request is read).
+// IDL, written to the OpenAPI document as x-rate-limit), and the request
+// body size: guard.max_body_bytes, or the route's own `// @maxbody 512k`
+// (x-max-body). The server refuses a body above the largest of them before
+// reading it (New and SetSpec set that option); the guard refuses a body
+// above its route's limit with 413 and code 1001.
 //
 // Counting is a fixed window per key in Redis when the service has it
 // (shared by the replicas: "rl:<service>:ip:<ip>:<window>"), in memory
@@ -32,8 +35,9 @@ import (
 // check on purpose: a password-guessing client never reaches it.
 //
 // Guard 是 `guard:` 段的中间件（New 自动装）：每个请求的截止时间，按客户端 IP 的频率上限——
-// 整个服务一个（guard.rate.per_ip），每条接口可再加一个（IDL 里 `// @limit 10/m`）。
-// 请求体大小是 New 设的服务器选项（读之前就 413）。有 Redis 时各副本共用计数，没有就
+// 整个服务一个（guard.rate.per_ip），每条接口可再加一个（IDL 里 `// @limit 10/m`）；请求体大小：
+// guard.max_body_bytes，个别接口用 IDL 里的 `// @maxbody 512k` 放大。超过其中最大值的请求体服务器
+// 读之前就拒（New 和 SetSpec 设的服务器选项），超过本接口上限的由 Guard 回 413、code 1001。有 Redis 时各副本共用计数，没有就
 // 每副本各算。超限回 429、code 1008、带 Retry-After。限流在登录校验之前：猜密码的请求到不了那一步。
 func Guard(h *server.Hertz, cfg kitexx.GuardConfig, rdb *redis.Client, service string, debug ...time.Duration) app.HandlerFunc {
 	g := &guard{cfg: cfg, rdb: rdb, service: service, h: h, local: map[string]*window{}}
@@ -56,6 +60,7 @@ type guard struct {
 
 	once   sync.Once
 	routes map[string]kitexx.Rate // "METHOD /path" -> @limit
+	bodies map[string]int         // "METHOD /path" -> @maxbody, bytes
 
 	mu    sync.Mutex
 	local map[string]*window
@@ -67,8 +72,18 @@ type window struct {
 }
 
 func (g *guard) handle(ctx context.Context, c *app.RequestContext) {
-	g.once.Do(func() { g.routes = RouteLimits(Spec(g.h)) })
+	g.once.Do(func() { g.routes, g.bodies = RouteLimits(Spec(g.h)), RouteMaxBodies(Spec(g.h)) })
 	path := string(c.Path())
+	limit, ok := g.bodies[string(c.Method())+" "+path]
+	if !ok {
+		limit = g.cfg.MaxBody()
+	}
+	if n := len(c.Request.Body()); n > limit {
+		metricsx.HTTPRequestsRejected.WithLabelValues("body_too_large").Inc()
+		zlog.Ctx(ctx).Warn("request body too large", zlog.Int("bytes", int64(n)), zlog.Int("limit", int64(limit)), zlog.Str("client_ip", c.ClientIP()))
+		c.AbortWithStatusJSON(413, map[string]any{"code": kitexx.CodeBadParam, "msg": "请求内容过大"})
+		return
+	}
 	if !isFrameworkPath(path) {
 		ip := c.ClientIP()
 		if r := g.cfg.PerIP(); !r.Off() {
@@ -148,6 +163,39 @@ func (g *guard) over(ctx context.Context, key string, r kitexx.Rate) time.Durati
 		return left
 	}
 	return 0
+}
+
+// RouteMaxBodies reads the x-max-body of every operation of the OpenAPI
+// document (apidoc writes it from `// @maxbody`), keyed "METHOD /path", in
+// bytes. A size it cannot read is left out with a warning: the route keeps
+// guard.max_body_bytes, the smaller limit.
+func RouteMaxBodies(spec []byte) map[string]int {
+	out := map[string]int{}
+	if len(spec) == 0 {
+		return out
+	}
+	var doc struct {
+		Paths map[string]map[string]struct {
+			MaxBody string `yaml:"x-max-body"`
+		} `yaml:"paths"`
+	}
+	if yaml.Unmarshal(spec, &doc) != nil {
+		return out
+	}
+	for path, ops := range doc.Paths {
+		for method, op := range ops {
+			if op.MaxBody == "" {
+				continue
+			}
+			n, err := kitexx.ParseSize(op.MaxBody)
+			if err != nil {
+				zlog.Warn("bad @maxbody in the IDL; ignored", zlog.Str("path", path), zlog.Str("size", op.MaxBody), zlog.Err(err))
+				continue
+			}
+			out[strings.ToUpper(method)+" "+path] = n
+		}
+	}
+	return out
 }
 
 // RouteLimits reads the x-rate-limit of every operation of the OpenAPI

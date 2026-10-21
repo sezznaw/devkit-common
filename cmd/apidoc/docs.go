@@ -184,6 +184,22 @@ func taggedMethods(src []byte, re *regexp.Regexp) map[string]string {
 	return out
 }
 
+var maxBodyLine = regexp.MustCompile(`@maxbody\s+(\S+)`)
+
+// MaxBodyMethods are the service methods whose comment block carries a
+// `// @maxbody <size>` line ("64k", "512k", "1m", or bytes): the largest
+// request body that route accepts (hertzx.Guard), instead of the service's
+// guard.max_body_bytes. For the few routes that legitimately take a big
+// batch; every other route keeps the small default.
+func MaxBodyMethods(src []byte) map[string]string {
+	return taggedMethods(src, maxBodyLine)
+}
+
+// MaxBodies writes each method's @maxbody as the operation's x-max-body.
+func MaxBodies(top *yaml.Node, sizes map[string]string) {
+	setExtension(top, "x-max-body", sizes)
+}
+
 // Limits writes each method's @limit as the operation's x-rate-limit.
 func Limits(top *yaml.Node, limits map[string]string) {
 	setExtension(top, "x-rate-limit", limits)

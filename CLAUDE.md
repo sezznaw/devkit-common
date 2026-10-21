@@ -410,7 +410,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   embedded spec (apidoc `@limit` -> `Limits`, generic `setExtension`), read
   lazily on the first request (Spec is set after New). Timeout: ctx with
   deadline into c.Next; afterwards DeadlineExceeded + empty body -> 504/1010.
-  Body size is `server.WithMaxRequestBodySize` in New. Codes 1008 / 1010 in
+  Body size: `server.WithMaxRequestBodySize` in New (guard.max_body_bytes);
+  `SetSpec` raises that server option to the largest x-max-body (apidoc
+  `@maxbody` -> `MaxBodies`; `kitexx.ParseSize`) — Hertz reads it at Run
+  (engine.Init), so SetSpec must precede Run; the guard then 413s/1001 a body
+  over its route's x-max-body or guard.max_body_bytes. Codes 1008 / 1010 in
   kitexx/guard.go. Tests use ut.PerformRequest with X-Forwarded-For.
 - `redisx` lock and cache: `Open` takes an optional service name kept as the
   connection's ClientName; `Namespace(rdb)` reads it back and `keyOf` builds

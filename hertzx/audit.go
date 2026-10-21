@@ -104,8 +104,10 @@ func AuditedOperations(spec []byte) []string {
 }
 
 const (
-	auditBodyLimit = 4096
-	auditUALimit   = 255
+	// auditStoreDownAfter refusals in a row, entry by entry, end the retry of a batch.
+	auditStoreDownAfter = 3
+	auditBodyLimit      = 4096
+	auditUALimit        = 255
 )
 
 // AuditTruncated ends a body that was longer than the limit and cut (at a
@@ -271,14 +273,18 @@ func cutUTF8(s string, limit int, mark string) string {
 // second. On overflow entries are dropped. On a store error the batch is
 // retried once, then stored entry by entry, so one entry the store refuses
 // does not take the others with it; only the refused ones are dropped.
+// Three refusals in a row mean the store is down, not the entries: the
+// rest of the batch is dropped at once (reason store_down) instead of
+// waiting out a timeout per entry while the queue fills behind it.
 // Every drop is logged and counted (metric audit_entries_dropped_total by
 // reason) for an alert. Close flushes what is queued; register it with
 // kitexx.OnShutdown.
 //
 // AsyncSink 把"存一批"的函数（RPC、表）变成不阻塞请求的 sink：内存队列 1000 条，后台每满
 // 100 条或每秒刷一次；队列满丢弃。存储失败先整批重试一次，再逐条存，一条被拒不连累同批的其他
-// 记录，只丢被拒的那条。每次丢弃都记日志并计数（指标 audit_entries_dropped_total，按原因），
-// 可配告警。Close 刷完队列，用 kitexx.OnShutdown 注册。
+// 记录，只丢被拒的那条。连续 3 条都被拒说明是存储宕了而不是记录有问题：同批剩下的直接丢弃
+// （原因 store_down），不再每条等一次超时、让队列在后面堆满。每次丢弃都记日志并计数（指标
+// audit_entries_dropped_total，按原因），可配告警。Close 刷完队列，用 kitexx.OnShutdown 注册。
 type AsyncSinkT struct {
 	store  func(ctx context.Context, batch []AuditEntry) error
 	queue  chan AuditEntry
@@ -329,11 +335,21 @@ func (s *AsyncSinkT) run() {
 		cancel()
 		if err != nil && len(batch) > 1 {
 			zlog.Warn("audit batch not stored, storing one by one", zlog.Int("entries", int64(len(batch))), zlog.Err(err))
-			for _, e := range batch {
+			failed := 0
+			for i, e := range batch {
+				if failed >= auditStoreDownAfter {
+					rest := len(batch) - i
+					zlog.Error("audit entries dropped: the store refuses everything", zlog.Int("entries", int64(rest)))
+					metricsx.AuditEntriesDropped.WithLabelValues("store_down").Add(float64(rest))
+					break
+				}
 				ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 				if err := s.store(ctx, []AuditEntry{e}); err != nil {
+					failed++
 					zlog.Error("audit entry not stored", zlog.Str("action", e.Action), zlog.Int("uid", e.UID), zlog.Err(err))
 					metricsx.AuditEntriesDropped.WithLabelValues("store_error").Inc()
+				} else {
+					failed = 0
 				}
 				cancel()
 			}

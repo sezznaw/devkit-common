@@ -85,7 +85,7 @@ func run(idl, out, title, version, desc string) error {
 	if desc == "" {
 		desc = d.Description
 	}
-	patched, err := Patch(doc, title, version, desc, strings.TrimSuffix(filepath.Base(idl), ".thrift"), d, PublicMethods(src), PermMethods(src), AuditMethods(src), LimitMethods(src))
+	patched, err := Patch(doc, title, version, desc, strings.TrimSuffix(filepath.Base(idl), ".thrift"), d, PublicMethods(src), PermMethods(src), AuditMethods(src), LimitMethods(src), MaxBodyMethods(src))
 	if err != nil {
 		return err
 	}
@@ -131,7 +131,7 @@ func Annotate(src []byte) []byte {
 
 // Patch fills info.title / version / description, keeping the document's
 // order (a yaml.Node edit, not a map round trip).
-func Patch(doc []byte, title, version, desc, fallback string, d Directives, public map[string]bool, perms map[string]string, audits map[string]bool, limits map[string]string) ([]byte, error) {
+func Patch(doc []byte, title, version, desc, fallback string, d Directives, public map[string]bool, perms map[string]string, audits map[string]bool, limits, maxBodies map[string]string) ([]byte, error) {
 	var root yaml.Node
 	if err := yaml.Unmarshal(doc, &root); err != nil {
 		return nil, fmt.Errorf("parse openapi.yaml: %w", err)
@@ -163,6 +163,7 @@ func Patch(doc []byte, title, version, desc, fallback string, d Directives, publ
 	Permissions(top, perms)
 	Audits(top, audits)
 	Limits(top, limits)
+	MaxBodies(top, maxBodies)
 	Envelope(top)
 	out, err := yaml.Marshal(&root)
 	if err != nil {

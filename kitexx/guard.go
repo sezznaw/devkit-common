@@ -45,6 +45,24 @@ func (g GuardConfig) MaxBody() int {
 	return 1 << 20
 }
 
+// ParseSize reads a body size: bytes ("16384"), or with k or m ("64k",
+// "1m", powers of 1024). For `// @maxbody` in the IDL.
+func ParseSize(s string) (int, error) {
+	t := strings.TrimSpace(strings.ToLower(s))
+	mult := 1
+	switch {
+	case strings.HasSuffix(t, "k"):
+		mult, t = 1<<10, strings.TrimSuffix(t, "k")
+	case strings.HasSuffix(t, "m"):
+		mult, t = 1<<20, strings.TrimSuffix(t, "m")
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(t))
+	if err != nil || n <= 0 || n > 64<<20/mult {
+		return 0, fmt.Errorf("size %q: want bytes, or a count with k or m (\"64k\", \"1m\"), at most 64m", s)
+	}
+	return n * mult, nil
+}
+
 // RequestTimeout is timeout or its default.
 func (g GuardConfig) RequestTimeout() time.Duration { return g.Timeout.Or(10 * time.Second) }
 

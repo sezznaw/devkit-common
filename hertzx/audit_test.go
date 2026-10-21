@@ -210,3 +210,32 @@ func TestAsyncSinkStoresAroundABadEntry(t *testing.T) {
 		t.Fatalf("stored %v", stored)
 	}
 }
+
+func TestAsyncSinkStopsRetryingWhenTheStoreIsDown(t *testing.T) {
+	zlogtest.Capture(t)
+	var mu sync.Mutex
+	calls := 0
+	gate := make(chan struct{})
+	sink := NewAsyncSink(func(ctx context.Context, batch []AuditEntry) error {
+		<-gate // the first call holds the worker while the rest queue up
+		mu.Lock()
+		defer mu.Unlock()
+		calls++
+		return errors.New("connection refused")
+	})
+	sink.Sink(context.Background(), AuditEntry{Action: "first"})
+	time.Sleep(50 * time.Millisecond)
+	for i := 0; i < 99; i++ {
+		sink.Sink(context.Background(), AuditEntry{Action: "a"})
+	}
+	close(gate)
+	if err := sink.Close(); err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	// the batch of one: twice; the batch of 99: twice whole, then three single entries and the rest dropped
+	if calls != 2+2+auditStoreDownAfter {
+		t.Fatalf("store called %d times", calls)
+	}
+}

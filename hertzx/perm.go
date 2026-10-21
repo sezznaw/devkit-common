@@ -119,8 +119,25 @@ var specs sync.Map // *server.Hertz -> []byte
 
 // SetSpec gives the server its OpenAPI document (main.go does, from the
 // embedded file of make gen); Spec reads it back, for the middlewares and
-// handlers that need the IDL's annotations at run time.
-func SetSpec(h *server.Hertz, spec []byte) { specs.Store(h, spec) }
+// handlers that need the IDL's annotations at run time. A route with a
+// `// @maxbody` above guard.max_body_bytes raises the server's own body
+// limit to it (Hertz reads it when the server starts, so SetSpec goes before
+// Run); the guard keeps every other route at guard.max_body_bytes.
+//
+// SetSpec 把 OpenAPI 文档交给服务器（main.go 用 make gen 嵌入的文件调用）。有接口的 `// @maxbody`
+// 大于 guard.max_body_bytes 时，把服务器级上限抬到最大的那个（Hertz 启动时才读，所以要在 Run 之前）；
+// 其余接口由 Guard 仍按 guard.max_body_bytes 拒。
+func SetSpec(h *server.Hertz, spec []byte) {
+	specs.Store(h, spec)
+	largest := 0
+	for _, n := range RouteMaxBodies(spec) {
+		largest = max(largest, n)
+	}
+	if opts := h.GetOptions(); largest > opts.MaxRequestBodySize {
+		opts.MaxRequestBodySize = largest
+		zlog.Info("guard: body limit of the server raised for the routes with @maxbody", zlog.Int("max_body_bytes", int64(largest)))
+	}
+}
 
 // Spec returns the OpenAPI document given by SetSpec, or nil.
 func Spec(h *server.Hertz) []byte {
