@@ -482,7 +482,7 @@ request_id 再调，幂等中间件会回放结果。
 
 ### 按调用方放行（`callers:`）
 
-动钱、持密钥的服务只让该调它的服务调它：`callers.rules` 每条列出一组方法和允许的调用方服务名（Kitex 客户端在 TTHeader 里带的服务名，就是请求日志里的 `from`）。写进规则的方法只接受列出的服务和本服务自己（部署后检查用自己的客户端），没带名字的调用在这些方法上被拒；没写进任何规则的方法谁都能调。被拒回业务码 1007（`kitexx.CodeForbidden`），日志一条 WARN，指标 `rpc_server_rejected_total{rpc_method,reason="caller"}`。中间件排在请求日志之后、参数校验之前。
+动钱、持密钥的服务只让该调它的服务调它：`callers.rules` 每条列出一组方法和允许的调用方服务名（Kitex 客户端在 TTHeader 里带的服务名，就是请求日志里的 `from`）。写进规则的方法只接受列出的服务和本服务自己（部署后检查用自己的客户端），没带名字的调用在这些方法上被拒。没写进任何规则的方法按 `callers.default`（没写时取环境变量 `CALLERS_DEFAULT`）：`allow`（默认）谁都能调，`log` 放行但计数（`reason="caller_unlisted_log"`）并记 WARN，`deny` 只放本服务自己（`reason="caller_unlisted"`）。`methods: ["*"]` 覆盖全部方法，`allow: ["*"]` 放行任何调用方；只有本服务自己调的方法写 `allow: [<本服务名>]`。`devkit lint` 的 callers-coverage 要求 IDL 里每个方法都写进每份 conf 的规则。被拒回业务码 1007（`kitexx.CodeForbidden`），日志一条 WARN，指标 `rpc_server_rejected_total{rpc_method,reason="caller"}`。中间件排在请求日志之后、参数校验之前。
 
 ```yaml
 callers:

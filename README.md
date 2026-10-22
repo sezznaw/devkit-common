@@ -820,6 +820,14 @@ valid, and for the claimed uid, realm and session. `identity.mode`: `off`
 every service without editing confs. Calls that claim no login (jobs,
 events, public endpoints) are not checked.
 
+**Callers default (`callers.default`)**: a method in no `callers.rules` rule
+follows `allow` (default; everybody), `log` (everybody, counted as
+`caller_unlisted_log` and warned) or `deny` (only this service itself, 1007);
+empty takes `CALLERS_DEFAULT`. `methods: ["*"]` covers every method,
+`allow: ["*"]` any caller; a method only this service calls is listed with
+`allow: [<this service>]`. devkit lint (callers-coverage) requires every IDL
+method in the rules of every conf profile.
+
 **Service identity (`service_identity:`)**: the caller's service name that
 callers: matches is written by the caller in the TTHeader, so it can be
 forged. Every pod mounts a projected token the cluster signs for its own

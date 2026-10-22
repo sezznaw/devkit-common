@@ -87,7 +87,7 @@ var (
 		Name: "rpc_identity_checks_total", Help: "Checks of the login an RPC claims against the user token it carries, by method, result (ok, no_token, bad_token, mismatch) and mode.",
 	}, []string{"method", "result", "mode"})
 	RPCServerRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
-		Name: "rpc_server_rejected_total", Help: "Requests an instance refused for its limits (code 5003), by method and reason: in_flight, qps, connections.",
+		Name: "rpc_server_rejected_total", Help: "Requests an instance refused, by method and reason: in_flight, qps, connections (limits, code 5003); caller, caller_unlisted (callers, code 1007); caller_unlisted_log (callers.default log: let through).",
 	}, []string{"rpc_method", "reason"})
 	RPCServerDuration = promauto.With(Registry).NewHistogramVec(prometheus.HistogramOpts{
 		Name: "rpc_server_duration_seconds", Help: "Time to handle an RPC request.", Buckets: DurationBuckets,

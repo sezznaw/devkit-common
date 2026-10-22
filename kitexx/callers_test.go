@@ -64,3 +64,57 @@ func TestCallers(t *testing.T) {
 		t.Fatal("empty methods accepted")
 	}
 }
+
+// default deny: an unlisted method takes only this service; "*" covers every
+// method or any caller; log lets through; the default comes from the
+// environment when the conf has none.
+func TestCallersDefault(t *testing.T) {
+	zlogtest.Discard(t)
+	rules := []CallerRule{
+		{Methods: []string{"DebitBet"}, Allow: []string{"ser-bet"}},
+		{Methods: []string{"Ping"}, Allow: []string{"*"}},
+		{Methods: []string{"*"}, Allow: []string{"ser-admin"}},
+	}
+	run := func(cfg CallersConfig, from, method string) bool {
+		ctx := callerCtx(from, method)
+		_ = Callers("ser-wallet", cfg)(func(ctx context.Context, req, resp interface{}) error { return nil })(ctx, nil, nil)
+		return busyCode(ctx) == 0
+	}
+	deny := CallersConfig{Default: CallersDeny, Rules: rules}
+	for _, c := range []struct {
+		from, method string
+		ok           bool
+	}{
+		{"ser-bet", "DebitBet", true},
+		{"ser-admin", "DebitBet", true},   // "*" methods
+		{"ser-admin", "GetWallet", true},  // "*" methods, unlisted otherwise
+		{"ser-bet", "GetWallet", false},   // unlisted
+		{"", "GetWallet", false},          // unlisted, unnamed
+		{"ser-wallet", "GetWallet", true}, // itself
+		{"anyone", "Ping", true},          // "*" caller
+		{"ser-api", "DebitBet", false},
+	} {
+		if got := run(deny, c.from, c.method); got != c.ok {
+			t.Fatalf("deny: %s -> %s: allowed=%v", c.from, c.method, got)
+		}
+	}
+	if !run(CallersConfig{Default: CallersLog}, "ser-bet", "GetWallet") {
+		t.Fatal("log refused an unlisted method")
+	}
+	if !run(CallersConfig{}, "ser-bet", "GetWallet") {
+		t.Fatal("allow refused")
+	}
+	t.Setenv("CALLERS_DEFAULT", "deny")
+	if run(CallersConfig{}, "ser-bet", "GetWallet") {
+		t.Fatal("CALLERS_DEFAULT=deny let an unlisted method through")
+	}
+	if !run(CallersConfig{Default: CallersAllow}, "ser-bet", "GetWallet") {
+		t.Fatal("conf allow did not win over the environment")
+	}
+	if (CallersConfig{Default: "strict"}).Validate() == nil {
+		t.Fatal("bad default accepted")
+	}
+	if !deny.Covers("DebitBet") || !deny.Covers("Anything") || (CallersConfig{Rules: rules[:1]}).Covers("GetWallet") {
+		t.Fatal("Covers")
+	}
+}
