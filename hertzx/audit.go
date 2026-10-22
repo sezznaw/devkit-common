@@ -72,6 +72,7 @@ func auditedOperations(spec []byte) map[string]auditOp {
 			Summary    string `yaml:"summary"`
 			Permission string `yaml:"x-permission"`
 			Audit      *bool  `yaml:"x-audit"`
+			Sensitive  bool   `yaml:"x-sensitive"`
 		} `yaml:"paths"`
 	}
 	if yaml.Unmarshal(spec, &doc) != nil {
@@ -84,14 +85,23 @@ func auditedOperations(spec []byte) map[string]auditOp {
 				audited = *op.Audit
 			}
 			if audited {
-				out[strings.ToUpper(method)+" "+path] = auditOp{title: op.Summary, permission: op.Permission}
+				out[strings.ToUpper(method)+" "+path] = auditOp{title: op.Summary, permission: op.Permission, sensitive: op.Sensitive}
 			}
 		}
 	}
 	return out
 }
 
-type auditOp struct{ title, permission string }
+type auditOp struct {
+	title, permission string
+	sensitive         bool // @sensitive: the response shows personal data in clear; not recorded
+}
+
+// AuditSensitiveResponse stands in the log for the response of a @sensitive
+// operation: what it revealed is not kept where every reader of the log sees it.
+//
+// AuditSensitiveResponse 是 @sensitive 接口的响应在审计里的占位：它解锁出来的明文不留在人人可读的日志里。
+const AuditSensitiveResponse = "[sensitive response not recorded]"
 
 // AuditedOperations lists the audited operations of the document, for a
 // page that explains what is recorded.
@@ -149,7 +159,7 @@ func Audit(h *server.Hertz, spec []byte, sink AuditSink) {
 			Path:       string(c.Path()),
 			Permission: op.permission,
 			Request:    request,
-			Response:   Redact(c.Response.Body()),
+			Response:   AuditSensitiveResponse,
 			Status:     c.Response.StatusCode(),
 			Code:       -1,
 			TraceID:    otelx.TraceID(ctx),
@@ -157,6 +167,9 @@ func Audit(h *server.Hertz, spec []byte, sink AuditSink) {
 			UserAgent:  cutUTF8(string(c.UserAgent()), auditUALimit, ""),
 			DeviceID:   kitexx.DeviceID(ctx),
 			DurationMS: time.Since(start).Milliseconds(),
+		}
+		if !op.sensitive {
+			e.Response = Redact(c.Response.Body())
 		}
 		if uid, logged := kitexx.UID(ctx); logged {
 			e.UID = uid
@@ -176,8 +189,11 @@ func Audit(h *server.Hertz, spec []byte, sink AuditSink) {
 }
 
 // secretKey matches the keys whose values never reach the audit log:
-// credentials, and the identity documents and bank accounts a back office handles.
-var secretKey = regexp.MustCompile(`(?i)(password|passwd|secret|token|key|otp|pin|card|credential|authorization|cookie|session|signature|ticket|id_?no|id_?number|identity|bank_?account)`)
+// credentials, and the identity documents and bank, payment and crypto
+// accounts a back office handles (phone and email stay readable: a decision
+// of the project, 2026-10-21). The operations that reveal personal data in
+// clear say `// @sensitive` and keep no response at all.
+var secretKey = regexp.MustCompile(`(?i)(password|passwd|secret|token|key|otp|pin|card|credential|authorization|cookie|session|signature|ticket|id_?no|id_?number|identity|bank|_account|account_?no|crypto|wallet_?address)`)
 
 // Redact returns a request or response body for the audit log: JSON (any
 // shape: objects, arrays, at any depth) and form bodies come back as JSON

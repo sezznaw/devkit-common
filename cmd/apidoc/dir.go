@@ -84,7 +84,7 @@ func runDir(dir, out, title, version, desc string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f, err)
 		}
-		patched, err := Patch(doc, title, version, desc, fallback, d, PublicMethods(src), PermMethods(src), AuditMethods(src), LimitMethods(src), MaxBodyMethods(src))
+		patched, err := Patch(doc, title, version, desc, fallback, d, PublicMethods(src), PermMethods(src), AuditMethods(src), LimitMethods(src), MaxBodyMethods(src), SensitiveMethods(src))
 		if err != nil {
 			return fmt.Errorf("%s: %w", f, err)
 		}

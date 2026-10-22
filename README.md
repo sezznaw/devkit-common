@@ -730,7 +730,7 @@ in two files is an error) and written to `cmd/<service>/openapi.yaml`, which
 The IDL return type of a method is its data struct; apidoc wraps every response
 in the `{code, msg, data}` envelope the gateway adds (see below), synthesizes a
 200 for methods returning `common.Empty`, marks every field without `optional`
-as `required`, writes `// @limit` as `x-rate-limit`, `// @maxbody` as `x-max-body`, and writes the code table
+as `required`, writes `// @limit` as `x-rate-limit`, `// @maxbody` as `x-max-body`, `// @sensitive` as `x-sensitive` (the response shows personal data in clear: the audit log keeps the request, not the response), and writes the code table
 of `idl/errors/*.thrift` as `x-error-codes` (code, name, message, domain) for
 the front-end generators. Comments on methods and fields in the IDL become the
 descriptions: the first sentence of a method's comment is its title, the rest

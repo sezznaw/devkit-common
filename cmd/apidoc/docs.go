@@ -195,6 +195,26 @@ func MaxBodyMethods(src []byte) map[string]string {
 	return taggedMethods(src, maxBodyLine)
 }
 
+var sensitiveLine = regexp.MustCompile(`@(sensitive)\b`)
+
+// SensitiveMethods are the service methods whose comment block carries
+// `// @sensitive`: the response shows personal data in clear (a reveal of a
+// phone number, a bank account), so the audit log records the request but
+// not the response (hertzx.Audit) — whoever can read the log must not see
+// what only the revealing admin was allowed to.
+func SensitiveMethods(src []byte) map[string]string {
+	out := map[string]string{}
+	for m := range taggedMethods(src, sensitiveLine) {
+		out[m] = "true"
+	}
+	return out
+}
+
+// Sensitives writes x-sensitive: true for the methods that said @sensitive.
+func Sensitives(top *yaml.Node, sensitive map[string]string) {
+	setExtension(top, "x-sensitive", sensitive)
+}
+
 // MaxBodies writes each method's @maxbody as the operation's x-max-body.
 func MaxBodies(top *yaml.Node, sizes map[string]string) {
 	setExtension(top, "x-max-body", sizes)

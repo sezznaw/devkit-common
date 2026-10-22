@@ -523,7 +523,7 @@ CloudWeGo 的 `thrift-gen-http-swagger` 插件生成，然后合并（schema 名
 `/docs`（Scalar 文档页，"Send request" 直接打本服务）。
 
 方法的 IDL 返回类型就是数据结构体；apidoc 给每个响应包上网关要加的 `{code, msg, data}` 壳（见下一节），返回 `common.Empty` 的方法合成一个 200，
-没写 `optional` 的字段标成 `required`，`// @limit` 写成 `x-rate-limit`，`// @maxbody` 写成 `x-max-body`，`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。
+没写 `optional` 的字段标成 `required`，`// @limit` 写成 `x-rate-limit`，`// @maxbody` 写成 `x-max-body`，`// @sensitive` 写成 `x-sensitive`（响应含明文个人信息的接口：审计只记请求不记响应），`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。
 IDL 里方法和字段的注释就是文档说明：方法注释的第一句是接口标题，其余是说明。`// @docs` 行（`// @docs title: ...`、`// @docs description: ...`、`// @docs tag member: 会员`）
 放在一个没有 `service` 的文件里，约定叫 `docs.thrift`；`@public`、`@perm`、`@audit`、`@limit` 从全部文件读。接口按路径第二段 `/v1/<领域>/...` 分组，`/ping` 归到"系统"。
 local 和 dev 开，生产关。

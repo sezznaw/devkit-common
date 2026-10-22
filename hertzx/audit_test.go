@@ -239,3 +239,39 @@ func TestAsyncSinkStopsRetryingWhenTheStoreIsDown(t *testing.T) {
 		t.Fatalf("store called %d times", calls)
 	}
 }
+
+// Payment and crypto accounts are masked like bank accounts; phone and email stay readable.
+func TestRedactPaymentAccounts(t *testing.T) {
+	got := Redact([]byte(`{"payer_account":"6222001","payee_account":"6222002","account_no":"6222003","crypto_address":"TXyz","bank_branch":"BJ","phone":"138","email":"a@b.c","account_holder":"Zhang"}`))
+	for _, leak := range []string{"6222001", "6222002", "6222003", "TXyz", "BJ"} {
+		if strings.Contains(got, leak) {
+			t.Fatalf("%s leaks %s", got, leak)
+		}
+	}
+	if !strings.Contains(got, `"phone":"138"`) || !strings.Contains(got, `"email":"a@b.c"`) {
+		t.Fatalf("phone and email should stay: %s", got)
+	}
+}
+
+// A @sensitive operation is recorded without its response.
+func TestAuditSensitiveKeepsNoResponse(t *testing.T) {
+	zlogtest.Discard(t)
+	spec := []byte("openapi: 3.0.3\npaths:\n  /v1/member/reveal:\n    post:\n      summary: 查看完整信息\n      x-permission: member.manage\n      x-sensitive: true\n  /v1/member/update:\n    post:\n      summary: 改资料\n      x-permission: member.manage\n")
+	h := server.New(server.WithDisablePrintRoute(true))
+	var got []AuditEntry
+	Audit(h, spec, func(ctx context.Context, e AuditEntry) { got = append(got, e) })
+	reply := func(ctx context.Context, c *app.RequestContext) { c.JSON(200, map[string]any{"code": 0, "data": map[string]any{"phone": "13800138000"}}) }
+	h.POST("/v1/member/reveal", reply)
+	h.POST("/v1/member/update", reply)
+	ut.PerformRequest(h.Engine, "POST", "/v1/member/reveal", &ut.Body{Body: strings.NewReader(`{"uid":7}`), Len: 9})
+	ut.PerformRequest(h.Engine, "POST", "/v1/member/update", &ut.Body{Body: strings.NewReader(`{"uid":7}`), Len: 9})
+	if len(got) != 2 {
+		t.Fatalf("entries %d", len(got))
+	}
+	if got[0].Response != AuditSensitiveResponse || !strings.Contains(got[0].Request, `"uid":7`) || got[0].Code != 0 {
+		t.Fatalf("sensitive entry %+v", got[0])
+	}
+	if !strings.Contains(got[1].Response, "13800138000") {
+		t.Fatalf("ordinary entry keeps its response: %+v", got[1])
+	}
+}
