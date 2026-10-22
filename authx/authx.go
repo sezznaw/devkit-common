@@ -11,6 +11,7 @@ package authx
 
 import (
 	"context"
+	"crypto/ed25519"
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/base64"
@@ -56,9 +57,20 @@ type Config struct {
 	// Enabled switches the section on (the gateway's RequireLogin, the
 	// issuing service's Issuer).
 	Enabled bool `yaml:"enabled"`
-	// Secret signs the access tokens (HS256), at least 32 bytes, from the
-	// environment: "${AUTH_JWT_SECRET}". The same value in ser-auth and in
-	// every gateway.
+	// PrivateKey signs the access tokens with Ed25519 (EdDSA): the base64 of
+	// the 32-byte seed, from the environment ("${AUTH_JWT_PRIVATE_KEY}"), in
+	// the issuing service only. A gateway holds public keys alone, so one
+	// taken over cannot sign a token. `go run .../cmd/authkey` makes a pair.
+	PrivateKey string `yaml:"private_key"`
+	// PublicKeys verify EdDSA tokens: base64 of 32-byte Ed25519 public keys,
+	// the token's `kid` header picks one; more than one while a key is
+	// rotated. Not secret (deployment values or conf). The issuer always
+	// accepts its own key.
+	PublicKeys []string `yaml:"public_keys"`
+	// Secret is the legacy shared HS256 key (at least 32 bytes, from
+	// "${AUTH_JWT_SECRET}"): with it set, HS256 tokens are signed (by an
+	// issuer without a private key) and accepted. Leave it empty once every
+	// live token is EdDSA, so that nothing holding it can mint tokens.
 	Secret string `yaml:"secret"`
 	// Issuer is the `iss` claim, default "sportsbook".
 	Issuer string `yaml:"issuer"`
@@ -96,8 +108,15 @@ func (c Config) Validate(verifier bool) error {
 	if !c.Enabled {
 		return nil
 	}
-	if len(c.Secret) < 32 {
-		return fmt.Errorf("authx: auth.secret must be at least 32 characters (it comes from AUTH_JWT_SECRET; is the variable set?)")
+	k, err := loadKeys(c)
+	if err != nil {
+		return err
+	}
+	switch {
+	case !verifier && k.private == nil && k.secret == nil:
+		return fmt.Errorf("authx: the issuer needs auth.private_key (AUTH_JWT_PRIVATE_KEY, an Ed25519 seed) or the legacy auth.secret; is the variable set?")
+	case verifier && len(k.public) == 0 && k.secret == nil:
+		return fmt.Errorf("authx: a gateway needs auth.public_keys (AUTH_JWT_PUBLIC_KEY) or the legacy auth.secret; is the variable set?")
 	}
 	if verifier {
 		if c.Realm == "" {
@@ -155,6 +174,65 @@ func keyBlacklist(jti string) string    { return "auth:bl:" + jti }
 func keySessionAlive(sid string) string { return "auth:sid:" + sid }
 func keyEnded(sid string) string        { return "auth:ended:" + sid } // why the session ended, kept as long as a refresh token could live
 
+// keys sign and verify access tokens.
+type keys struct {
+	secret  []byte                       // HS256 (legacy); nil when not configured
+	private ed25519.PrivateKey           // EdDSA signing key: the issuer only
+	kid     string                       // key id of private
+	public  map[string]ed25519.PublicKey // kid -> verifying key
+}
+
+// KeyID names a public key in the `kid` header: the first 8 hex digits of
+// its SHA-256.
+func KeyID(pub ed25519.PublicKey) string {
+	h := sha256.Sum256(pub)
+	return hex.EncodeToString(h[:4])
+}
+
+// GenerateKey makes an Ed25519 pair in the configuration's encoding:
+// private (base64 seed, for AUTH_JWT_PRIVATE_KEY) and public (base64, for
+// AUTH_JWT_PUBLIC_KEY / auth.public_keys).
+func GenerateKey() (private, public string, err error) {
+	pub, priv, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		return "", "", err
+	}
+	return base64.StdEncoding.EncodeToString(priv.Seed()), base64.StdEncoding.EncodeToString(pub), nil
+}
+
+func loadKeys(c Config) (keys, error) {
+	k := keys{public: map[string]ed25519.PublicKey{}}
+	if s := strings.TrimSpace(c.Secret); s != "" {
+		if len(s) < 32 {
+			return k, fmt.Errorf("authx: auth.secret must be at least 32 characters, or empty")
+		}
+		k.secret = []byte(s)
+	}
+	if s := strings.TrimSpace(c.PrivateKey); s != "" {
+		seed, err := base64.StdEncoding.DecodeString(s)
+		if err != nil || len(seed) != ed25519.SeedSize {
+			return k, fmt.Errorf("authx: auth.private_key must be the base64 of a 32-byte Ed25519 seed")
+		}
+		k.private = ed25519.NewKeyFromSeed(seed)
+		pub := k.private.Public().(ed25519.PublicKey)
+		k.kid = KeyID(pub)
+		k.public[k.kid] = pub
+	}
+	for _, s := range c.PublicKeys {
+		s = strings.TrimSpace(s)
+		if s == "" {
+			continue // an unset variable in a list
+		}
+		raw, err := base64.StdEncoding.DecodeString(s)
+		if err != nil || len(raw) != ed25519.PublicKeySize {
+			return k, fmt.Errorf("authx: auth.public_keys: %q is not the base64 of a 32-byte Ed25519 public key", s)
+		}
+		pub := ed25519.PublicKey(raw)
+		k.public[KeyID(pub)] = pub
+	}
+	return k, nil
+}
+
 type claims struct {
 	jwt.RegisteredClaims
 	Realm Realm  `json:"typ"`
@@ -177,9 +255,10 @@ func hashToken(t string) string {
 // Issuer is what the authentication service uses: it creates and ends
 // sessions and signs tokens.
 type Issuer struct {
-	cfg Config
-	rdb *redis.Client
-	now func() time.Time
+	cfg  Config
+	keys keys
+	rdb  *redis.Client
+	now  func() time.Time
 }
 
 // NewIssuer builds the Issuer of the authentication service.
@@ -190,7 +269,8 @@ func NewIssuer(cfg Config, rdb *redis.Client) (*Issuer, error) {
 	if rdb == nil {
 		return nil, fmt.Errorf("authx: the issuer needs Redis (redis.enabled) for sessions")
 	}
-	return &Issuer{cfg: cfg, rdb: rdb, now: time.Now}, nil
+	k, _ := loadKeys(cfg) // Validate read them already
+	return &Issuer{cfg: cfg, keys: k, rdb: rdb, now: time.Now}, nil
 }
 
 // Why a session ended. The verifier hands the reason back with
@@ -265,7 +345,7 @@ func (i *Issuer) issue(ctx context.Context, realm Realm, uid int64, sid string) 
 	now := i.now()
 	accessTTL, refreshTTL := i.cfg.AccessTTL.Or(defaultAccessTTL), i.cfg.RefreshTTL.Or(defaultRefreshTTL)
 	jti := randomID(12)
-	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{
+	c := claims{
 		RegisteredClaims: jwt.RegisteredClaims{
 			Issuer:    i.cfg.issuer(),
 			Subject:   strconv.FormatInt(uid, 10),
@@ -274,8 +354,16 @@ func (i *Issuer) issue(ctx context.Context, realm Realm, uid int64, sid string) 
 			ExpiresAt: jwt.NewNumericDate(now.Add(accessTTL)),
 		},
 		Realm: realm, SID: sid,
-	})
-	access, err := tok.SignedString([]byte(i.cfg.Secret))
+	}
+	var access string
+	var err error
+	if i.keys.private != nil {
+		tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, c)
+		tok.Header["kid"] = i.keys.kid
+		access, err = tok.SignedString(i.keys.private)
+	} else {
+		access, err = jwt.NewWithClaims(jwt.SigningMethodHS256, c).SignedString(i.keys.secret)
+	}
 	if err != nil {
 		return Tokens{}, fmt.Errorf("authx: sign: %w", err)
 	}
@@ -344,7 +432,7 @@ func (i *Issuer) Logout(ctx context.Context, refreshToken, accessToken string) e
 		i.rdb.Del(ctx, keyRefresh(h))
 	}
 	if accessToken != "" {
-		if c, err := parse(i.cfg, accessToken); err == nil && c.ExpiresAt != nil {
+		if c, err := parse(i.keys, i.cfg.issuer(), accessToken); err == nil && c.ExpiresAt != nil {
 			if ttl := time.Until(c.ExpiresAt.Time); ttl > 0 {
 				i.rdb.Set(ctx, keyBlacklist(c.ID), "1", ttl)
 			}
@@ -387,14 +475,27 @@ func revoked(ctx context.Context, rdb *redis.Client, sid string) error {
 	return &RevokedError{Reason: reason}
 }
 
-func parse(cfg Config, token string) (*claims, error) {
+// parse checks a token's signature and standard claims. EdDSA is checked
+// with the public key its `kid` names; HS256 only when a secret is
+// configured (the legacy key). Any other algorithm, or HS256 without a
+// secret, is invalid: a token "signed" with a public key as an HMAC secret
+// is not accepted.
+func parse(k keys, issuer, token string) (*claims, error) {
 	var c claims
 	_, err := jwt.ParseWithClaims(token, &c, func(t *jwt.Token) (any, error) {
-		if t.Method != jwt.SigningMethodHS256 {
-			return nil, ErrInvalidToken
+		switch t.Method {
+		case jwt.SigningMethodEdDSA:
+			kid, _ := t.Header["kid"].(string)
+			if pub, ok := k.public[kid]; ok {
+				return pub, nil
+			}
+		case jwt.SigningMethodHS256:
+			if k.secret != nil {
+				return k.secret, nil
+			}
 		}
-		return []byte(cfg.Secret), nil
-	}, jwt.WithIssuer(cfg.issuer()), jwt.WithExpirationRequired())
+		return nil, ErrInvalidToken
+	}, jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithValidMethods([]string{"EdDSA", "HS256"}))
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
@@ -405,8 +506,9 @@ func parse(cfg Config, token string) (*claims, error) {
 // locally, then one Redis read to see that the session is alive and the
 // token not blacklisted.
 type Verifier struct {
-	cfg Config
-	rdb *redis.Client
+	cfg  Config
+	keys keys
+	rdb  *redis.Client
 }
 
 // NewVerifier builds a gateway's Verifier for cfg.Realm.
@@ -417,7 +519,8 @@ func NewVerifier(cfg Config, rdb *redis.Client) (*Verifier, error) {
 	if rdb == nil {
 		return nil, fmt.Errorf("authx: the verifier needs Redis (redis.enabled) to check sessions")
 	}
-	return &Verifier{cfg: cfg, rdb: rdb}, nil
+	k, _ := loadKeys(cfg) // Validate read them already
+	return &Verifier{cfg: cfg, keys: k, rdb: rdb}, nil
 }
 
 // Realm the verifier accepts.
@@ -425,7 +528,7 @@ func (v *Verifier) Realm() Realm { return v.cfg.Realm }
 
 // Verify checks an access token and returns who it is.
 func (v *Verifier) Verify(ctx context.Context, accessToken string) (Identity, error) {
-	c, err := parse(v.cfg, accessToken)
+	c, err := parse(v.keys, v.cfg.issuer(), accessToken)
 	if err != nil {
 		return Identity{}, err
 	}

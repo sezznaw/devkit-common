@@ -2,12 +2,15 @@ package authx
 
 import (
 	"context"
+	"crypto/ed25519"
+	"encoding/base64"
 	"errors"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/golang-jwt/jwt/v5"
 	"github.com/redis/go-redis/v9"
 
 	"github.com/sezznaw/devkit-common/config"
@@ -144,5 +147,98 @@ func TestExpiredAccessToken(t *testing.T) {
 	time.Sleep(5 * time.Millisecond)
 	if _, err := ver.Verify(context.Background(), tk.AccessToken); !errors.Is(err, ErrInvalidToken) {
 		t.Errorf("expired: %v", err)
+	}
+}
+
+// EdDSA: the issuer holds the private key, a gateway only public keys; the migration from HS256 accepts both
+// while the gateway still has the secret, and only EdDSA once it is gone. A token "signed" with a public key as
+// an HMAC secret, a key the gateway does not list, or an unknown kid is invalid.
+func TestEdDSA(t *testing.T) {
+	srv := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+	t.Cleanup(func() { rdb.Close() })
+	ctx := context.Background()
+	priv, pub, err := GenerateKey()
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret := "0123456789abcdef0123456789abcdef"
+	legacy, err := NewIssuer(Config{Enabled: true, Secret: secret}, rdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	iss, err := NewIssuer(Config{Enabled: true, PrivateKey: priv, Secret: secret}, rdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	both, err := NewVerifier(Config{Enabled: true, Realm: RealmMember, PublicKeys: []string{pub}, Secret: secret}, rdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	only, err := NewVerifier(Config{Enabled: true, Realm: RealmMember, PublicKeys: []string{"", pub}}, rdb)
+	if err != nil {
+		t.Fatal(err)
+	}
+	old, _ := legacy.Login(ctx, RealmMember, 7)
+	cur, _ := iss.Login(ctx, RealmMember, 8)
+	if !strings.HasPrefix(cur.AccessToken, "eyJhbGciOiJFZERTQSIs") {
+		t.Fatalf("the issuer with a private key signs EdDSA: %s", cur.AccessToken[:24])
+	}
+	if id, err := both.Verify(ctx, old.AccessToken); err != nil || id.UID != 7 {
+		t.Fatalf("migration: HS256 still accepted with the secret: %+v %v", id, err)
+	}
+	for name, v := range map[string]*Verifier{"both": both, "only": only} {
+		if id, err := v.Verify(ctx, cur.AccessToken); err != nil || id.UID != 8 {
+			t.Fatalf("%s: EdDSA: %+v %v", name, id, err)
+		}
+	}
+	if _, err := only.Verify(ctx, old.AccessToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("without the secret HS256 is refused: %v", err)
+	}
+	// the issuer's own Logout reads its EdDSA tokens
+	if err := iss.Logout(ctx, cur.RefreshToken, cur.AccessToken); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := only.Verify(ctx, cur.AccessToken); !errors.Is(err, ErrSessionRevoked) {
+		t.Fatalf("after logout: %v", err)
+	}
+
+	// alg confusion: HS256 with the public key bytes as the secret
+	pubRaw, _ := base64.StdEncoding.DecodeString(pub)
+	forged, _ := jwt.NewWithClaims(jwt.SigningMethodHS256, claims{RegisteredClaims: jwt.RegisteredClaims{
+		Issuer: "sportsbook", Subject: "1", ID: "x", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Realm: RealmMember, SID: "s"}).SignedString(pubRaw)
+	if _, err := only.Verify(ctx, forged); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("alg confusion accepted: %v", err)
+	}
+	// another key, and an unknown kid
+	otherPriv, _, _ := GenerateKey()
+	stranger, _ := NewIssuer(Config{Enabled: true, PrivateKey: otherPriv}, rdb)
+	foreign, _ := stranger.Login(ctx, RealmMember, 9)
+	if _, err := only.Verify(ctx, foreign.AccessToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("a key the gateway does not list: %v", err)
+	}
+	seed, _ := base64.StdEncoding.DecodeString(otherPriv)
+	tok := jwt.NewWithClaims(jwt.SigningMethodEdDSA, claims{RegisteredClaims: jwt.RegisteredClaims{
+		Issuer: "sportsbook", Subject: "1", ID: "y", ExpiresAt: jwt.NewNumericDate(time.Now().Add(time.Hour))}, Realm: RealmMember, SID: "s"})
+	tok.Header["kid"] = KeyID(ed25519.PublicKey(pubRaw)) // claims the trusted key's id, signed with another
+	spoofed, _ := tok.SignedString(ed25519.NewKeyFromSeed(seed))
+	if _, err := only.Verify(ctx, spoofed); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("kid of a trusted key, signature of another: %v", err)
+	}
+
+	// configuration: a gateway needs keys or the secret, the issuer a private key or the secret; bad keys stop the start
+	for name, c := range map[string]struct {
+		cfg      Config
+		verifier bool
+	}{
+		"gateway without keys": {Config{Enabled: true, Realm: RealmMember}, true},
+		"issuer without keys":  {Config{Enabled: true, PublicKeys: []string{pub}}, false},
+		"bad private key":      {Config{Enabled: true, PrivateKey: "bm90LWEta2V5"}, false},
+		"bad public key":       {Config{Enabled: true, Realm: RealmMember, PublicKeys: []string{"bm90LWEta2V5"}}, true},
+		"short secret":         {Config{Enabled: true, Realm: RealmMember, PublicKeys: []string{pub}, Secret: "short"}, true},
+	} {
+		if err := c.cfg.Validate(c.verifier); err == nil {
+			t.Errorf("%s: accepted", name)
+		}
 	}
 }

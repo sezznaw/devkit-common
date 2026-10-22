@@ -562,12 +562,18 @@ IDL 侧是 `common.Money {string amount, string currency}`（项目的 `idl/comm
 ```yaml
 auth:
   enabled: true
-  secret: "${AUTH_JWT_SECRET}"   # 认证服务和每个网关同一个值；至少 32 字符
+  private_key: "${AUTH_JWT_PRIVATE_KEY}"     # 只有认证服务：Ed25519 种子（base64），用它签 EdDSA 令牌
+  public_keys: ["${AUTH_JWT_PUBLIC_KEY}"]    # 网关：验签用的公钥（不保密），轮换时列两个
+  # secret: "${AUTH_JWT_SECRET}"             # 旧的 HS256 共用密钥：只在迁移期间填，填了才签 / 认 HS256
   realm: member                  # 网关填：服务哪类主体（member | admin | agent，或项目自己的领域名，小写字母数字下划线）
   access_ttl: 15m
   refresh_ttl: 720h
   single_session: true           # 新登录顶掉旧会话
 ```
+
+访问令牌用 Ed25519 签名（EdDSA，头里带 `kid`）：私钥只在认证服务里，网关只有公钥，所以攻破任何一个网关都签不出令牌。
+`go run github.com/sezznaw/devkit-common/cmd/authkey@latest` 生成一对。旧的 HS256 共用密钥（`secret`）只为迁移保留：网关同时配着它和
+公钥时两种都认，等最后一个 HS256 令牌过期（access_ttl）就从所有服务拿掉；刷新令牌不是 JWT，切换不用大家重新登录。
 
 一个服务负责所有人的认证（`ser-auth`）：通过账号所属的服务校验密码（会员是 ser-member），用
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` 做 `Login`、`Refresh`（旧 refresh 作废；再用它就是泄露，吊销该主体全部会话）、

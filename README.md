@@ -791,12 +791,22 @@ Every record and span carries `version`: `log.version` from the configuration, e
 ```yaml
 auth:
   enabled: true
-  secret: "${AUTH_JWT_SECRET}"   # same value in the authentication service and every gateway; 32+ chars
+  private_key: "${AUTH_JWT_PRIVATE_KEY}"     # the authentication service only: Ed25519 seed (base64), signs EdDSA tokens
+  public_keys: ["${AUTH_JWT_PUBLIC_KEY}"]    # gateways: verifying keys (not secret); two while rotating
+  # secret: "${AUTH_JWT_SECRET}"             # the legacy shared HS256 key: only while migrating; set, HS256 is signed / accepted
   realm: member                  # a gateway: which principals it serves (member | admin | agent, or a realm of the project's own: lowercase letters, digits, underscores)
   access_ttl: 15m
   refresh_ttl: 720h
   single_session: true           # a new login ends the previous session
 ```
+
+Access tokens are signed with Ed25519 (EdDSA, a `kid` header): the private
+key lives in the authentication service only, gateways hold public keys, so
+no gateway taken over can sign a token. `go run
+github.com/sezznaw/devkit-common/cmd/authkey@latest` makes a pair. The legacy
+shared HS256 `secret` is for the migration: a gateway with both accepts both;
+once the last HS256 token has expired (access_ttl) remove it everywhere.
+Refresh tokens are not JWTs, so the switch logs nobody out.
 
 One service authenticates everyone (`ser-auth`): it verifies credentials
 through the owning service (members: ser-member) and uses
