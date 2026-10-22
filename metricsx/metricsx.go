@@ -76,6 +76,11 @@ var (
 	RPCServerRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_server_requests_total", Help: "RPC requests handled, by method and result code.",
 	}, []string{"rpc_service", "rpc_method", "code"})
+	// RPCServiceIdentity counts the checks of the calling service's ServiceAccount token (kitexx service_identity:):
+	// result ok, no_token, bad_token, wrong_namespace or mismatch (the token is another service's).
+	RPCServiceIdentity = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_service_identity_total", Help: "Checks of the calling service's ServiceAccount token, by method, result (ok, no_token, bad_token, wrong_namespace, mismatch) and mode.",
+	}, []string{"method", "result", "mode"})
 	// RPCIdentityChecks counts the checks of the login a call claims (kitexx identity:): result ok, no_token,
 	// bad_token or mismatch, and whether it was refused (enforce) or only recorded (log).
 	RPCIdentityChecks = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{

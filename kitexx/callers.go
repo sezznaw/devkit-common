@@ -96,6 +96,9 @@ func Callers(self string, cfg CallersConfig) endpoint.Middleware {
 					from = ri.From().ServiceName()
 				}
 			}
+			if proven := VerifiedCaller(ctx); proven != "" {
+				from = proven // service_identity: proven by the caller's ServiceAccount token
+			}
 			set, guarded := allowed[method]
 			if !guarded || set[from] {
 				return next(ctx, req, resp)

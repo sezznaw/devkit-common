@@ -820,6 +820,19 @@ valid, and for the claimed uid, realm and session. `identity.mode`: `off`
 every service without editing confs. Calls that claim no login (jobs,
 events, public endpoints) are not checked.
 
+**Service identity (`service_identity:`)**: the caller's service name that
+callers: matches is written by the caller in the TTHeader, so it can be
+forged. Every pod mounts a projected token the cluster signs for its own
+ServiceAccount (audience `sportsbook-rpc`, by default
+`/var/run/secrets/sportsbook/rpc-token`, beside `api-token` and `ca.crt` to
+read the cluster's keys); the client attaches it to every call (one hop)
+and the server checks it locally against the cluster's OIDC keys:
+signature, issuer, audience, expiry, an allowed namespace, and a
+ServiceAccount named like the caller. callers: then matches the proven
+name. `service_identity.mode`: off (default) / log / enforce (refuse, 1007);
+empty takes `SERVICE_IDENTITY` and `SERVICE_IDENTITY_NAMESPACES` from the
+environment. Metric `rpc_service_identity_total`.
+
 One service authenticates everyone (`ser-auth`): it verifies credentials
 through the owning service (members: ser-member) and uses
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` for `Login`, `Refresh` (the old

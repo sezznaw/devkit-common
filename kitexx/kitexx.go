@@ -133,6 +133,10 @@ type Config struct {
 	// any caller can write) against the user token the gateway passes along
 	// with it. mode off / log / enforce; see identity.go.
 	Identity IdentityConfig `yaml:"identity"`
+	// ServiceIdentity: prove the calling service with its ServiceAccount
+	// token (callers: then matches the proven name). mode off / log /
+	// enforce; see svcidentity.go.
+	ServiceIdentity ServiceIdentityConfig `yaml:"service_identity"`
 	// Report: report.enabled opens the StarRocks report database (a CDC copy
 	// of the business tables, seconds behind) as rt.Report, query only, for
 	// the report service alone (devkit lint, rule report-only).
@@ -213,6 +217,10 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 	if err != nil {
 		return nil, err
 	}
+	svcIdentity, err := ServiceIdentityCheck(cfg.ServiceIdentity)
+	if err != nil {
+		return nil, err
+	}
 	opts := []server.Option{
 		// Tags become the instance's Nacos metadata: the IDL generation (idldeps.go).
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name, Tags: RegistrationMetadata(nil)}),
@@ -223,6 +231,8 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithMiddleware(ServerTracing()),
 		server.WithMiddleware(ServerMetrics()),
 		server.WithMiddleware(LoggingMiddleware()),
+		// service identity: the caller's ServiceAccount token, before callers (which then matches the proven name)
+		server.WithMiddleware(svcIdentity),
 		// callers.rules: after the log line (a refusal is logged as an rpc error), before any work
 		server.WithMiddleware(Callers(cfg.Service.Name, cfg.Callers)),
 		// identity: the claimed login must match the user token it carries (log first, then enforce)
@@ -373,6 +383,8 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 		client.WithMiddleware(ClientTracing()),
 		client.WithMiddleware(ClientMetrics()),
 		client.WithMiddleware(ClientRequestID()),
+		// this pod's ServiceAccount token on every call (when the projected file is there)
+		client.WithMiddleware(ClientServiceToken(cfg.ServiceIdentity)),
 	}, rpcClientOptions(cfg)...)
 	if cfg.Service.Name != "" {
 		// Who is calling: the "from" of the request log of the service called.

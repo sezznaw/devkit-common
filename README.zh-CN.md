@@ -581,6 +581,12 @@ auth:
 `enforce`（拒绝，1004）。没写时取环境变量 `IDENTITY_CHECK` 和 `AUTH_JWT_PUBLIC_KEY`，部署可以统一下发、不用每个服务改 conf。
 没声称登录者的调用（定时任务、事件、公开接口）不查。
 
+**服务身份（`service_identity:`）**：callers 认的调用方服务名是调用方自己写在 TTHeader 里的，可以冒充。每个 Pod 挂一个集群为它
+自己的 ServiceAccount 签发的投射令牌（受众 `sportsbook-rpc`，默认在 `/var/run/secrets/sportsbook/rpc-token`，旁边是读集群公钥用的
+`api-token` 和 `ca.crt`），客户端每次调用附上它（只到下一跳），服务端用集群的 OIDC 公钥本地核对签名、签发方、受众、过期、允许的
+namespace，以及 ServiceAccount 名字等于调用方服务名；核对通过后 callers 按核对出的名字判断。`service_identity.mode`：off（默认）/
+log / enforce（拒绝，1007）；没写时取环境变量 `SERVICE_IDENTITY`、`SERVICE_IDENTITY_NAMESPACES`。指标 `rpc_service_identity_total`。
+
 一个服务负责所有人的认证（`ser-auth`）：通过账号所属的服务校验密码（会员是 ser-member），用
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` 做 `Login`、`Refresh`（旧 refresh 作废；再用它就是泄露，吊销该主体全部会话）、
 `Logout`（结束会话、拉黑 access）和 `RevokeAll(ctx, realm, uid, reason)`（改密码、封号、后台踢人；reason 是项目自己定的一个词，如
