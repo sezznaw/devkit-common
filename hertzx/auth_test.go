@@ -40,9 +40,11 @@ func TestRequireLogin(t *testing.T) {
 	h := server.New(server.WithDisablePrintRoute(true))
 	RequireLogin(h, ver, []byte(spec))
 	var seen int64
+	var seenToken string
 	h.POST("/v1/auth/login", func(ctx context.Context, c *app.RequestContext) { c.String(200, "public") })
 	h.POST("/v1/member/getProfile", func(ctx context.Context, c *app.RequestContext) {
 		seen = kitexx.MustUID(ctx)
+		seenToken = kitexx.Token(ctx) // passed along for the services downstream to check
 		c.String(200, "ok")
 	})
 	h.GET("/ping", func(ctx context.Context, c *app.RequestContext) { c.String(200, "pong") })
@@ -57,8 +59,8 @@ func TestRequireLogin(t *testing.T) {
 		t.Errorf("no token: %d %s", w.Code, w.Body.String())
 	}
 	tk, _ := iss.Login(context.Background(), authx.RealmMember, 42)
-	if w := ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil, ut.Header{Key: "Authorization", Value: "Bearer " + tk.AccessToken}); w.Code != 200 || seen != 42 {
-		t.Errorf("with token: %d uid=%d", w.Code, seen)
+	if w := ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil, ut.Header{Key: "Authorization", Value: "Bearer " + tk.AccessToken}); w.Code != 200 || seen != 42 || seenToken != tk.AccessToken {
+		t.Errorf("with token: %d uid=%d token passed along=%v", w.Code, seen, seenToken == tk.AccessToken)
 	}
 	iss.RevokeAll(context.Background(), authx.RealmMember, 42, "disabled")
 	w := ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", nil, ut.Header{Key: "Authorization", Value: "Bearer " + tk.AccessToken})

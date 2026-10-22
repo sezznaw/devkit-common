@@ -76,6 +76,11 @@ var (
 	RPCServerRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_server_requests_total", Help: "RPC requests handled, by method and result code.",
 	}, []string{"rpc_service", "rpc_method", "code"})
+	// RPCIdentityChecks counts the checks of the login a call claims (kitexx identity:): result ok, no_token,
+	// bad_token or mismatch, and whether it was refused (enforce) or only recorded (log).
+	RPCIdentityChecks = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "rpc_identity_checks_total", Help: "Checks of the login an RPC claims against the user token it carries, by method, result (ok, no_token, bad_token, mismatch) and mode.",
+	}, []string{"method", "result", "mode"})
 	RPCServerRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_server_rejected_total", Help: "Requests an instance refused for its limits (code 5003), by method and reason: in_flight, qps, connections.",
 	}, []string{"rpc_method", "reason"})

@@ -808,6 +808,18 @@ shared HS256 `secret` is for the migration: a gateway with both accepts both;
 once the last HS256 token has expired (access_ttl) remove it everywhere.
 Refresh tokens are not JWTs, so the switch logs nobody out.
 
+**The login a call claims, checked downstream (`identity:`)**: a gateway
+puts the login (uid, realm, session) into the call chain's metainfo, which
+the caller writes, so anything that can reach a service could claim to be
+anyone. The gateway therefore passes the user's access token along too
+(`kitexx.Token(ctx)`) and an RPC service checks it with the public keys:
+valid, and for the claimed uid, realm and session. `identity.mode`: `off`
+(default), `log` (count `rpc_identity_checks_total`, warn, let through) or
+`enforce` (refuse with 1004). Empty takes the environment variables
+`IDENTITY_CHECK` and `AUTH_JWT_PUBLIC_KEY`, so a deployment can switch
+every service without editing confs. Calls that claim no login (jobs,
+events, public endpoints) are not checked.
+
 One service authenticates everyone (`ser-auth`): it verifies credentials
 through the owning service (members: ser-member) and uses
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` for `Login`, `Refresh` (the old

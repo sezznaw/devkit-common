@@ -129,6 +129,10 @@ type Config struct {
 	// for anybody else). Methods in no rule accept every caller. For the
 	// services that move money or hold secrets.
 	Callers CallersConfig `yaml:"callers"`
+	// Identity: check the login a call claims (uid / realm in metainfo, which
+	// any caller can write) against the user token the gateway passes along
+	// with it. mode off / log / enforce; see identity.go.
+	Identity IdentityConfig `yaml:"identity"`
 	// Report: report.enabled opens the StarRocks report database (a CDC copy
 	// of the business tables, seconds behind) as rt.Report, query only, for
 	// the report service alone (devkit lint, rule report-only).
@@ -205,6 +209,10 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 	if err := cfg.Callers.Validate(); err != nil {
 		return nil, err
 	}
+	identity, err := IdentityCheck(cfg.Identity)
+	if err != nil {
+		return nil, err
+	}
 	opts := []server.Option{
 		// Tags become the instance's Nacos metadata: the IDL generation (idldeps.go).
 		server.WithServerBasicInfo(&rpcinfo.EndpointBasicInfo{ServiceName: cfg.Service.Name, Tags: RegistrationMetadata(nil)}),
@@ -217,6 +225,8 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithMiddleware(LoggingMiddleware()),
 		// callers.rules: after the log line (a refusal is logged as an rpc error), before any work
 		server.WithMiddleware(Callers(cfg.Service.Name, cfg.Callers)),
+		// identity: the claimed login must match the user token it carries (log first, then enforce)
+		server.WithMiddleware(identity),
 		server.WithMiddleware(ValidationMiddleware()),
 		server.WithMiddleware(rt.Idempotency()),
 		server.WithMetaHandler(transmeta.ServerTTHeaderHandler),

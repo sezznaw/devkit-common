@@ -53,6 +53,8 @@ func RequireLogin(h *server.Hertz, v *authx.Verifier, spec []byte, publicPaths .
 			return
 		}
 		ctx = kitexx.WithIdentity(ctx, id)
+		// the token itself goes along, so a service downstream can check the login it is told about
+		ctx = kitexx.WithToken(ctx, token)
 		ctx = zlog.CtxWith(ctx, zlog.Int("uid", id.UID))
 		c.Next(ctx)
 	})

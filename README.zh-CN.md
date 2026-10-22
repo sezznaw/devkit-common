@@ -575,6 +575,12 @@ auth:
 `go run github.com/sezznaw/devkit-common/cmd/authkey@latest` 生成一对。旧的 HS256 共用密钥（`secret`）只为迁移保留：网关同时配着它和
 公钥时两种都认，等最后一个 HS256 令牌过期（access_ttl）就从所有服务拿掉；刷新令牌不是 JWT，切换不用大家重新登录。
 
+**下游核对登录者（`identity:`）**：网关把登录者（uid、realm、会话）放进调用链的 metainfo 往下传，但 metainfo 是调用方自己写的，
+能连上某个服务的程序就能冒充任何人。所以网关也把用户的访问令牌一起传下去（`kitexx.Token(ctx)`），RPC 服务用公钥核对：令牌有效，
+且就是声称的 uid、realm、会话。`identity.mode`：`off`（默认）、`log`（只计数 `rpc_identity_checks_total` 和记 warn，放行）、
+`enforce`（拒绝，1004）。没写时取环境变量 `IDENTITY_CHECK` 和 `AUTH_JWT_PUBLIC_KEY`，部署可以统一下发、不用每个服务改 conf。
+没声称登录者的调用（定时任务、事件、公开接口）不查。
+
 一个服务负责所有人的认证（`ser-auth`）：通过账号所属的服务校验密码（会员是 ser-member），用
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` 做 `Login`、`Refresh`（旧 refresh 作废；再用它就是泄露，吊销该主体全部会话）、
 `Logout`（结束会话、拉黑 access）和 `RevokeAll(ctx, realm, uid, reason)`（改密码、封号、后台踢人；reason 是项目自己定的一个词，如

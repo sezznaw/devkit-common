@@ -480,7 +480,7 @@ func revoked(ctx context.Context, rdb *redis.Client, sid string) error {
 // configured (the legacy key). Any other algorithm, or HS256 without a
 // secret, is invalid: a token "signed" with a public key as an HMAC secret
 // is not accepted.
-func parse(k keys, issuer, token string) (*claims, error) {
+func parse(k keys, issuer, token string, opts ...jwt.ParserOption) (*claims, error) {
 	var c claims
 	_, err := jwt.ParseWithClaims(token, &c, func(t *jwt.Token) (any, error) {
 		switch t.Method {
@@ -495,7 +495,7 @@ func parse(k keys, issuer, token string) (*claims, error) {
 			}
 		}
 		return nil, ErrInvalidToken
-	}, jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithValidMethods([]string{"EdDSA", "HS256"}))
+	}, append([]jwt.ParserOption{jwt.WithIssuer(issuer), jwt.WithExpirationRequired(), jwt.WithValidMethods([]string{"EdDSA", "HS256"})}, opts...)...)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
@@ -552,6 +552,49 @@ func (v *Verifier) Verify(ctx context.Context, accessToken string) (Identity, er
 		return Identity{}, revoked(ctx, v.rdb, c.SID)
 	}
 	return Identity{Realm: c.Realm, UID: uid, SID: c.SID, JTI: c.ID, Exp: c.ExpiresAt.Time}, nil
+}
+
+// TokenChecker checks an access token's signature and claims alone, with no
+// session lookup: what an RPC service behind a gateway uses to see that the
+// login a call claims is real (the gateway already checked the session). It
+// holds public keys only and accepts EdDSA tokens only; a token that expired
+// less than CheckLeeway ago still passes, for a call chain that was running
+// when it did.
+//
+// TokenChecker 只验访问令牌的签名和声明、不查会话：网关后面的 RPC 服务用它确认调用声称的登录者是真的（会话网关已经查过）。
+// 只持公钥、只认 EdDSA；过期不到 CheckLeeway 的仍放行（调用链途中到期）。
+type TokenChecker struct {
+	keys   keys
+	issuer string
+}
+
+// CheckLeeway is how long after its expiry a token still passes TokenChecker.
+const CheckLeeway = 30 * time.Second
+
+// NewTokenChecker builds a checker from public keys (base64 Ed25519, as
+// auth.public_keys) and the issuer ("" = the default).
+func NewTokenChecker(publicKeys []string, issuer string) (*TokenChecker, error) {
+	k, err := loadKeys(Config{PublicKeys: publicKeys})
+	if err != nil {
+		return nil, err
+	}
+	if len(k.public) == 0 {
+		return nil, fmt.Errorf("authx: a token checker needs at least one public key (AUTH_JWT_PUBLIC_KEY)")
+	}
+	return &TokenChecker{keys: k, issuer: Config{Issuer: issuer}.issuer()}, nil
+}
+
+// Check returns who the token is for, or ErrInvalidToken.
+func (c *TokenChecker) Check(token string) (Identity, error) {
+	cl, err := parse(c.keys, c.issuer, token, jwt.WithLeeway(CheckLeeway))
+	if err != nil {
+		return Identity{}, err
+	}
+	uid, err := strconv.ParseInt(cl.Subject, 10, 64)
+	if err != nil || uid <= 0 {
+		return Identity{}, ErrInvalidToken
+	}
+	return Identity{Realm: cl.Realm, UID: uid, SID: cl.SID, JTI: cl.ID, Exp: cl.ExpiresAt.Time}, nil
 }
 
 // BearerToken extracts the token of an "Authorization: Bearer <token>" value.
