@@ -269,3 +269,23 @@ func TestSetSpecRaisesTheRunningServersLimit(t *testing.T) {
 		t.Fatalf("2000 bytes, above every limit: %d", code)
 	}
 }
+
+// An oversized body is refused after it is counted: a client cannot send them without limit.
+func TestGuardOversizedBodiesCountAgainstTheRate(t *testing.T) {
+	r, _ := kitexx.ParseRate("3/m")
+	cfg := kitexx.GuardConfig{MaxBodyBytes: 100}
+	cfg.Rate.PerIP = r
+	h := newGuarded(t, cfg, false)
+	post := func(n int) int {
+		return ut.PerformRequest(h.Engine, "POST", "/v1/member/getProfile", &ut.Body{Body: strings.NewReader(strings.Repeat("x", n)), Len: n},
+			ut.Header{Key: "X-Forwarded-For", Value: "10.0.0.9"}).Code
+	}
+	for i := 0; i < 3; i++ {
+		if c := post(500); c != 413 {
+			t.Fatalf("oversized %d: %d", i, c)
+		}
+	}
+	if c := post(10); c != 429 {
+		t.Fatalf("after three oversized bodies a small request should be rate limited: %d", c)
+	}
+}

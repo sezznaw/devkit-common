@@ -260,7 +260,9 @@ func TestAuditSensitiveKeepsNoResponse(t *testing.T) {
 	h := server.New(server.WithDisablePrintRoute(true))
 	var got []AuditEntry
 	Audit(h, spec, func(ctx context.Context, e AuditEntry) { got = append(got, e) })
-	reply := func(ctx context.Context, c *app.RequestContext) { c.JSON(200, map[string]any{"code": 0, "data": map[string]any{"phone": "13800138000"}}) }
+	reply := func(ctx context.Context, c *app.RequestContext) {
+		c.JSON(200, map[string]any{"code": 0, "data": map[string]any{"phone": "13800138000"}})
+	}
 	h.POST("/v1/member/reveal", reply)
 	h.POST("/v1/member/update", reply)
 	ut.PerformRequest(h.Engine, "POST", "/v1/member/reveal", &ut.Body{Body: strings.NewReader(`{"uid":7}`), Len: 9})

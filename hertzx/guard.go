@@ -74,16 +74,6 @@ type window struct {
 func (g *guard) handle(ctx context.Context, c *app.RequestContext) {
 	g.once.Do(func() { g.routes, g.bodies = RouteLimits(Spec(g.h)), RouteMaxBodies(Spec(g.h)) })
 	path := string(c.Path())
-	limit, ok := g.bodies[string(c.Method())+" "+path]
-	if !ok {
-		limit = g.cfg.MaxBody()
-	}
-	if n := len(c.Request.Body()); n > limit {
-		metricsx.HTTPRequestsRejected.WithLabelValues("body_too_large").Inc()
-		zlog.Ctx(ctx).Warn("request body too large", zlog.Int("bytes", int64(n)), zlog.Int("limit", int64(limit)), zlog.Str("client_ip", c.ClientIP()))
-		c.AbortWithStatusJSON(413, map[string]any{"code": kitexx.CodeBadParam, "msg": "请求内容过大"})
-		return
-	}
 	if !isFrameworkPath(path) {
 		ip := c.ClientIP()
 		if r := g.cfg.PerIP(); !r.Off() {
@@ -98,6 +88,17 @@ func (g *guard) handle(ctx context.Context, c *app.RequestContext) {
 				return
 			}
 		}
+	}
+	// after the counting: an oversized body costs the reading, so it uses up the client's rate like any request
+	limit, ok := g.bodies[string(c.Method())+" "+path]
+	if !ok {
+		limit = g.cfg.MaxBody()
+	}
+	if n := len(c.Request.Body()); n > limit {
+		metricsx.HTTPRequestsRejected.WithLabelValues("body_too_large").Inc()
+		zlog.Ctx(ctx).Warn("request body too large", zlog.Int("bytes", int64(n)), zlog.Int("limit", int64(limit)), zlog.Str("client_ip", c.ClientIP()))
+		c.AbortWithStatusJSON(413, map[string]any{"code": kitexx.CodeBadParam, "msg": "请求内容过大"})
+		return
 	}
 	timeout := g.cfg.RequestTimeout()
 	if g.debug > 0 && devroute.Active(devroute.Tags(ctx)) {
