@@ -5,6 +5,7 @@ import (
 	"database/sql"
 	"errors"
 	"os"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -149,5 +150,80 @@ func TestOutbox(t *testing.T) {
 	db.Model(&OutboxRow{}).Where("msg_key = ?", "8").Count(&rolledBack)
 	if rolledBack != 0 {
 		t.Fatal("rolled back row must not exist")
+	}
+}
+
+// A relay sends the rows its service queued and the rows from before the
+// service column, never another service's; the column comes to an old table
+// once (the second ALTER is a duplicate column, 1060).
+func TestOutboxOwnRows(t *testing.T) {
+	root := os.Getenv("MYSQL_TEST_DSN_ROOT")
+	if root == "" {
+		t.Skip("MYSQL_TEST_DSN_ROOT not set")
+	}
+	zlogtest.Discard(t)
+	admin, err := sql.Open("mysql", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	for _, q := range []string{"DROP DATABASE IF EXISTS kafkax_outbox_own", "CREATE DATABASE kafkax_outbox_own"} {
+		if _, err := admin.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer admin.Exec("DROP DATABASE IF EXISTS kafkax_outbox_own")
+	db, err := gorm.Open(mysql.Open(root+"kafkax_outbox_own?parseTime=true&charset=utf8mb4"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// an outbox from before the column, then the column added (twice: the race of two services)
+	old := strings.Replace(strings.Replace(OutboxDDL, "  service     VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '写入这一行的服务，只由它的转发器发送（空：旧行，谁都可以发）',\n", "", 1),
+		",\n  KEY idx_outbox_service_unsent (service, sent_at, next_attempt_at, id)", "", 1)
+	if strings.Contains(old, "service") {
+		t.Fatal("old DDL still has the column")
+	}
+	if err := db.Exec(old).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO outbox (event_id, topic, event_type, payload) VALUES ('legacy-1', 'events.wallet', 'wallet.x', '{}')").Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(OutboxServiceColumn).Error; err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(OutboxServiceColumn).Error; err == nil {
+		t.Fatal("second ALTER succeeded")
+	}
+
+	cl := cluster(t, "events.wallet")
+	cfg := Config{Enabled: true, Brokers: cl.ListenAddrs()}
+	c, err := Open(context.Background(), cfg.Static(), cfg, "ser-wallet", "tenant_a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := db.Transaction(func(tx *gorm.DB) error {
+		return c.PublishTx(context.Background(), tx, "events.wallet", "1", "wallet.changed", map[string]int{"a": 1})
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec("INSERT INTO outbox (service, event_id, topic, event_type, payload) VALUES ('ser-member', 'other-1', 'events.wallet', 'member.x', '{}')").Error; err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.relayOnce(context.Background(), db, 100); err != nil {
+		t.Fatal(err)
+	}
+	var rows []OutboxRow
+	db.Order("id").Find(&rows)
+	got := map[string]bool{}
+	for _, r := range rows {
+		got[r.Service+"/"+r.EventType] = r.SentAt != nil
+	}
+	want := map[string]bool{"/wallet.x": true, "ser-wallet/wallet.changed": true, "ser-member/member.x": false}
+	for k, v := range want {
+		if got[k] != v {
+			t.Fatalf("%s sent=%v; all: %v", k, got[k], got)
+		}
 	}
 }

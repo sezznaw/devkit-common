@@ -312,7 +312,7 @@ Kafka 和 outbox 都是至少一次投递，同一条事件可能到消费者两
 
 #### 事务里的事件：outbox
 
-和数据库变更同属一件事的事件走 outbox，不走 `Publish`：在事务里 `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` 把事件写进本服务的 `outbox` 表（项目迁移建表，`kafkax.OutboxDDL` 是表结构）。事务提交则变更和事件都落地，回滚则都没有；同一进程里的转发器（服务同时有 Kafka 和 MySQL 时自动开，`kafka.outbox.enabled: false` 关）随后把行发出去，信封和 `Publish` 一样，trace 是发起请求的那条。至少一次投递、event id 不变，消费者照旧按 `ev.ID` 去重。发不出去的行按退避重试（1s、2s…5 分钟；表里有 `attempts`、`last_error`、`next_attempt_at`），一个坏主题不会挡住别的；多副本分摊（`FOR UPDATE SKIP LOCKED`）。已发的行保留 `kafka.outbox.retention`（7 天）后删除。指标 `kafka_outbox_pending`、`kafka_outbox_oldest_age_seconds`（按它告警）、`kafka_outbox_published_total{topic,status}`。`devkit lint` 的 `outbox` 规则拒绝在跑事务的代码里直接 `Publish`。
+和数据库变更同属一件事的事件走 outbox，不走 `Publish`：在事务里 `rt.Kafka.PublishTx(ctx, tx, "events.wallet", id, "wallet.debited", data)` 把事件写进本服务的 `outbox` 表（项目迁移建表，`kafkax.OutboxDDL` 是表结构）。事务提交则变更和事件都落地，回滚则都没有；同一进程里的转发器（服务同时有 Kafka 和 MySQL 时自动开，`kafka.outbox.enabled: false` 关）随后把行发出去，信封和 `Publish` 一样，trace 是发起请求的那条。至少一次投递、event id 不变，消费者照旧按 `ev.ID` 去重。发不出去的行按退避重试（1s、2s…5 分钟；表里有 `attempts`、`last_error`、`next_attempt_at`），一个坏主题不会挡住别的；多副本分摊（`FOR UPDATE SKIP LOCKED`）。表里的 `service` 列记是哪个服务写的，转发器只发本服务的行（以及加这一列之前的旧行），所以多个服务共用一张 outbox 时，每个服务的 Kafka 账号只需要写自己的主题；旧表在 dev 启动时自动加列（`kafkax.OutboxServiceColumn`）。已发的行保留 `kafka.outbox.retention`（7 天）后删除。指标 `kafka_outbox_pending`、`kafka_outbox_oldest_age_seconds`（按它告警）、`kafka_outbox_published_total{topic,status}`。`devkit lint` 的 `outbox` 规则拒绝在跑事务的代码里直接 `Publish`。
 
 #### 死信与积压
 
@@ -712,3 +712,10 @@ log_level_data_id: order.log-level              # kitexx：日志级别跟随这
 ```sh
 go test ./...
 ```
+
+### 按服务分账号（2026-10-22，v0.69.0）
+
+- 数据源表一行给一个租户；`username` 列里的 `${SERVICE}` 替换成本服务名，于是 Valkey ACL 用户、Kafka SCRAM 用户就是服务名（`ser-member`），密码仍按 `password_env` 从环境变量取，由每个服务自己的 Secret 给出。`redis.username` 是静态配置下的 ACL 用户。
+- S3 启动检查不再用 HeadBucket（那是整个桶的权限），改为在本服务前缀下列一个 key：只能碰自己前缀的身份也能启动，桶不存在、密钥没有本前缀权限照样启动失败。
+- Centrifugo：API 密钥和连接令牌密钥各给需要的服务，只要有一把就能开；只有令牌密钥的服务（只签连接令牌）启动时不调服务端，调 Publish / History 会报错。
+

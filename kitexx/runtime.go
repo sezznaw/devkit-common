@@ -252,7 +252,7 @@ func (rt *Runtime) openCentrifugo() error {
 		return err
 	}
 	rt.Centrifugo = cli
-	zlog.Info("centrifugo connected", zlog.Str("api", target.APIAddr), zlog.Bool("token_secret", target.TokenSecret != ""), zlog.Str("source", cfg.Centrifugo.SourceName()))
+	zlog.Info("centrifugo connected", zlog.Str("api", target.APIAddr), zlog.Bool("api_key", target.APIKey != ""), zlog.Bool("token_secret", target.TokenSecret != ""), zlog.Str("source", cfg.Centrifugo.SourceName()))
 	return nil
 }
 
@@ -272,13 +272,15 @@ func centrifugoTarget(cfg Config) (centrifugox.Target, error) {
 	if c.APIAddr == "" || c.APIKeyEnv == "" {
 		return centrifugox.Target{}, fmt.Errorf("centrifugo.source platform: %s in Nacos must have centrifugo.{api_addr, api_key_env}; got api_addr=%q api_key_env=%q", infraDataID, c.APIAddr, c.APIKeyEnv)
 	}
+	// Each service gets only the key it uses (its Secret sets one or both):
+	// the API key to publish, the token secret to sign connection tokens.
 	key := os.Getenv(c.APIKeyEnv)
-	if key == "" {
-		return centrifugox.Target{}, fmt.Errorf("centrifugo.source platform: the API key is to come from the environment variable %q (infra.yaml centrifugo.api_key_env), which is not set", c.APIKeyEnv)
-	}
 	secret := ""
 	if c.TokenHMACEnv != "" {
 		secret = os.Getenv(c.TokenHMACEnv)
+	}
+	if key == "" && secret == "" {
+		return centrifugox.Target{}, fmt.Errorf("centrifugo.source platform: neither the API key (environment variable %q, infra.yaml centrifugo.api_key_env) nor the token secret (%q, centrifugo.token_hmac_env) is set", c.APIKeyEnv, c.TokenHMACEnv)
 	}
 	return centrifugox.Target{APIAddr: rewriteURL(c.APIAddr), APIKey: key, TokenSecret: secret}, nil
 }
@@ -433,7 +435,7 @@ func kafkaTarget(ctx context.Context, cfg Config) (kafkax.Target, error) {
 			brokers = append(brokers, h)
 		}
 	}
-	t := kafkax.Target{Brokers: brokers, Username: row.User, Password: row.Password}
+	t := kafkax.Target{Brokers: brokers, Username: rowUser(row.User, cfg.Service.Name), Password: row.Password}
 	if inTakeover(cfg) {
 		for i, b := range t.Brokers {
 			t.Brokers[i] = rewriteAddr(b)
@@ -473,6 +475,14 @@ func (rt *Runtime) openRedis() error {
 	return nil
 }
 
+// rowUser is a datasource row's username with ${SERVICE} replaced by this
+// service's name: one row for the tenant, an account per service (the ACL
+// user ser-member, its password from the same password_env, set by the
+// service's own Secret).
+func rowUser(user, service string) string {
+	return strings.ReplaceAll(strings.TrimSpace(user), "${SERVICE}", service)
+}
+
 // redisTarget is mysqlTarget for Redis: the configuration with source
 // static, the tenant's valkey row of the datasource table with source platform.
 func redisTarget(ctx context.Context, cfg Config) (redisx.Target, error) {
@@ -488,6 +498,7 @@ func redisTarget(ctx context.Context, cfg Config) (redisx.Target, error) {
 		return redisx.Target{}, err
 	}
 	t, err := redisx.TargetFromRow(rewriteAddr(row.Addr), row.DB, row.Password)
+	t.Username = rowUser(row.User, cfg.Service.Name)
 	return t, err
 }
 

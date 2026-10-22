@@ -15,6 +15,7 @@ import (
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/delayx"
 	"github.com/sezznaw/devkit-common/kafkax"
+	"github.com/sezznaw/devkit-common/mysqlx"
 	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
@@ -46,9 +47,13 @@ func (rt *Runtime) EnsureFrameworkTables() error {
 	}
 	m := rt.DB.Migrator()
 	var missing []string
+	outboxColumn := false // an outbox from before the service column
 	for _, w := range want {
 		if !m.HasTable(w.name) {
 			missing = append(missing, w.name)
+		} else if w.name == "outbox" && !m.HasColumn(&kafkax.OutboxRow{}, "service") {
+			missing = append(missing, "outbox.service")
+			outboxColumn = true
 		}
 	}
 	if len(missing) == 0 {
@@ -61,6 +66,15 @@ func (rt *Runtime) EnsureFrameworkTables() error {
 		return fmt.Errorf("kitexx: framework tables missing in this database: %s (auto migrate is off in %s; run the migration step of the release, or set mysql.auto_migrate: true)", strings.Join(missing, ", "), config.Env())
 	}
 	create := func(ctx context.Context) error {
+		if outboxColumn && !m.HasColumn(&kafkax.OutboxRow{}, "service") {
+			// the outbox is shared by every service of the database until each has
+			// its own: two of them may add the column at once; the second one's
+			// duplicate column / key is the first one's success
+			if err := rt.DB.WithContext(ctx).Exec(kafkax.OutboxServiceColumn).Error; err != nil && !mysqlx.IsCode(err, 1060, 1061) {
+				return fmt.Errorf("kitexx: add outbox.service: %w", err)
+			}
+			zlog.Info("auto migrate: framework column added", zlog.Str("column", "outbox.service"))
+		}
 		for _, w := range want {
 			if m.HasTable(w.name) {
 				continue

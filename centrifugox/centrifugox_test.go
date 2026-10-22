@@ -104,3 +104,30 @@ func TestConnectionToken(t *testing.T) {
 		t.Error("without a secret no token")
 	}
 }
+
+// One key each: the signer (token secret only) never calls the server and
+// cannot publish; the publisher (API key only) cannot sign; neither is no client.
+func TestSplitKeys(t *testing.T) {
+	zlogtest.Discard(t)
+	srv, calls := fakeCentrifugo(t)
+	signer, err := Open(context.Background(), Target{APIAddr: srv.URL, TokenSecret: "secret"}, Config{})
+	if err != nil || len(*calls) != 0 {
+		t.Fatalf("signer: %v, %d calls", err, len(*calls))
+	}
+	if _, err := signer.ConnectionToken("42"); err != nil {
+		t.Fatal(err)
+	}
+	if err := signer.Publish(context.Background(), "user:42", map[string]any{"a": 1}); err == nil || len(*calls) != 0 {
+		t.Fatalf("the signer published: %v", err)
+	}
+	pub, err := Open(context.Background(), Target{APIAddr: srv.URL, APIKey: "key"}, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pub.ConnectionToken("42"); err == nil {
+		t.Fatal("the publisher signed a token")
+	}
+	if _, err := Open(context.Background(), Target{APIAddr: srv.URL}, Config{}); err == nil {
+		t.Fatal("no key accepted")
+	}
+}

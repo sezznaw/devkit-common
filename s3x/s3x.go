@@ -176,8 +176,8 @@ type Object struct {
 // ErrNotFound: no object under that key.
 var ErrNotFound = errors.New("s3x: object not found")
 
-// Open connects, checks the bucket exists (HeadBucket, which also verifies
-// the credentials) and returns the client.
+// Open connects, checks the bucket exists and the keys may list this
+// service's prefix in it (checkBucket), and returns the client.
 func Open(ctx context.Context, t Target, cfg Config, service string) (*Client, error) {
 	if t.Endpoint == "" || t.Bucket == "" {
 		return nil, fmt.Errorf("s3x: target is incomplete: endpoint=%q bucket=%q", t.Endpoint, t.Bucket)
@@ -218,8 +218,8 @@ func Open(ctx context.Context, t Target, cfg Config, service string) (*Client, e
 	c := &Client{api: api, presign: presign, bucket: t.Bucket, prefix: prefix, timeout: timeout}
 	hctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
-	if _, err := api.HeadBucket(hctx, &s3.HeadBucketInput{Bucket: aws.String(t.Bucket)}); err != nil {
-		return nil, fmt.Errorf("s3x: bucket %q at %s: %w (does it exist, and are the keys right?)", t.Bucket, t.Endpoint, err)
+	if err := checkBucket(hctx, api, t.Bucket, prefix); err != nil {
+		return nil, fmt.Errorf("s3x: bucket %q at %s: %w (does it exist, and may the keys list %s/?)", t.Bucket, t.Endpoint, err, prefix)
 	}
 	if t.PublicBucket != "" {
 		if t.PublicBucket == t.Bucket {
@@ -233,12 +233,21 @@ func Open(ctx context.Context, t Target, cfg Config, service string) (*Client, e
 			}
 			base = publicBase(ep, t.PublicBucket, t.PathStyle)
 		}
-		if _, err := api.HeadBucket(hctx, &s3.HeadBucketInput{Bucket: aws.String(t.PublicBucket)}); err != nil {
-			return nil, fmt.Errorf("s3x: public bucket %q at %s: %w (does it exist, and are the keys right?)", t.PublicBucket, t.Endpoint, err)
+		if err := checkBucket(hctx, api, t.PublicBucket, prefix); err != nil {
+			return nil, fmt.Errorf("s3x: public bucket %q at %s: %w (does it exist, and may the keys list %s/?)", t.PublicBucket, t.Endpoint, err, prefix)
 		}
 		c.public = &Client{api: api, presign: presign, bucket: t.PublicBucket, prefix: prefix, timeout: timeout, baseURL: base}
 	}
 	return c, nil
+}
+
+// checkBucket lists at most one key under the service's prefix: it fails
+// on a missing bucket and on keys that may not touch the prefix, and needs
+// nothing more than the service's own prefix. HeadBucket is a bucket-wide
+// right that keys limited to a prefix do not have.
+func checkBucket(ctx context.Context, api *s3.Client, bucket, prefix string) error {
+	_, err := api.ListObjectsV2(ctx, &s3.ListObjectsV2Input{Bucket: aws.String(bucket), Prefix: aws.String(prefix + "/"), MaxKeys: aws.Int32(1)})
+	return err
 }
 
 // publicBase is where the objects of a bucket are read without a signature:

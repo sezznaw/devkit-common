@@ -29,9 +29,11 @@ type Config struct {
 	// Role, with source platform: "tenant" (default) or "platform".
 	Role string `yaml:"role"`
 
-	// Addr "host:port", default 127.0.0.1:6379; Password; DB, the database
-	// index, default 0: the server, with source static.
+	// Addr "host:port", default 127.0.0.1:6379; Username (an ACL user, empty
+	// for the default user); Password; DB, the database index, default 0: the
+	// server, with source static.
 	Addr     string `yaml:"addr"`
+	Username string `yaml:"username"`
 	Password string `yaml:"password"`
 	DB       int    `yaml:"db"`
 
@@ -84,6 +86,7 @@ func (c Config) Validate() error {
 // Target is a server to connect to, once resolved.
 type Target struct {
 	Addr     string
+	Username string // ACL user; empty: the default user
 	Password string
 	DB       int
 }
@@ -94,7 +97,7 @@ func (c Config) Static() Target {
 	if addr == "" {
 		addr = defaultAddr
 	}
-	return Target{Addr: addr, Password: c.Password, DB: c.DB}
+	return Target{Addr: addr, Username: strings.TrimSpace(c.Username), Password: c.Password, DB: c.DB}
 }
 
 // TargetFromRow turns a datasource row (host:port, db_name as the index, the
@@ -129,6 +132,7 @@ func Open(ctx context.Context, t Target, cfg Config, service ...string) (*redis.
 	}
 	cli := redis.NewClient(&redis.Options{
 		Addr:        t.Addr,
+		Username:    t.Username,
 		Password:    t.Password,
 		DB:          t.DB,
 		PoolSize:    cfg.PoolSize,

@@ -1034,3 +1034,22 @@ while we are on 0.x; services pin the version in their `go.mod`.
 ```sh
 go test ./...
 ```
+
+### Per-service accounts (v0.69.0)
+
+- One datasource row per tenant; `${SERVICE}` in its `username` becomes this
+  service's name, so the Valkey ACL user and the Kafka SCRAM user are the
+  service (`ser-member`), the password still from `password_env`, which the
+  service's own Secret sets. `redis.username` is the ACL user of a static
+  configuration.
+- The outbox has a `service` column: a relay sends only its service's rows
+  (and rows from before the column), so with a shared outbox each service's
+  Kafka account needs to write only its own topics. dev adds the column to an
+  old table at start (`kafkax.OutboxServiceColumn`).
+- The S3 start check lists one key under the service's prefix instead of
+  HeadBucket (a bucket-wide right): keys limited to the prefix start, a
+  missing bucket or keys without the prefix still stop the start.
+- Centrifugo: a service holds the API key, the token secret or both; one is
+  enough. With the token secret alone Open does not call the server, and
+  Publish / History fail.
+

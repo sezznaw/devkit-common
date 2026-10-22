@@ -58,3 +58,11 @@ func TestRuntimeRedisThatIsNotThereFailsTheStart(t *testing.T) {
 		t.Fatalf("redis disabled: Redis stays nil: %v", err)
 	}
 }
+
+func TestRowUser(t *testing.T) {
+	for in, want := range map[string]string{"${SERVICE}": "ser-member", " app-${SERVICE} ": "app-ser-member", "tenant_a": "tenant_a", "": ""} {
+		if got := rowUser(in, "ser-member"); got != want {
+			t.Fatalf("%q: %q", in, got)
+		}
+	}
+}

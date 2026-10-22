@@ -48,3 +48,17 @@ func TestOpenAgainstMiniredis(t *testing.T) {
 		t.Errorf("a wrong password must fail with the hint: %v", err)
 	}
 }
+
+// An ACL user: the username goes with the password; without it, refused.
+func TestOpenACLUser(t *testing.T) {
+	srv := miniredis.RunT(t)
+	srv.RequireUserAuth("ser-member", "pw")
+	cli, err := Open(context.Background(), Config{Addr: srv.Addr(), Username: "ser-member", Password: "pw"}.Static(), Config{}, "ser-member")
+	if err != nil {
+		t.Fatal(err)
+	}
+	cli.Close()
+	if _, err := Open(context.Background(), Target{Addr: srv.Addr(), Password: "pw"}, Config{}); err == nil {
+		t.Fatal("the default user got in")
+	}
+}

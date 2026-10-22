@@ -85,7 +85,7 @@ func (rt *Runtime) frameworkChecks() []verifyx.Check {
 	if rt.Kafka != nil && rt.DB != nil && cfg.Kafka.Outbox.EnabledOrDefault() {
 		out = append(out, verifyx.Check{Name: "outbox", Description: "no event older than two minutes is still unpublished", Run: func(ctx context.Context) error {
 			var n int64
-			err := rt.DB.WithContext(ctx).Model(&kafkax.OutboxRow{}).Where("sent_at IS NULL AND created_at < ?", time.Now().Add(-2*time.Minute)).Count(&n).Error
+			err := rt.DB.WithContext(ctx).Model(&kafkax.OutboxRow{}).Where("service IN (?, '') AND sent_at IS NULL AND created_at < ?", rt.Config.Service.Name, time.Now().Add(-2*time.Minute)).Count(&n).Error
 			if err != nil {
 				return nil // no outbox table: the service does not use it
 			}

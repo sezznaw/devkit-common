@@ -104,9 +104,12 @@ type Client struct {
 }
 
 // Open checks the server answers (the info call) and returns the client.
+// A service holds only the key it needs: the API key to publish (and read
+// history), the token secret to sign connection tokens. With the token
+// secret alone it never calls the server, and Open does not either.
 func Open(ctx context.Context, t Target, cfg Config) (*Client, error) {
-	if t.APIAddr == "" || t.APIKey == "" {
-		return nil, fmt.Errorf("centrifugox: api_addr and api_key are required")
+	if t.APIAddr == "" || (t.APIKey == "" && t.TokenSecret == "") {
+		return nil, fmt.Errorf("centrifugox: api_addr and an api_key or a token_secret are required")
 	}
 	c := &Client{
 		api:         strings.TrimRight(t.APIAddr, "/"),
@@ -115,6 +118,9 @@ func Open(ctx context.Context, t Target, cfg Config) (*Client, error) {
 		ttl:         cfg.TokenTTL.Or(defaultTokenTTL),
 		userChannel: cmp.Or(cfg.UserChannel, defaultUserChannel),
 		http:        &http.Client{Timeout: 10 * time.Second},
+	}
+	if c.key == "" {
+		return c, nil // signs tokens only
 	}
 	var info json.RawMessage
 	if err := c.call(ctx, "info", map[string]any{}, &info); err != nil {
@@ -201,6 +207,9 @@ func (e *apiError) Error() string { return fmt.Sprintf("centrifugo error %d: %s"
 
 // call POSTs one API method and decodes its result.
 func (c *Client) call(ctx context.Context, method string, params any, result any) error {
+	if c.key == "" {
+		return fmt.Errorf("centrifugox: %s needs the API key; this service only has the token secret (it signs connection tokens)", method)
+	}
 	body, err := json.Marshal(params)
 	if err != nil {
 		return err
