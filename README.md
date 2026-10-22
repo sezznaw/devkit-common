@@ -831,7 +831,10 @@ signature, issuer, audience, expiry, an allowed namespace, and a
 ServiceAccount named like the caller. callers: then matches the proven
 name. `service_identity.mode`: off (default) / log / enforce (refuse, 1007);
 empty takes `SERVICE_IDENTITY` and `SERVICE_IDENTITY_NAMESPACES` from the
-environment. Metric `rpc_service_identity_total`.
+environment. Metric `rpc_service_identity_total`. In takeover mode the
+laptop instance attaches the token devkit keeps beside the marker
+(`.devkit/takeover.json.rpc-token`, signed for the taken-over service's
+ServiceAccount) and checks nothing itself.
 
 One service authenticates everyone (`ser-auth`): it verifies credentials
 through the owning service (members: ser-member) and uses

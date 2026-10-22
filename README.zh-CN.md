@@ -585,7 +585,8 @@ auth:
 自己的 ServiceAccount 签发的投射令牌（受众 `sportsbook-rpc`，默认在 `/var/run/secrets/sportsbook/rpc-token`，旁边是读集群公钥用的
 `api-token` 和 `ca.crt`），客户端每次调用附上它（只到下一跳），服务端用集群的 OIDC 公钥本地核对签名、签发方、受众、过期、允许的
 namespace，以及 ServiceAccount 名字等于调用方服务名；核对通过后 callers 按核对出的名字判断。`service_identity.mode`：off（默认）/
-log / enforce（拒绝，1007）；没写时取环境变量 `SERVICE_IDENTITY`、`SERVICE_IDENTITY_NAMESPACES`。指标 `rpc_service_identity_total`。
+log / enforce（拒绝，1007）；没写时取环境变量 `SERVICE_IDENTITY`、`SERVICE_IDENTITY_NAMESPACES`。指标 `rpc_service_identity_total`。接管模式下，本机实例附上 devkit 放在
+标记旁边的令牌（`.devkit/takeover.json.rpc-token`，为被接管服务的 ServiceAccount 签发），自己不做核对。
 
 一个服务负责所有人的认证（`ser-auth`）：通过账号所属的服务校验密码（会员是 ser-member），用
 `authx.NewIssuer(rt.Config.Auth, rt.Redis)` 做 `Login`、`Refresh`（旧 refresh 作废；再用它就是泄露，吊销该主体全部会话）、

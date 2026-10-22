@@ -23,6 +23,7 @@ import (
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/metricsx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
@@ -163,7 +164,39 @@ func (f *svcTokenFile) get() string {
 // (one hop). Without the file (a laptop, a pod without the projected
 // volume) it attaches nothing.
 func ClientServiceToken(cfg ServiceIdentityConfig) endpoint.Middleware {
-	f := &svcTokenFile{path: filepath.Join(cfg.dir(), "rpc-token")}
+	return clientServiceToken(filepath.Join(cfg.dir(), "rpc-token"))
+}
+
+// TakeoverTokenSuffix: in takeover mode devkit keeps a token of the taken-over
+// service's ServiceAccount next to the marker (<marker>.rpc-token, renewed with
+// the environment every minute), so the laptop's calls into the environment are
+// proven as that service. [takeover]
+const TakeoverTokenSuffix = ".rpc-token"
+
+// takeoverIdentity adapts service_identity to takeover mode (m is this
+// process's marker, nil outside takeover mode): the client reads the token
+// devkit keeps beside the marker instead of the projected file, and the server
+// checks nothing, since a laptop has neither the cluster's keys nor callers
+// with tokens of their own (they come through the tool's tunnel); the
+// environment checks the laptop's calls. It returns the server's config and
+// the path of the client's token.
+func takeoverIdentity(cfg Config, m *config.TakeoverMarker) (server ServiceIdentityConfig, tokenPath string) {
+	server = cfg.ServiceIdentity
+	tokenPath = filepath.Join(server.dir(), "rpc-token")
+	if m != nil && m.Service == cfg.Service.Name {
+		server.Mode = IdentityOff
+		tokenPath = m.Path + TakeoverTokenSuffix
+	}
+	return server, tokenPath
+}
+
+func clientTokenPathOf(cfg Config) string {
+	_, path := takeoverIdentity(cfg, takeover())
+	return path
+}
+
+func clientServiceToken(path string) endpoint.Middleware {
+	f := &svcTokenFile{path: path}
 	return func(next endpoint.Endpoint) endpoint.Endpoint {
 		return func(ctx context.Context, req, resp any) error {
 			if tok := f.get(); tok != "" {

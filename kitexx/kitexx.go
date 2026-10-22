@@ -217,7 +217,8 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 	if err != nil {
 		return nil, err
 	}
-	svcIdentity, err := ServiceIdentityCheck(cfg.ServiceIdentity)
+	sid, _ := takeoverIdentity(cfg, takeover())
+	svcIdentity, err := ServiceIdentityCheck(sid)
 	if err != nil {
 		return nil, err
 	}
@@ -383,8 +384,8 @@ func ClientOptions(cfg Config) ([]client.Option, error) {
 		client.WithMiddleware(ClientTracing()),
 		client.WithMiddleware(ClientMetrics()),
 		client.WithMiddleware(ClientRequestID()),
-		// this pod's ServiceAccount token on every call (when the projected file is there)
-		client.WithMiddleware(ClientServiceToken(cfg.ServiceIdentity)),
+		// the service's ServiceAccount token on every call: the projected file in a pod, devkit's file in takeover mode
+		client.WithMiddleware(clientServiceToken(clientTokenPathOf(cfg))),
 	}, rpcClientOptions(cfg)...)
 	if cfg.Service.Name != "" {
 		// Who is calling: the "from" of the request log of the service called.

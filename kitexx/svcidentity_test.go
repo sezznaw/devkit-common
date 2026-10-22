@@ -18,6 +18,7 @@ import (
 	"github.com/bytedance/gopkg/cloud/metainfo"
 	"github.com/golang-jwt/jwt/v5"
 
+	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/zlog/zlogtest"
 )
 
@@ -175,5 +176,25 @@ func TestClientServiceToken(t *testing.T) {
 	_ = mw(next)(context.Background(), nil, nil)
 	if got != "tok-1" {
 		t.Fatalf("attached %q", got)
+	}
+}
+
+// In takeover mode the client reads devkit's token beside the marker and the
+// server checks nothing; a marker of another service changes nothing.
+func TestTakeoverIdentity(t *testing.T) {
+	cfg := Config{ServiceIdentity: ServiceIdentityConfig{Mode: IdentityEnforce}}
+	cfg.Service.Name = "ser-member"
+	server, path := takeoverIdentity(cfg, nil)
+	if server.Mode != IdentityEnforce || path != "/var/run/secrets/sportsbook/rpc-token" {
+		t.Fatalf("pod: %q %q", server.Mode, path)
+	}
+	m := &config.TakeoverMarker{Service: "ser-member", Path: "/w/ser-member/.devkit/takeover.json"}
+	server, path = takeoverIdentity(cfg, m)
+	if server.Mode != IdentityOff || path != "/w/ser-member/.devkit/takeover.json.rpc-token" {
+		t.Fatalf("takeover: %q %q", server.Mode, path)
+	}
+	m.Service = "ser-admin"
+	if server, _ = takeoverIdentity(cfg, m); server.Mode != IdentityEnforce {
+		t.Fatalf("another service's marker turned the check %q", server.Mode)
 	}
 }
