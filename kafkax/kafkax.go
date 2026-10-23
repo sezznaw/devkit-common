@@ -377,21 +377,38 @@ func (c *Client) consume(ctx context.Context, cl *kgo.Client, s subscription) {
 	}
 }
 
-// handle processes one record: a span under the producer's trace, the
-// envelope decoded, the handler retried, the message parked in the DLQ when
-// it keeps failing. It never panics out and never blocks the partition
-// forever: the worst case is a message in the DLQ and an error record.
+// handle is what the consumer does with one record: process it, and park
+// it in the DLQ when it keeps failing. It never panics out and never blocks
+// the partition forever: the worst case is a message in the DLQ and an
+// error record. A shutdown in the middle parks nothing: the record is
+// redelivered.
 func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
+	err := c.process(ctx, r, h)
+	if err == nil || ctx.Err() != nil {
+		return
+	}
+	zlog.Ctx(ctx).Error("event parked in dlq", zlog.Str("topic", r.Topic), zlog.Str("key", string(r.Key)), zlog.Int("partition", r.Partition), zlog.Int("offset", r.Offset), zlog.Err(err))
+	metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "dlq").Inc()
+	c.park(ctx, r, err)
+}
+
+// process runs one record through the handler the way consumption does: a
+// span under the producer's trace, the envelope decoded, the dedupe check,
+// the handler retried. nil means the record is done (handled, or a
+// duplicate); an error is what remains after the retries, for the caller to
+// decide (the consumer parks the record, the dead-letter tool keeps it
+// pending). A failure forgets the dedupe key, so the record runs when it
+// comes again. The dead-letter tool calls it with the record it rebuilt
+// from the dlq, so a replay is the handler running in this process.
+func (c *Client) process(ctx context.Context, r *kgo.Record, h Handler) error {
 	ctx, span := c.tracer.WithProcessSpan(r)
 	defer span.End()
 	start := time.Now()
 	ev := &Event{Topic: r.Topic, Key: string(r.Key), Partition: r.Partition, Offset: r.Offset}
 	log := zlog.Ctx(ctx).With(zlog.Str("topic", r.Topic), zlog.Str("key", ev.Key), zlog.Int("partition", r.Partition), zlog.Int("offset", r.Offset))
 	if err := json.Unmarshal(r.Value, ev); err != nil {
-		log.Error("event is not an envelope; parked", zlog.Err(err))
-		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "dlq").Inc()
-		c.park(ctx, r, err)
-		return
+		log.Error("event is not an envelope", zlog.Err(err))
+		return fmt.Errorf("event is not an envelope: %w", err)
 	}
 	defer func() { metricsx.KafkaHandleDuration.WithLabelValues(r.Topic).Observe(time.Since(start).Seconds()) }()
 	log = log.With(zlog.Str("type", ev.Type), zlog.Str("event_id", ev.ID))
@@ -400,7 +417,7 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 	if dup {
 		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "duplicate").Inc()
 		log.Info("duplicate event skipped (already handled)")
-		return
+		return nil
 	}
 
 	var err error
@@ -408,11 +425,11 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 		if err = safely(ctx, h, ev); err == nil {
 			metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "ok").Inc()
 			log.Info("event handled", zlog.Int("attempt", attempt), zlog.Dur("latency", time.Since(start)))
-			return
+			return nil
 		}
 		if ctx.Err() != nil {
 			c.forget(ctx, dedupeKey) // shutting down: the event is redelivered and must run
-			return
+			return err
 		}
 		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "retried").Inc()
 		log.Warn("handler failed", zlog.Int("attempt", attempt), zlog.Err(err))
@@ -420,10 +437,9 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 	}
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
-	log.Error("event parked in dlq after retries", zlog.Err(err))
-	metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "dlq").Inc()
+	log.Error("handler failed after retries", zlog.Err(err))
 	c.forget(ctx, dedupeKey) // a replay from the dlq must run
-	c.park(ctx, r, err)
+	return err
 }
 
 func safely(ctx context.Context, h Handler, ev *Event) (err error) {

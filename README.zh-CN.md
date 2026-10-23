@@ -316,7 +316,7 @@ Kafka 和 outbox 都是至少一次投递，同一条事件可能到消费者两
 
 #### 死信与积压
 
-handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<二进制> --dlq list` 列出本服务订阅的每个主题的死信队列里待处理的消息（offset、时间、key、事件类型和 id、错误）；`--dlq show <主题> <offset>` 看一条的全文；`--dlq replay <主题>` 把待处理的全部重发回原主题——原始记录加一个 `replayed-from` 头，修好的 handler 像第一次一样处理——然后标记完成；`--dlq replay <主题> <offset>` 只重发一条；`--dlq drop <主题>` 不重发直接标记完成。"待处理"是工具自己的消费组（`<服务>-dlq`）还没提交过去的部分，队列本身只追加。线上在服务自己的 Pod 里跑：`kubectl -n <ns> exec deploy/<服务> -- /app/<服务> --dlq list`；本机 `make dlq ARGS="list"`。先把修复发上去再回放。消费者还会上报 `kafka_consumer_lag{topic}`（每次拉取后离主题末尾还差多少条），`kafka_events_handled_total{result="dlq"}` 计被放进死信的数量；部署按这两个告警。
+handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<二进制> --dlq list` 列出本服务订阅的每个主题的死信队列里待处理的消息（offset、时间、key、事件类型和 id、错误）；`--dlq show <主题> <offset>` 看一条的全文；`--dlq replay <主题>` 在**本进程里**用该主题已注册的 handler 把待处理的消息再跑一遍——原始记录（key、value、trace 头）加一个 `replayed-from` 头，去重和重试都和正常消费一样——成功的标记完成；仍失败的留在原地（不会再进一条死信，也不发布任何消息），该分区的位置停在它前面，命令退出码非零；`--dlq replay <主题> <offset>` 只跑一条（它是该分区第一条待处理时顺带标记完成）；`--dlq drop <主题>` 不跑直接标记完成。回放不写回源主题（v0.72.0 起）：消费方不需要源主题的写权限，主题的其它消费者也不会被迫重处理。几个服务共用一个 `<主题>.dlq` 时，`list` 把别的服务 park 的记录标成 `(parked by <服务>)`，`replay` 只跑自己 park 的、跳过别人的（各自在自己的 Pod 里回放）。"待处理"是工具自己的消费组（`<服务>-dlq`）还没提交过去的部分，队列本身只追加。线上在服务自己的 Pod 里跑：`kubectl -n <ns> exec deploy/<服务> -- /app/<服务> --dlq list`；本机 `make dlq ARGS="list"`。先把修复发上去再回放。消费者还会上报 `kafka_consumer_lag{topic}`（每次拉取后离主题末尾还差多少条），`kafka_events_handled_total{result="dlq"}` 计被放进死信的数量；部署按这两个告警。
 
 ### 到某一刻执行一次：`delayx`
 
@@ -579,7 +579,20 @@ auth:
 能连上某个服务的程序就能冒充任何人。所以网关也把用户的访问令牌一起传下去（`kitexx.Token(ctx)`），RPC 服务用公钥核对：令牌有效，
 且就是声称的 uid、realm、会话。`identity.mode`：`off`（默认）、`log`（只计数 `rpc_identity_checks_total` 和记 warn，放行）、
 `enforce`（拒绝，1004）。没写时取环境变量 `IDENTITY_CHECK` 和 `AUTH_JWT_PUBLIC_KEY`，部署可以统一下发、不用每个服务改 conf。
-没声称登录者的调用（定时任务、事件、公开接口）不查。
+没声称登录者的调用（定时任务、事件、公开接口）`mode` 不查。
+
+**网关必须带登录者（`identity.require_login`，v0.72.0）**：被攻破的网关可以干脆不声称登录者、在请求体里写任意 uid，上面那条查不到它。
+打开后，来自网关的调用（`identity.gateways`：网关名 → 它登录的 realm，如 `{ser-api: member, ser-admin-api: admin}`；没写时取
+`IDENTITY_GATEWAYS`，形如 `ser-api=member,ser-admin-api=admin`；调用方名字优先用服务身份核对出的）必须声称登录者，除非方法在本服务
+conf 的 `identity.anonymous` 名单里（注册、登录各步、找回密码、公开查询——网关本来就没有用户时调的方法）；声称了登录者则 realm 必须是
+该网关登录的 realm（会员令牌打到后台方法、或反过来，都算 `realm_mismatch`）。`off`（默认）/ `log` / `enforce`（拒绝，1004），没写时取
+`IDENTITY_REQUIRE_LOGIN`；它要 `mode` 配合（log 要 log 或 enforce，enforce 要 enforce），因为没核对过的声称不算数。服务之间的调用、
+任务、消费者不是网关，不受影响。指标还是 `rpc_identity_checks_total`，结果多了 `no_login`、`realm_mismatch`。
+
+RPC 的 handler 不要再信请求体里的 uid：对登录者本人办事的方法用 `kitexx.LoginUID(ctx)`（没有登录者回 1004），IDL 里不放 uid 字段；玩家和
+后台（或别的服务）共用、请求体里带目标 uid 的方法用 `kitexx.CheckMemberUID(ctx, req.Uid)`（声称的是会员时目标必须是本人，否则 1007；
+服务调用和后台登录者放行）；只给后台用的方法可以 `kitexx.RequireRealm(ctx, authx.RealmAdmin)`。devkit lint 的 `rpc-uid-from-ctx` 规则
+盯着玩家网关可达的方法。
 
 **服务身份（`service_identity:`）**：callers 认的调用方服务名是调用方自己写在 TTHeader 里的，可以冒充。每个 Pod 挂一个集群为它
 自己的 ServiceAccount 签发的投射令牌（受众 `sportsbook-rpc`，默认在 `/var/run/secrets/sportsbook/rpc-token`，旁边是读集群公钥用的

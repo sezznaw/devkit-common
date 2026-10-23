@@ -478,7 +478,7 @@ An event that belongs with a database change goes through the outbox, not throug
 
 #### Dead letters and lag
 
-A message whose handler kept failing sits in `<topic>.dlq` with the error in a header. `<binary> --dlq list` shows what is pending in every dead-letter queue of the topics the service subscribes (offset, time, key, event type and id, error); `--dlq show <topic> <offset>` prints one in full; `--dlq replay <topic>` re-publishes every pending message to its topic, as the original record with a `replayed-from` header, so the fixed handler processes it exactly as it would have, and marks them done; `--dlq replay <topic> <offset>` replays one; `--dlq drop <topic>` marks them done without replaying. "Pending" is what the tool's own consumer group (`<service>-dlq`) has not committed past, so the queue stays append-only. In a deployment it runs inside the service's pod: `kubectl -n <ns> exec deploy/<service> -- /app/<service> --dlq list`; `make dlq ARGS="list"` on a developer's machine. Deploy the fix before replaying. The consumers also publish `kafka_consumer_lag{topic}` (records behind the end of the topic after each poll) and `kafka_events_handled_total{result="dlq"}` counts what was parked; the deployment alerts on both.
+A message whose handler kept failing sits in `<topic>.dlq` with the error in a header. `<binary> --dlq list` shows what is pending in every dead-letter queue of the topics the service subscribes (offset, time, key, event type and id, error); `--dlq show <topic> <offset>` prints one in full; `--dlq replay <topic>` runs the handler registered for the topic on every pending message **in this process**, as the original record (key, value, trace headers) with a `replayed-from` header, with the same dedupe and retries as consumption, and marks the ones that succeed done; one that still fails stays pending (nothing is parked again, nothing is published), the partition's position stops in front of it and the command exits non-zero; `--dlq replay <topic> <offset>` runs one (marked done when it is the first pending message of its partition); `--dlq drop <topic>` marks them done without running them. A replay publishes nothing to the source topic (since v0.72.0): a consumer needs no write permission on it, and the other consumers of the topic are not made to process the message again. When several services park into the same `<topic>.dlq`, `list` marks the others' records `(parked by <service>)` and `replay` runs only this service's own, skipping theirs (each replays in its own pod). "Pending" is what the tool's own consumer group (`<service>-dlq`) has not committed past, so the queue stays append-only. In a deployment it runs inside the service's pod: `kubectl -n <ns> exec deploy/<service> -- /app/<service> --dlq list`; `make dlq ARGS="list"` on a developer's machine. Deploy the fix before replaying. The consumers also publish `kafka_consumer_lag{topic}` (records behind the end of the topic after each poll) and `kafka_events_handled_total{result="dlq"}` counts what was parked; the deployment alerts on both.
 
 ### Run something once at a time: `delayx`
 
@@ -818,7 +818,33 @@ valid, and for the claimed uid, realm and session. `identity.mode`: `off`
 `enforce` (refuse with 1004). Empty takes the environment variables
 `IDENTITY_CHECK` and `AUTH_JWT_PUBLIC_KEY`, so a deployment can switch
 every service without editing confs. Calls that claim no login (jobs,
-events, public endpoints) are not checked.
+events, public endpoints) are not checked by `mode`.
+
+**A gateway must carry a login (`identity.require_login`, v0.72.0)**: a
+gateway that was broken into could simply claim no login and name any uid
+in the request, which the check above never sees. With it on, a call from a
+gateway (`identity.gateways`: gateway name → the realm it logs in, e.g.
+`{ser-api: member, ser-admin-api: admin}`; empty takes `IDENTITY_GATEWAYS`,
+`ser-api=member,ser-admin-api=admin`; the caller's name is the one
+service_identity proved when it did) must claim a login unless the method
+is in the service's `identity.anonymous` list (registration, the steps of a
+login, password recovery, public lookups: what a gateway calls without a
+user), and the login it claims must be of that gateway's realm (a member's
+token on a back-office method, or the reverse, is `realm_mismatch`). `off`
+(default) / `log` / `enforce` (1004); empty takes `IDENTITY_REQUIRE_LOGIN`.
+It needs `mode` on (log with log or enforce, enforce with enforce): a claim
+that is not verified proves nothing. Calls between services, jobs and
+consumers are not gateways and are not affected. The metric stays
+`rpc_identity_checks_total`, with the results `no_login` and `realm_mismatch`.
+
+RPC handlers then stop trusting a uid in the request: a method about the
+logged-in user takes `kitexx.LoginUID(ctx)` (1004 without a login) and has
+no uid field in the IDL; a method members and the back office (or a
+service) share, with the target uid in the request, guards it with
+`kitexx.CheckMemberUID(ctx, req.Uid)` (a member may only be about itself,
+else 1007; services and back-office logins pass); a back-office-only method
+may `kitexx.RequireRealm(ctx, authx.RealmAdmin)`. devkit lint's
+`rpc-uid-from-ctx` watches the methods a player gateway can reach.
 
 **Callers default (`callers.default`)**: a method in no `callers.rules` rule
 follows `allow` (default; everybody), `log` (everybody, counted as

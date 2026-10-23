@@ -82,9 +82,11 @@ var (
 		Name: "rpc_service_identity_total", Help: "Checks of the calling service's ServiceAccount token, by method, result (ok, no_token, bad_token, wrong_namespace, mismatch) and mode.",
 	}, []string{"method", "result", "mode"})
 	// RPCIdentityChecks counts the checks of the login a call claims (kitexx identity:): result ok, no_token,
-	// bad_token or mismatch, and whether it was refused (enforce) or only recorded (log).
+	// bad_token or mismatch; with identity.require_login also no_login (a gateway's call without a login) and
+	// realm_mismatch (a login of a realm that gateway does not log in); and whether it was refused (enforce)
+	// or only recorded (log).
 	RPCIdentityChecks = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
-		Name: "rpc_identity_checks_total", Help: "Checks of the login an RPC claims against the user token it carries, by method, result (ok, no_token, bad_token, mismatch) and mode.",
+		Name: "rpc_identity_checks_total", Help: "Checks of the login an RPC claims against the user token it carries, by method, result (ok, no_token, bad_token, mismatch, no_login, realm_mismatch) and mode.",
 	}, []string{"method", "result", "mode"})
 	RPCServerRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "rpc_server_rejected_total", Help: "Requests an instance refused, by method and reason: in_flight, qps, connections (limits, code 5003); caller, caller_unlisted (callers, code 1007); caller_unlisted_log (callers.default log: let through).",
