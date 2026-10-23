@@ -186,3 +186,80 @@ func TestScheduleNeedsTx(t *testing.T) {
 		t.Fatal("nil tx accepted")
 	}
 }
+
+// Two services share one delayed_task table: each claims, counts and
+// cleans up only the kinds it registered; a kind nobody registers waits.
+func TestOwnKindsOnly(t *testing.T) {
+	root := os.Getenv("MYSQL_TEST_DSN_ROOT")
+	if root == "" {
+		t.Skip("MYSQL_TEST_DSN_ROOT not set")
+	}
+	zlogtest.Discard(t)
+	admin, err := sql.Open("mysql", root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer admin.Close()
+	for _, q := range []string{"DROP DATABASE IF EXISTS delayx_own", "CREATE DATABASE delayx_own"} {
+		if _, err := admin.Exec(q); err != nil {
+			t.Fatal(err)
+		}
+	}
+	defer admin.Exec("DROP DATABASE IF EXISTS delayx_own")
+	db, err := gorm.Open(mysql.Open(root+"delayx_own?parseTime=true&charset=utf8mb4"), &gorm.Config{Logger: logger.Discard})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.Exec(DDL).Error; err != nil {
+		t.Fatal(err)
+	}
+	cfg := Config{Batch: 10, MaxAttempts: 1, Timeout: config.Duration(time.Second)}
+	var adminRan, memberRan atomic.Int32
+	adminS := New(db, cfg, "ser-admin")
+	adminS.Handle("member.status-expire", func(context.Context, *Task) error { adminRan.Add(1); return nil })
+	memberS := New(db, cfg, "ser-member")
+	memberS.Handle("member.phone-region", func(context.Context, *Task) error { memberRan.Add(1); return errors.New("boom") })
+	past := time.Now().Add(-time.Minute)
+	ctx := context.Background()
+	for _, k := range []string{"member.status-expire", "member.phone-region", "nobody.owns"} {
+		if _, err := adminS.Schedule(ctx, db, k, "1", past, nil); err != nil { // any scheduler may queue any kind
+			t.Fatal(err)
+		}
+	}
+	// ser-admin runs only its own kind; the other two rows stay untouched
+	if n, err := adminS.RunOnce(ctx); err != nil || n != 1 || adminRan.Load() != 1 || memberRan.Load() != 0 {
+		t.Fatalf("admin claimed %d (%v): ran admin=%d member=%d", n, err, adminRan.Load(), memberRan.Load())
+	}
+	var pending []Task
+	db.Where("status = ?", StatusPending).Order("kind").Find(&pending)
+	if len(pending) != 2 || pending[0].Kind != "member.phone-region" || pending[1].Kind != "nobody.owns" || pending[0].LastError != "" {
+		t.Fatalf("pending after admin: %+v", pending)
+	}
+	// ser-member runs its own; it fails for good (MaxAttempts 1) and only ser-member counts it
+	if n, err := memberS.RunOnce(ctx); err != nil || n != 1 || memberRan.Load() != 1 {
+		t.Fatalf("member claimed %d (%v)", n, err)
+	}
+	if n, _ := memberS.FailedCount(ctx); n != 1 {
+		t.Fatalf("member failed count %d", n)
+	}
+	if n, _ := adminS.FailedCount(ctx); n != 0 {
+		t.Fatalf("admin sees member's failure: %d", n)
+	}
+	// the orphan kind is overdue for nobody
+	if d, _ := adminS.Overdue(ctx); d != 0 {
+		t.Fatalf("admin overdue %v from a kind it does not own", d)
+	}
+	none := New(db, cfg, "ser-nothing")
+	if n, err := none.RunOnce(ctx); err != nil || n != 0 {
+		t.Fatalf("a scheduler without handlers claimed %d", n)
+	}
+	// cleanup deletes only own done rows
+	db.Model(&Task{}).Where("kind = ?", "nobody.owns").Updates(map[string]any{"status": StatusDone, "updated_at": time.Now().Add(-400 * time.Hour)})
+	db.Model(&Task{}).Where("kind = ?", "member.status-expire").Update("updated_at", time.Now().Add(-400*time.Hour))
+	adminS.cleanup(ctx)
+	var left []string
+	db.Model(&Task{}).Order("kind").Pluck("kind", &left)
+	if len(left) != 2 || left[0] != "member.phone-region" || left[1] != "nobody.owns" {
+		t.Fatalf("after cleanup: %v", left)
+	}
+}

@@ -205,8 +205,10 @@ func New(db *gorm.DB, cfg Config, service string) *Scheduler {
 }
 
 // Handle registers the function of a kind, with its options (Long,
-// Timeout). Register every kind the service schedules, in app.Setup; a
-// task whose kind has no handler stays pending and is reported.
+// Timeout). Register every kind the service schedules, in app.Setup. The
+// scheduler claims, counts and cleans up only the kinds registered here:
+// the table may be shared by several services of one database, and each
+// one's rows are its own. A task of a kind nobody registers stays pending.
 func (s *Scheduler) Handle(kind string, h Handler, opts ...Option) {
 	sp := spec{h: h}
 	for _, o := range opts {
@@ -313,8 +315,12 @@ func (s *Scheduler) Running() int { return int(s.inflight.Load()) }
 // FailedCount is how many tasks used up their attempts, for the
 // post-deploy check and the alert.
 func (s *Scheduler) FailedCount(ctx context.Context) (int64, error) {
+	kinds := s.all()
+	if len(kinds) == 0 {
+		return 0, nil
+	}
 	var n int64
-	err := s.db.WithContext(ctx).Model(&Task{}).Where("status = ?", StatusFailed).Count(&n).Error
+	err := s.db.WithContext(ctx).Model(&Task{}).Where("kind IN ? AND status = ?", kinds, StatusFailed).Count(&n).Error
 	return n, err
 }
 
@@ -384,6 +390,12 @@ func (s *Scheduler) Stop() {
 	s.wg.Wait()
 }
 
+// all is every registered kind: the rows this scheduler owns.
+func (s *Scheduler) all() []string {
+	short, long := s.kinds()
+	return append(short, long...)
+}
+
 // kinds splits the registered kinds into short and long.
 func (s *Scheduler) kinds() (short, long []string) {
 	s.mu.RLock()
@@ -411,33 +423,33 @@ func (s *Scheduler) spec(kind string) (spec, bool) {
 // claimed. The poller calls it; a test calls it to run what is due
 // without waiting, then waits for Running() to reach zero.
 func (s *Scheduler) RunOnce(ctx context.Context) (int, error) {
-	_, long := s.kinds()
+	short, long := s.kinds()
+	if len(short) == 0 && len(long) == 0 {
+		return 0, nil
+	}
 	free := cap(s.longSem) - len(s.longSem)
 	var claimed []Task
 	now := time.Now()
 	err := s.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// a row that is due, or running without a heartbeat for stale()
-		// (the process died), is claimed; long kinds only up to the pool's room
-		due := func(limit int, longOnes bool) ([]Task, error) {
-			q := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-				Where("((status = ? AND run_at <= ?) OR (status = ? AND locked_at < ?))", StatusPending, now, StatusRunning, now.Add(-s.cfg.stale()))
-			if len(long) > 0 {
-				if longOnes {
-					q = q.Where("kind IN ?", long)
-				} else {
-					q = q.Where("kind NOT IN ?", long)
-				}
-			}
+		// a row of one of our kinds that is due, or running without a heartbeat
+		// for stale() (the process died), is claimed; long kinds only up to the
+		// pool's room. Other services' kinds in the same table are theirs.
+		due := func(limit int, kinds []string) ([]Task, error) {
 			var rows []Task
-			err := q.Order("run_at").Limit(limit).Find(&rows).Error
+			err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
+				Where("kind IN ? AND ((status = ? AND run_at <= ?) OR (status = ? AND locked_at < ?))", kinds, StatusPending, now, StatusRunning, now.Add(-s.cfg.stale())).
+				Order("run_at").Limit(limit).Find(&rows).Error
 			return rows, err
 		}
-		rows, err := due(s.cfg.batch(), false)
-		if err != nil {
-			return err
+		var rows []Task
+		if len(short) > 0 {
+			var err error
+			if rows, err = due(s.cfg.batch(), short); err != nil {
+				return err
+			}
 		}
 		if len(long) > 0 && free > 0 {
-			more, err := due(free, true)
+			more, err := due(free, long)
 			if err != nil {
 				return err
 			}
@@ -630,13 +642,14 @@ func backoff(attempts int) time.Duration {
 const observeEvery = 15 * time.Second
 
 func (s *Scheduler) observe(ctx context.Context) {
+	kinds := s.all()
 	var pending, failed int64
-	s.db.WithContext(ctx).Model(&Task{}).Where("status = ?", StatusPending).Count(&pending)
-	s.db.WithContext(ctx).Model(&Task{}).Where("status = ?", StatusFailed).Count(&failed)
+	s.db.WithContext(ctx).Model(&Task{}).Where("kind IN ? AND status = ?", kinds, StatusPending).Count(&pending)
+	s.db.WithContext(ctx).Model(&Task{}).Where("kind IN ? AND status = ?", kinds, StatusFailed).Count(&failed)
 	metricsx.DelayTasksPending.Set(float64(pending))
 	metricsx.DelayTasksFailed.Set(float64(failed))
 	var oldest struct{ RunAt *time.Time }
-	s.db.WithContext(ctx).Model(&Task{}).Select("MIN(run_at) AS run_at").Where("status = ? AND run_at <= ?", StatusPending, time.Now()).Scan(&oldest)
+	s.db.WithContext(ctx).Model(&Task{}).Select("MIN(run_at) AS run_at").Where("kind IN ? AND status = ? AND run_at <= ?", kinds, StatusPending, time.Now()).Scan(&oldest)
 	if oldest.RunAt == nil {
 		metricsx.DelayTasksOverdue.Set(0)
 	} else {
@@ -645,7 +658,7 @@ func (s *Scheduler) observe(ctx context.Context) {
 }
 
 func (s *Scheduler) cleanup(ctx context.Context) {
-	res := s.db.WithContext(ctx).Where("status IN ? AND updated_at < ?", []string{StatusDone, StatusCancel}, time.Now().Add(-s.cfg.retention())).Limit(10000).Delete(&Task{})
+	res := s.db.WithContext(ctx).Where("kind IN ? AND status IN ? AND updated_at < ?", s.all(), []string{StatusDone, StatusCancel}, time.Now().Add(-s.cfg.retention())).Limit(10000).Delete(&Task{})
 	if res.Error != nil {
 		zlog.Error("delayed tasks cleanup", zlog.Err(res.Error))
 		return
@@ -658,8 +671,12 @@ func (s *Scheduler) cleanup(ctx context.Context) {
 // Overdue is the age of the oldest due task not yet run, for the
 // post-deploy check; 0 when none.
 func (s *Scheduler) Overdue(ctx context.Context) (time.Duration, error) {
+	kinds := s.all()
+	if len(kinds) == 0 {
+		return 0, nil
+	}
 	var oldest struct{ RunAt *time.Time }
-	err := s.db.WithContext(ctx).Model(&Task{}).Select("MIN(run_at) AS run_at").Where("status = ? AND run_at <= ?", StatusPending, time.Now()).Scan(&oldest).Error
+	err := s.db.WithContext(ctx).Model(&Task{}).Select("MIN(run_at) AS run_at").Where("kind IN ? AND status = ? AND run_at <= ?", kinds, StatusPending, time.Now()).Scan(&oldest).Error
 	if err != nil || oldest.RunAt == nil {
 		return 0, err
 	}

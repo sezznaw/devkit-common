@@ -1053,3 +1053,12 @@ go test ./...
   enough. With the token secret alone Open does not call the server, and
   Publish / History fail.
 
+### Delayed tasks own their kinds (v0.70.0)
+
+A scheduler claims, counts (metrics, post-deploy check) and cleans up only
+the kinds its service registered with `Handle`: several services may share
+one `delayed_task` table and each one's rows are its own. Before, a service
+claimed any due row and put the ones it had no handler for back, so two
+services fought over each other's tasks. Any service may still `Schedule`
+any kind (the owner runs it).
+
