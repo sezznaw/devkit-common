@@ -77,3 +77,40 @@ func TestAutoMigrateNeverOnInTakeover(t *testing.T) {
 		t.Error("auto_migrate: true must not override takeover mode")
 	}
 }
+
+// source service: the domain comes from the service name, the database and
+// account are <tenant>_<domain>, bad names are refused before dialling.
+func TestServiceSource(t *testing.T) {
+	for svc, want := range map[string]string{"ser-member": "member", "ser-finance-admin": "finance_admin", "geo": "geo"} {
+		if got := (Config{}).DomainName(svc); got != want {
+			t.Fatalf("%s: domain %q", svc, got)
+		}
+	}
+	if got := (Config{Domain: "wallet_v2"}).DomainName("ser-wallet"); got != "wallet_v2" {
+		t.Fatalf("explicit domain: %q", got)
+	}
+	if got := (Config{}).PasswordEnvName(); got != DefaultServicePasswordEnv {
+		t.Fatalf("password env: %q", got)
+	}
+	if name, err := ServiceDatabase("tenant_a", "geo"); err != nil || name != "tenant_a_geo" {
+		t.Fatalf("name: %q %v", name, err)
+	}
+	if _, err := ServiceDatabase("", "geo"); err == nil {
+		t.Fatal("empty tenant accepted")
+	}
+	if _, err := ServiceDatabase("tenant_a", "Geo-X"); err == nil {
+		t.Fatal("bad domain accepted")
+	}
+	if _, err := ServiceDatabase("tenant_a", "a_very_long_domain_name_over_limit"); err == nil {
+		t.Fatal("33+ characters accepted")
+	}
+	if err := (Config{Enabled: true, Source: SourceService}).Validate(); err != nil {
+		t.Fatalf("service: %v", err)
+	}
+	if err := (Config{Enabled: true, Source: SourceService, Role: RolePlatform}).Validate(); err == nil {
+		t.Fatal("service + role platform accepted")
+	}
+	if err := (Config{Enabled: true, Source: SourceService, Domain: "Bad Name"}).Validate(); err == nil {
+		t.Fatal("bad domain accepted by Validate")
+	}
+}

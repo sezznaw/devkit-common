@@ -66,6 +66,19 @@ func (rt *Runtime) frameworkChecks() []verifyx.Check {
 			if err := sqlDB.PingContext(ctx); err != nil {
 				return err
 			}
+			// source service: the connection must be on the service's own database with its own account
+			switch rt.mysql.rule {
+			case mysqlRuleService:
+				var db, user string
+				if err := rt.DB.WithContext(ctx).Raw("SELECT DATABASE(), CURRENT_USER()").Row().Scan(&db, &user); err != nil {
+					return err
+				}
+				if db != rt.mysql.target.DB || !strings.HasPrefix(user, rt.mysql.target.User+"@") {
+					return fmt.Errorf("connected to database %q as %s, want the service's own %q as %s", db, user, rt.mysql.target.DB, rt.mysql.target.User)
+				}
+			case mysqlRuleFallback:
+				zlog.Warn("verify mysql: the service still runs on the shared tenant database (mysql.source service, inputs missing)", zlog.Str("missing", rt.mysql.reason))
+			}
 			var dirty int
 			row := rt.DB.WithContext(ctx).Raw("SELECT COALESCE(MAX(dirty), 0) FROM schema_migrations").Row()
 			if err := row.Scan(&dirty); err != nil {

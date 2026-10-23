@@ -36,6 +36,8 @@ import (
 // and handler; a service never opens these itself, and never adds to this
 // struct, which belongs to the framework.
 type Runtime struct {
+	// mysql is how the database was resolved (the verify check reads it).
+	mysql  mysqlResolution
 	Config Config
 	// DB is the MySQL handle, nil when mysql.enabled is false. Queries take
 	// the request's context (db.WithContext(ctx)) so they are spans of its
@@ -513,10 +515,12 @@ func (rt *Runtime) openMySQL() error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	target, err := mysqlTarget(ctx, cfg)
+	res, err := mysqlTarget(ctx, cfg)
 	if err != nil {
 		return err
 	}
+	target := res.target
+	rt.mysql = res
 	if config.IsLocal() && !isLoopback(target.Addr) {
 		zlog.Warn("mysql: this machine is using a database that is not on it; everybody who shares that database sees what you write",
 			zlog.Str("addr", target.Addr), zlog.Str("db", target.DB))
@@ -529,8 +533,15 @@ func (rt *Runtime) openMySQL() error {
 	if sqlDB, err := db.DB(); err == nil {
 		metricsx.RegisterDBStats(sqlDB, target.DB)
 	}
-	zlog.Info("mysql connected", zlog.Str("addr", target.Addr), zlog.Str("db", target.DB), zlog.Str("user", target.User),
-		zlog.Str("source", cfg.MySQL.SourceName()), zlog.Str("role", cfg.MySQL.RoleName()))
+	fields := []zlog.Field{zlog.Str("addr", target.Addr), zlog.Str("db", target.DB), zlog.Str("user", target.User),
+		zlog.Str("source", cfg.MySQL.SourceName()), zlog.Str("role", cfg.MySQL.RoleName()), zlog.Str("rule", res.rule)}
+	if res.domain != "" {
+		fields = append(fields, zlog.Str("domain", res.domain))
+	}
+	if res.reason != "" {
+		fields = append(fields, zlog.Str("fallback_reason", res.reason))
+	}
+	zlog.Info("mysql connected", fields...)
 	OnShutdown("mysql close", func() error { return mysqlx.Close(db) })
 	return nil
 }
@@ -538,14 +549,10 @@ func (rt *Runtime) openMySQL() error {
 // infraDoc is the part of infra.yaml (in Nacos) the framework reads: the
 // platform database, and the push server.
 type infraDoc struct {
-	MySQL struct {
-		Platform struct {
-			Addr        string `yaml:"addr"`
-			DB          string `yaml:"db"`
-			User        string `yaml:"user"`
-			PasswordEnv string `yaml:"password_env"`
-		} `yaml:"platform"`
-	} `yaml:"mysql"`
+	// MySQL: "platform" is the platform database; "<tenant>" (tenant_a) is
+	// the tenant's MySQL, whose addr a service with mysql.source service
+	// connects to (its own database <tenant>_<domain> there).
+	MySQL      map[string]infraMySQL `yaml:"mysql"`
 	Centrifugo struct {
 		APIAddr      string `yaml:"api_addr"`
 		APIKeyEnv    string `yaml:"api_key_env"`
@@ -557,6 +564,15 @@ type infraDoc struct {
 		User        string `yaml:"user"`
 		PasswordEnv string `yaml:"password_env"`
 	} `yaml:"starrocks"`
+}
+
+// infraMySQL is one entry of infra.yaml's mysql section.
+type infraMySQL struct {
+	Addr        string `yaml:"addr"`
+	DB          string `yaml:"db"`
+	User        string `yaml:"user"`
+	PasswordEnv string `yaml:"password_env"`
+	Params      string `yaml:"params"`
 }
 
 // infraDocument reads infra.yaml from Nacos. what says which setting needs
@@ -577,20 +593,90 @@ func infraDocument(cfg Config, what string) (infraDoc, error) {
 	return doc, nil
 }
 
+// Which rule mysqlTarget applied (the start-up log and the verify check).
+const (
+	mysqlRuleStatic   = "static"
+	mysqlRulePlatform = "platform"
+	mysqlRuleService  = "service"  // the service's own database
+	mysqlRuleFallback = "fallback" // source service, inputs missing: the shared tenant database
+)
+
+// mysqlResolution is what mysqlTarget decided.
+type mysqlResolution struct {
+	target mysqlx.Target
+	rule   string
+	domain string
+	reason string // why it fell back
+}
+
 // mysqlTarget resolves where the database is: the configuration itself with
-// source static; with source platform, the platform database is asked for
-// the database of the tenant in TENANT_CODE.
-func mysqlTarget(ctx context.Context, cfg Config) (mysqlx.Target, error) {
-	if cfg.MySQL.SourceName() == mysqlx.SourceStatic {
-		return cfg.MySQL.Static(), nil
+// source static (the address through the takeover tunnel when there is one);
+// with source platform, the platform database is asked for the database of
+// the tenant in TENANT_CODE; with source service, the service's own database
+// <tenant>_<domain> on the tenant's MySQL (infra.yaml mysql.<tenant>.addr),
+// its password from mysql.password_env, falling back to the platform lookup
+// while either is missing (the warning says what to set up). A database
+// that exists but refuses the account is not a reason to fall back: that
+// would split the data between two databases.
+func mysqlTarget(ctx context.Context, cfg Config) (mysqlResolution, error) {
+	switch cfg.MySQL.SourceName() {
+	case mysqlx.SourceStatic:
+		t := cfg.MySQL.Static()
+		t.Addr = rewriteAddr(t.Addr)
+		return mysqlResolution{target: t, rule: mysqlRuleStatic}, nil
+	case mysqlx.SourceService:
+		tenant := strings.TrimSpace(os.Getenv(TenantEnv))
+		doc, err := infraDocument(cfg, "mysql.source service")
+		if err != nil {
+			return mysqlResolution{}, err
+		}
+		res, missing, err := serviceMySQL(cfg, tenant, doc, os.Getenv)
+		if err != nil {
+			return mysqlResolution{}, err
+		}
+		if missing == "" {
+			return res, nil
+		}
+		zlog.Warn("mysql: the service's own database is not set up yet; using the shared tenant database (source platform)",
+			zlog.Str("want_db", res.target.DB), zlog.Str("want_user", res.target.User), zlog.Str("missing", missing))
+		platform, err := platformDatabase(cfg, "mysql.source service (fallback)")
+		if err != nil {
+			return mysqlResolution{}, err
+		}
+		t, err := mysqlx.Resolve(ctx, platform, tenant, mysqlx.RoleTenant, os.Getenv)
+		t.Addr = rewriteAddr(t.Addr)
+		return mysqlResolution{target: t, rule: mysqlRuleFallback, domain: res.domain, reason: missing}, err
 	}
 	platform, err := platformDatabase(cfg, "mysql.source platform")
 	if err != nil {
-		return mysqlx.Target{}, err
+		return mysqlResolution{}, err
 	}
 	t, err := mysqlx.Resolve(ctx, platform, strings.TrimSpace(os.Getenv(TenantEnv)), cfg.MySQL.RoleName(), os.Getenv)
 	t.Addr = rewriteAddr(t.Addr)
-	return t, err
+	return mysqlResolution{target: t, rule: mysqlRulePlatform}, err
+}
+
+// serviceMySQL is the source-service rule on its inputs: the target of the
+// service's own database, or missing naming what is not there yet (the
+// password variable, the tenant's MySQL address in infra.yaml). An error is
+// a name that can never work.
+func serviceMySQL(cfg Config, tenant string, doc infraDoc, getenv func(string) string) (res mysqlResolution, missing string, err error) {
+	domain := cfg.MySQL.DomainName(cfg.Service.Name)
+	name, err := mysqlx.ServiceDatabase(tenant, domain)
+	if err != nil {
+		return mysqlResolution{}, "", err
+	}
+	entry := doc.MySQL[tenant]
+	res = mysqlResolution{rule: mysqlRuleService, domain: domain, target: mysqlx.Target{Addr: rewriteAddr(entry.Addr), DB: name, User: name, Params: entry.Params}}
+	passwordEnv := cfg.MySQL.PasswordEnvName()
+	res.target.Password = getenv(passwordEnv)
+	switch {
+	case res.target.Password == "":
+		missing = "environment variable " + passwordEnv + " (the service's Secret ds-mysql-<service>)"
+	case entry.Addr == "":
+		missing = "infra.yaml mysql." + tenant + ".addr in Nacos"
+	}
+	return res, missing, nil
 }
 
 // platformDatabase is the platform database every source-platform lookup
@@ -602,7 +688,7 @@ func platformDatabase(cfg Config, what string) (mysqlx.Target, error) {
 	if err != nil {
 		return mysqlx.Target{}, err
 	}
-	p := doc.MySQL.Platform
+	p := doc.MySQL["platform"]
 	if p.Addr == "" || p.DB == "" || p.User == "" || p.PasswordEnv == "" {
 		return mysqlx.Target{}, fmt.Errorf("%s: %s in Nacos must have mysql.platform.{addr, db, user, password_env}; got addr=%q db=%q user=%q password_env=%q", what, infraDataID, p.Addr, p.DB, p.User, p.PasswordEnv)
 	}

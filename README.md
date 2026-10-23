@@ -1062,3 +1062,19 @@ claimed any due row and put the ones it had no handler for back, so two
 services fought over each other's tasks. Any service may still `Schedule`
 any kind (the owner runs it).
 
+### A database per service (`mysql.source: service`, v0.71.0)
+
+- Database and account are `<tenant>_<domain>` (tenant from TENANT_CODE, domain
+  the service name without `ser-` with `-` as `_`, `mysql.domain` overrides),
+  the password from `mysql.password_env` (default `MYSQL_SERVICE_PASSWORD`,
+  set by the service's own Secret), the address from `infra.yaml`
+  `mysql.<tenant>.addr` in Nacos: no platform-database lookup.
+- Dual track: with the password variable or the tenant's address missing the
+  runtime falls back to the `source: platform` lookup (the shared tenant
+  database) and warns what to set up; inputs present but the database
+  refusing the account fails the start, never falls back.
+- The `mysql connected` log carries `rule`, `domain`, `fallback_reason`; the
+  `mysql` verify check compares `DATABASE()` / `CURRENT_USER()` with the
+  service's own under rule service and warns under rule fallback.
+- A `source: static` address now goes through the takeover tunnel too.
+

@@ -14,6 +14,7 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 
@@ -33,14 +34,28 @@ type Config struct {
 	// Enabled switches MySQL on for this service.
 	Enabled bool `yaml:"enabled"`
 	// Source says where the database is found: "static", the addr / db /
-	// user / password below (a developer's machine); or "platform", the
+	// user / password below (a developer's machine); "platform", the
 	// platform's datasource table, looked up for the tenant the deployment
-	// names in TENANT_CODE (dev, uat, prod). Default static.
+	// names in TENANT_CODE (the tenant database every service shared);
+	// or "service", the service's own database <tenant>_<domain> on the
+	// tenant's MySQL (infra.yaml mysql.<tenant>.addr in Nacos), its password
+	// from PasswordEnv. With source service and the password or the address
+	// missing, the runtime falls back to the platform lookup and warns.
+	// Default static.
 	Source string `yaml:"source"`
 	// Role, with source platform: "tenant" (default), the database of the
 	// tenant this deployment serves; or "platform", the platform database
 	// itself (the tenant service).
 	Role string `yaml:"role"`
+	// Domain, with source "service": the service's data domain, which names
+	// its own database and account, <tenant>_<domain> (tenant_a_member).
+	// Default: the service name without its "ser-" prefix, "-" as "_"
+	// (ser-finance-admin → finance_admin). Letters, digits, "_".
+	Domain string `yaml:"domain"`
+	// PasswordEnv, with source "service": the environment variable that holds
+	// the account's password (the service's own Secret sets it). Default
+	// MYSQL_SERVICE_PASSWORD.
+	PasswordEnv string `yaml:"password_env"`
 
 	// Addr, DB, User, Password, Params: the database, with source static.
 	// Addr "host:port", default 127.0.0.1:3306. Params are extra DSN
@@ -95,8 +110,15 @@ func (c Config) AutoMigrateOn() bool {
 const (
 	SourceStatic   = "static"
 	SourcePlatform = "platform"
+	SourceService  = "service"
 	RoleTenant     = "tenant"
 	RolePlatform   = "platform"
+
+	// DefaultServicePasswordEnv holds the password of the service's own
+	// account with source service (set by the service's Secret ds-mysql-<service>).
+	DefaultServicePasswordEnv = "MYSQL_SERVICE_PASSWORD"
+	// maxAccountName is MySQL's limit on a user name.
+	maxAccountName = 32
 
 	defaultAddr    = "127.0.0.1:3306"
 	defaultMaxOpen = 20
@@ -121,6 +143,42 @@ func (c Config) RoleName() string {
 	return RoleTenant
 }
 
+var domainRE = regexp.MustCompile(`^[a-z0-9_]+$`)
+
+// DomainName is the service's data domain: Domain, else the service name
+// without its "ser-" prefix with "-" as "_".
+func (c Config) DomainName(service string) string {
+	if d := strings.TrimSpace(c.Domain); d != "" {
+		return d
+	}
+	return strings.ReplaceAll(strings.TrimPrefix(service, "ser-"), "-", "_")
+}
+
+// PasswordEnvName is PasswordEnv with its default applied.
+func (c Config) PasswordEnvName() string {
+	if e := strings.TrimSpace(c.PasswordEnv); e != "" {
+		return e
+	}
+	return DefaultServicePasswordEnv
+}
+
+// ServiceDatabase is the name of a service's own database and account:
+// <tenant>_<domain>. An error when it is not a valid name or too long for
+// a MySQL account.
+func ServiceDatabase(tenant, domain string) (string, error) {
+	if tenant == "" {
+		return "", fmt.Errorf("mysqlx: TENANT_CODE is not set; a deployment with mysql.source service has to say which tenant it serves")
+	}
+	if !domainRE.MatchString(domain) {
+		return "", fmt.Errorf("mysqlx: mysql.domain %q: letters, digits and _ only", domain)
+	}
+	name := tenant + "_" + domain
+	if len(name) > maxAccountName {
+		return "", fmt.Errorf("mysqlx: the database / account name %q is longer than MySQL's %d characters; set a shorter mysql.domain", name, maxAccountName)
+	}
+	return name, nil
+}
+
 // Validate rejects a configuration that cannot work before anything is
 // dialled, naming the setting.
 func (c Config) Validate() error {
@@ -128,6 +186,13 @@ func (c Config) Validate() error {
 		return nil
 	}
 	switch c.SourceName() {
+	case SourceService:
+		if d := strings.TrimSpace(c.Domain); d != "" && !domainRE.MatchString(d) {
+			return fmt.Errorf("mysqlx: mysql.domain %q: letters, digits and _ only", d)
+		}
+		if c.RoleName() != RoleTenant {
+			return fmt.Errorf("mysqlx: mysql.role %q does not go with source service (a service's own database is always its tenant's)", c.Role)
+		}
 	case SourceStatic:
 		if c.DB == "" {
 			return fmt.Errorf("mysqlx: mysql.db is required with source static")
@@ -142,7 +207,7 @@ func (c Config) Validate() error {
 			return fmt.Errorf("mysqlx: mysql.role is %q; it must be %s or %s", c.Role, RoleTenant, RolePlatform)
 		}
 	default:
-		return fmt.Errorf("mysqlx: mysql.source is %q; it must be %s or %s", c.Source, SourceStatic, SourcePlatform)
+		return fmt.Errorf("mysqlx: mysql.source is %q; it must be %s, %s or %s", c.Source, SourceStatic, SourcePlatform, SourceService)
 	}
 	return nil
 }

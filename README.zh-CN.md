@@ -719,3 +719,10 @@ go test ./...
 - S3 启动检查不再用 HeadBucket（那是整个桶的权限），改为在本服务前缀下列一个 key：只能碰自己前缀的身份也能启动，桶不存在、密钥没有本前缀权限照样启动失败。
 - Centrifugo：API 密钥和连接令牌密钥各给需要的服务，只要有一把就能开；只有令牌密钥的服务（只签连接令牌）启动时不调服务端，调 Publish / History 会报错。
 
+### 每个服务自己的库（`mysql.source: service`，v0.71.0）
+
+- 库名和账号都是 `<租户>_<领域>`（租户 = TENANT_CODE，领域默认服务名去 `ser-`、`-` 换 `_`，`mysql.domain` 可改），密码来自 `mysql.password_env`（默认 `MYSQL_SERVICE_PASSWORD`，由服务自己的 Secret `ds-mysql-<服务>` 给），地址来自 Nacos `infra.yaml` 的 `mysql.<租户>.addr`——不再连平台库查地址。
+- 双轨：密码变量没设、或 infra.yaml 没有该租户的地址时，回落到 `source: platform` 的平台库查询（共用的租户库）并打 WARN 说缺什么；输入齐全而连不上（账号错、库不存在）直接启动失败，不回落，免得数据分裂到两个库。
+- 启动日志 `mysql connected` 多了 `rule=static|platform|service|fallback`、`domain`、`fallback_reason`；部署后检查 `mysql` 在 rule=service 时核对 `DATABASE()` / `CURRENT_USER()` 就是自己的库和账号，rule=fallback 时只打 WARN。
+- `source: static` 的地址现在也经过接管隧道改写。
+
