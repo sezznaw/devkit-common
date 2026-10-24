@@ -106,7 +106,7 @@ func (OutboxRow) TableName() string { return "outbox" }
 // project's migrations create it (idl README, 事件规范).
 const OutboxDDL = `CREATE TABLE IF NOT EXISTS outbox (
   id          BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY,
-  service     VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '写入这一行的服务，只由它的转发器发送（空：旧行，谁都可以发）',
+  service     VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '写入这一行的服务，只由它的转发器发送（空：加列前的旧行，不再发送）',
   event_id    CHAR(36)     NOT NULL COMMENT '信封 id，消费者按它去重',
   topic       VARCHAR(128) NOT NULL,
   msg_key     VARCHAR(255) NOT NULL DEFAULT '' COMMENT '分区键（实体 id）',
@@ -125,10 +125,11 @@ const OutboxDDL = `CREATE TABLE IF NOT EXISTS outbox (
 // OutboxServiceColumn adds the service column (and its index) to an outbox
 // table made before it: a service's relay sends only the rows its service
 // queued, so a per-service Kafka account that may write only its own topics
-// never meets another service's event. Rows from before (service ”) go
-// with any relay.
+// never meets another service's event. Rows from before (empty service) are
+// sent by no relay: the relay warns at start while any of them is unsent,
+// and they need their service set (or deleting) by hand.
 const OutboxServiceColumn = `ALTER TABLE outbox
-  ADD COLUMN service VARCHAR(64) NOT NULL DEFAULT '' COMMENT '写入这一行的服务，只由它的转发器发送（空：旧行，谁都可以发）' AFTER id,
+  ADD COLUMN service VARCHAR(64) NOT NULL DEFAULT '' COMMENT '写入这一行的服务，只由它的转发器发送（空：加列前的旧行，不再发送）' AFTER id,
   ADD KEY idx_outbox_service_unsent (service, sent_at, next_attempt_at, id)`
 
 // PublishTx writes the event into the outbox table within tx (a *gorm.DB
@@ -170,9 +171,8 @@ func (c *Client) nudge() {
 }
 
 // StartOutbox runs the relay until ctx ends: every round takes up to
-// cfg.Batch unsent rows of this service (and rows from before the service
-// column) (FOR UPDATE SKIP LOCKED, so replicas share the
-// work), publishes them, marks them sent; a failed row keeps its attempt
+// cfg.Batch unsent rows of this service (FOR UPDATE SKIP LOCKED, so
+// replicas share the work), publishes them, marks them sent; a failed row keeps its attempt
 // count and error and is retried next round. Sent rows older than the
 // retention are deleted hourly. The runtime starts it when the service has
 // Kafka and MySQL; StopOutbox waits for the current round.
@@ -192,6 +192,9 @@ func (c *Client) StartOutbox(ctx context.Context, db *gorm.DB, cfg OutboxConfig)
 		cleanup := time.NewTicker(time.Hour)
 		defer cleanup.Stop()
 		zlog.Info("outbox relay on", zlog.Dur("poll_interval", cfg.interval()), zlog.Int("batch", int64(cfg.batch())), zlog.Dur("retention", cfg.retention()))
+		if n, err := unownedOutboxRows(ctx, db); err == nil && n > 0 {
+			zlog.Warn("outbox holds unsent rows without a service (queued before the service column); no relay sends them: set their service or delete them", zlog.Int("rows", n))
+		}
 		for {
 			for {
 				n, err := c.relayOnce(ctx, db, cfg.batch())
@@ -234,7 +237,7 @@ func (c *Client) relayOnce(ctx context.Context, db *gorm.DB, batch int) (int, er
 	err := db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var rows []OutboxRow
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"}).
-			Where("service IN (?, '') AND sent_at IS NULL AND next_attempt_at <= ?", c.service, time.Now()).Order("id").Limit(batch).Find(&rows).Error; err != nil {
+			Where("service = ? AND sent_at IS NULL AND next_attempt_at <= ?", c.service, time.Now()).Order("id").Limit(batch).Find(&rows).Error; err != nil {
 			return err
 		}
 		n = len(rows)
@@ -301,17 +304,25 @@ func (c *Client) produceRow(ctx context.Context, row *OutboxRow) error {
 
 func (c *Client) observeOutbox(ctx context.Context, db *gorm.DB) {
 	var pending int64
-	if err := db.WithContext(ctx).Model(&OutboxRow{}).Where("service IN (?, '') AND sent_at IS NULL", c.service).Count(&pending).Error; err != nil {
+	if err := db.WithContext(ctx).Model(&OutboxRow{}).Where("service = ? AND sent_at IS NULL", c.service).Count(&pending).Error; err != nil {
 		return
 	}
 	metricsx.KafkaOutboxPending.Set(float64(pending))
 	var oldest struct{ CreatedAt *time.Time }
-	db.WithContext(ctx).Model(&OutboxRow{}).Select("MIN(created_at) AS created_at").Where("service IN (?, '') AND sent_at IS NULL", c.service).Scan(&oldest)
+	db.WithContext(ctx).Model(&OutboxRow{}).Select("MIN(created_at) AS created_at").Where("service = ? AND sent_at IS NULL", c.service).Scan(&oldest)
 	if oldest.CreatedAt == nil {
 		metricsx.KafkaOutboxOldestAge.Set(0)
 	} else {
 		metricsx.KafkaOutboxOldestAge.Set(time.Since(*oldest.CreatedAt).Seconds())
 	}
+}
+
+// unownedOutboxRows counts the unsent rows queued before the service
+// column (empty service): since v0.73.0 no relay sends them.
+func unownedOutboxRows(ctx context.Context, db *gorm.DB) (int64, error) {
+	var n int64
+	err := db.WithContext(ctx).Model(&OutboxRow{}).Where("service = '' AND sent_at IS NULL").Count(&n).Error
+	return n, err
 }
 
 func (c *Client) cleanupOutbox(ctx context.Context, db *gorm.DB, retention time.Duration) {

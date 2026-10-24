@@ -1068,10 +1068,15 @@ go test ./...
   service (`ser-member`), the password still from `password_env`, which the
   service's own Secret sets. `redis.username` is the ACL user of a static
   configuration.
-- The outbox has a `service` column: a relay sends only its service's rows
-  (and rows from before the column), so with a shared outbox each service's
-  Kafka account needs to write only its own topics. dev adds the column to an
-  old table at start (`kafkax.OutboxServiceColumn`).
+- The outbox has a `service` column: a relay sends only its service's rows,
+  so with a shared outbox each service's Kafka account needs to write only its
+  own topics. dev adds the column to an old table at start
+  (`kafkax.OutboxServiceColumn`). Since v0.73.0 rows from before the column
+  (`service = ''`) are sent by no relay (before, any relay took them, so any
+  service sharing the database could have an event of another domain sent
+  under its account); the relay logs a warning at start while one of them is
+  unsent. Before upgrading, check `SELECT COUNT(*) FROM outbox WHERE service = ''
+  AND sent_at IS NULL` is 0 in every database with an outbox.
 - The S3 start check lists one key under the service's prefix instead of
   HeadBucket (a bucket-wide right): keys limited to the prefix start, a
   missing bucket or keys without the prefix still stop the start.

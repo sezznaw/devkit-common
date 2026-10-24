@@ -153,9 +153,10 @@ func TestOutbox(t *testing.T) {
 	}
 }
 
-// A relay sends the rows its service queued and the rows from before the
-// service column, never another service's; the column comes to an old table
-// once (the second ALTER is a duplicate column, 1060).
+// A relay sends only the rows its service queued: never another service's,
+// nor the rows from before the service column (empty service), which
+// unownedOutboxRows counts for the warning at start; the column comes to an
+// old table once (the second ALTER is a duplicate column, 1060).
 func TestOutboxOwnRows(t *testing.T) {
 	root := os.Getenv("MYSQL_TEST_DSN_ROOT")
 	if root == "" {
@@ -178,7 +179,7 @@ func TestOutboxOwnRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	// an outbox from before the column, then the column added (twice: the race of two services)
-	old := strings.Replace(strings.Replace(OutboxDDL, "  service     VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '写入这一行的服务，只由它的转发器发送（空：旧行，谁都可以发）',\n", "", 1),
+	old := strings.Replace(strings.Replace(OutboxDDL, "  service     VARCHAR(64)  NOT NULL DEFAULT '' COMMENT '写入这一行的服务，只由它的转发器发送（空：加列前的旧行，不再发送）',\n", "", 1),
 		",\n  KEY idx_outbox_service_unsent (service, sent_at, next_attempt_at, id)", "", 1)
 	if strings.Contains(old, "service") {
 		t.Fatal("old DDL still has the column")
@@ -220,10 +221,13 @@ func TestOutboxOwnRows(t *testing.T) {
 	for _, r := range rows {
 		got[r.Service+"/"+r.EventType] = r.SentAt != nil
 	}
-	want := map[string]bool{"/wallet.x": true, "ser-wallet/wallet.changed": true, "ser-member/member.x": false}
+	want := map[string]bool{"/wallet.x": false, "ser-wallet/wallet.changed": true, "ser-member/member.x": false}
 	for k, v := range want {
 		if got[k] != v {
 			t.Fatalf("%s sent=%v; all: %v", k, got[k], got)
 		}
+	}
+	if n, err := unownedOutboxRows(context.Background(), db); err != nil || n != 1 {
+		t.Fatalf("unowned unsent rows = %d, %v; want 1", n, err)
 	}
 }
