@@ -12,6 +12,7 @@ import (
 
 	"github.com/cloudwego/kitex/pkg/endpoint"
 	"github.com/cloudwego/kitex/pkg/kerrors"
+	"github.com/cloudwego/kitex/pkg/rpcinfo"
 	"github.com/cloudwego/kitex/pkg/serviceinfo"
 	"github.com/redis/go-redis/v9"
 
@@ -50,7 +51,8 @@ type requestWithID interface{ GetRequestId() string }
 // Redis, or Runtime.Run refuses to start it (and, should one run anyway,
 // every such request is refused with 5002): executing a transfer twice is
 // worse than refusing it. Methods without the field pass through
-// untouched. An error from the handler drops the id, so the caller can retry.
+// untouched. An error from the handler drops the id, so the caller can retry;
+// so does a business error, which Kitex keeps in the RPCInfo (see bizFailed).
 func (rt *Runtime) Idempotency() endpoint.Middleware {
 	rdb := rt.Redis
 	service := rt.Config.Service.Name
@@ -100,6 +102,15 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 				rdb.Del(ctx, key)
 				return err
 			}
+			// Kitex hands a business error from the handler to the client
+			// through the RPCInfo (SetBizStatusErr) and returns nil to the
+			// middlewares around the handler. Such a call did not succeed:
+			// drop the id like any other error so a retry runs again, instead
+			// of keeping an empty result that a retry would get as a success.
+			if bizFailed(ctx) {
+				rdb.Del(ctx, key)
+				return nil
+			}
 			data, err := json.Marshal(success(resp))
 			if err != nil {
 				zlog.Ctx(ctx).Error("idempotency: cannot keep result", zlog.Str("request_id", id), zlog.Err(err))
@@ -111,6 +122,13 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 			return nil
 		}
 	}
+}
+
+// bizFailed reports whether the handler of this call answered with a
+// business error, which Kitex keeps in the RPCInfo instead of returning it.
+func bizFailed(ctx context.Context) bool {
+	ri := rpcinfo.GetRPCInfo(ctx)
+	return ri != nil && ri.Invocation() != nil && ri.Invocation().BizStatusErr() != nil
 }
 
 // checkIdempotencyStore refuses to start a service that has idempotent

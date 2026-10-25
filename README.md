@@ -400,7 +400,11 @@ requests to carry a `request_id`. Give the Req struct in the IDL a
   (log record `replayed`)
 - the same id while the first call is still running: business code 1002
 - an empty `request_id`: 1003
-- an error from the handler drops the id, so the caller can retry
+- an error from the handler drops the id, so the caller can retry; a
+  business error (`errcode.Err`, a BizStatusError) too: Kitex hands it to the
+  client through the RPCInfo and returns nil to the middlewares, and before
+  v0.73.1 that was kept as an empty success, so a retry with the same id got
+  an empty response and no error without the handler running
 - `redis.enabled` false: the service refuses to start and names those
   methods (since v0.52.3); should one run anyway, every such request is
   refused with 5002; running a transfer twice is worse than refusing it

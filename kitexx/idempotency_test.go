@@ -84,6 +84,47 @@ func TestIdempotencyReplaysTheKeptResult(t *testing.T) {
 	}
 }
 
+// A handler that answers with a business error does not get its (empty)
+// result kept: Kitex puts the error into the RPCInfo and returns nil to the
+// middlewares, which looked like a success, so a retry with the same id got an
+// empty success without running the handler (the 3004 below came back as a
+// GrantBonus "success" with txn 0). The id is dropped and the retry runs.
+func TestIdempotencyDoesNotKeepABusinessError(t *testing.T) {
+	zlogtest.Discard(t)
+	rt := runtimeWithRedis(t)
+	runs := 0
+	ep := rt.Idempotency()(func(ctx context.Context, req, resp any) error {
+		runs++
+		if runs == 1 {
+			// what kitex's invokeHandleEndpoint does with a BizStatusError
+			rpcinfo.GetRPCInfo(ctx).Invocation().(rpcinfo.InvocationSetter).SetBizStatusErr(kerrors.NewBizStatusError(3004, "conflict"))
+			return nil
+		}
+		resp.(*transferResult).Success = &transferResp{TxID: "tx-2"}
+		return nil
+	})
+	call := func() (*transferResult, rpcinfo.RPCInfo) {
+		ctx := withRPCInfo(context.Background(), "wallet", "Transfer", "gateway") // a call has its own RPCInfo
+		res := &transferResult{}
+		if err := ep(ctx, &transferArgs{Req: &transferReq{RequestId: "r-biz", Amount: 5}}, res); err != nil {
+			t.Fatal(err)
+		}
+		return res, rpcinfo.GetRPCInfo(ctx)
+	}
+	if res, ri := call(); res.Success != nil || ri.Invocation().BizStatusErr() == nil || runs != 1 {
+		t.Fatalf("first call is the business error: %+v runs=%d", res.Success, runs)
+	}
+	if n, _ := rt.Redis.Exists(context.Background(), "idem:wallet:Transfer:r-biz").Result(); n != 0 {
+		t.Fatal("a business error must not be kept")
+	}
+	if res, ri := call(); res.Success == nil || res.Success.TxID != "tx-2" || ri.Invocation().BizStatusErr() != nil || runs != 2 {
+		t.Fatalf("the retry runs the handler again: %+v runs=%d", res.Success, runs)
+	}
+	if res, _ := call(); res.Success == nil || res.Success.TxID != "tx-2" || runs != 2 {
+		t.Fatalf("the success is kept and replayed: %+v runs=%d", res.Success, runs)
+	}
+}
+
 func TestIdempotencyRefusals(t *testing.T) {
 	zlogtest.Discard(t)
 	rt := runtimeWithRedis(t)

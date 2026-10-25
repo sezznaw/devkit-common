@@ -262,7 +262,7 @@ GORM，GORM 改之前还会逐列再比一遍。字段没有显式 `type:` 直�
 - 同一个 `request_id` 再来，直接返回保存的结果，handler 不再执行（日志 `replayed`）
 - 第一次还在执行中又来一次：业务码 1002
 - `request_id` 留空：业务码 1003
-- handler 返回 error：丢掉这个 id，调用方可以重试
+- handler 返回 error：丢掉这个 id，调用方可以重试；业务错误（`errcode.Err`，BizStatusError）也一样。Kitex 把业务错误经 RPCInfo 交给调用方、对外层中间件返回 nil，v0.73.1 以前它被当成成功、存下空结果，同一个 id 重试会拿到没有错误的空响应，handler 不执行
 - 没有开 `redis.enabled`：服务启动时就拒绝启动并列出这些方法（v0.52.3 起）；万一跑起来了，请求一律 5002——转账执行两次比拒绝更糟
 
 没有 `request_id` 字段的方法不受影响。
