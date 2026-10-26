@@ -51,8 +51,10 @@ func TestOpenRefusesAnIncompleteTarget(t *testing.T) {
 	}
 }
 
-// TestAgainstMySQL needs a real server: MYSQL_TEST_DSN_ROOT like
-// "root:root@tcp(127.0.0.1:13306)/". It creates its own schema and drops it.
+// TestAgainstMySQL needs a real server: MYSQL_TEST_DSN_ROOT, the root DSN
+// testx reads too, on any TCP address ("root:root@tcp(127.0.0.1:13306)/" in
+// CI, the local stack's 3306 on a laptop); without it the test is skipped.
+// It creates its own schema and drops it.
 func TestAgainstMySQL(t *testing.T) {
 	root := os.Getenv("MYSQL_TEST_DSN_ROOT")
 	if root == "" {

@@ -226,6 +226,20 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   meta handler; verified with two real Kitex services, not only unit tests.
   `log_level_data_id` makes the level follow a Nacos configuration
   (`loglevel.go`, through `Client.Get` and `Client.OnChange`); failing to set that up is a warning, not a start failure.
+- *A business answer reaches no middleware as an error* (Kitex v0.16.3): the
+  server's `invokeHandleEndpoint` moves the BizStatusError a handler returns
+  into the RPCInfo and returns nil (`BizError` does the same for our
+  middlewares, or the client would see a transport error); on the client the
+  TTHeader meta handler puts the response's code into the RPCInfo and only
+  `Call` returns it, after every middleware. Every middleware that judges
+  the outcome after `next` must read `bizCode(ctx, err)` (validate.go):
+  Idempotency (v0.73.1), ServerMetrics / ClientMetrics, LoggingMiddleware and
+  ClientRequestID (v0.74.0; until then they took a business answer for
+  a success). `realkitex_test.go` checks this against real Kitex (generic
+  JSON server and client over TTHeader), not against our idea of it. The
+  request log writes the code, never the message: thrift-gen-validator puts
+  the refused value ("current value: <value>") in a pattern rule's message,
+  passwords included. Level: INFO, WARN for 5000-5999 (`serviceFault`).
 - `hertzx`: kitexx for API services on Hertz (`devkit nas`, template `hertz-service`).
   `hertzx.Config` is an alias of `kitexx.Config` on purpose (one set of conf files and docs, and
   `kitexx.ClientOptions(cfg)` for the RPC services behind the API). It reuses, not copies,
@@ -302,10 +316,14 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   not an error), `gorm.io/plugin/opentelemetry` makes each statement a span
   (`WithoutMetrics`, `WithoutQueryVariables`). `gorm.Open` dials by itself, so a
   database that is down fails at "connect to", not at the ping; both carry the
-  same `hint`. `TestAgainstMySQL` needs `MYSQL_TEST_DSN_ROOT`
-  (`root:root@tcp(127.0.0.1:13306)/`; `docker run -d --name mysqlx-test -e
-  MYSQL_ROOT_PASSWORD=root -p 13306:3306 mysql:8.4`) and runs in CI job
-  `mysql`. `Runtime` must not grow service-specific fields; the next
+  same `hint`. `TestAgainstMySQL` needs `MYSQL_TEST_DSN_ROOT` on any TCP
+  address and account, which it parses (ParseDSN) and writes into its
+  datasource rows (it assumed `127.0.0.1:13306` and root until the next
+  version): CI's container is `root:root@tcp(127.0.0.1:13306)/` (job
+  `mysql`), a laptop uses the project's local stack (3306) or `docker run -d
+  --name mysqlx-test -e MYSQL_ROOT_PASSWORD=root -p 13306:3306 mysql:8.4`.
+  `ResolveKind` joins host and port with `net.JoinHostPort` (an IPv6 host
+  came out as `::1:3306`). `Runtime` must not grow service-specific fields; the next
   infrastructure (Redis, Kafka) gets the same shape: a config section with
   `enabled`, opened in `NewRuntime`, a field on `Runtime`.
 - `redisx`: the `mysqlx` shape for Redis / Valkey (`Config` with enabled /
@@ -396,9 +414,13 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
 - `testx`: builds `kitexx.Runtime` by hand (exported fields) on miniredis,
   kfake, an httptest Centrifugo API (`/api/<method>`, records publish), and
   for `WithMySQL(dir)` a `test_<svc>_<n>` database on MYSQL_TEST_DSN_ROOT
-  (go-sql-driver ParseDSN; multiStatements for the `*.up.sql` files; dropped
-  in Cleanup; t.Skip when the server does not answer) opened with
-  mysqlx.Open, plus `delayx.New` (poll 50ms). `Start` = Kafka.Start +
+  (go-sql-driver ParseDSN; multiStatements for the `*.up.sql` files; t.Skip
+  when the server does not answer) opened with mysqlx.Open, plus
+  `delayx.New` (poll 50ms). Cleanups run last first: the handle's pool is
+  closed, then the database dropped, then the admin connection closed (the
+  pool was never closed until v0.74.0: 5 idle connections per test
+  until the process ended, 1040 under a large `-count`;
+  `TestRuntimeMySQLClosesItsPool`). `Start` = Kafka.Start +
   StartOutbox + Delay.Start (if handlers); `RunDue` = Delay.RunOnce
   (exported for this). Gateway helpers wrap ut.PerformRequest. Its MySQL
   test runs in CI's mysql job like the outbox's.
@@ -508,7 +530,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   that into a WARN and goes on). Middlewares: `kitexx.ServerMetrics` /
   `ClientMetrics` (after the tracing middleware in `Options` /
   `ClientOptions`; `resultCode` is ok / biz code / error, never an error
-  string, label cardinality), `hertzx.Metrics` (route = `c.FullPath()` or
+  string, label cardinality; the biz code comes from the RPCInfo through
+  `bizCode`, see "A business answer reaches no middleware as an error"; the
+  infra alert SportsbookHighErrorRate and the dashboard's error-rate panel
+  count `code="error"` over all codes, so business codes are not errors),
+  `hertzx.Metrics` (route = `c.FullPath()` or
   `unmatched`). `mysqlx` pool via `collectors.NewDBStatsCollector` in
   `openMySQL` (`metricsx.Register` tolerates a duplicate), `redisx`
   `metricsHook` (go-redis Hook, added in `Open`), `kafkax` `metricsHook`
@@ -616,10 +642,19 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `WithRPCTimeout` 3s, `WithConnectTimeout` 1s, `WithFailureRetry` with
   `retryOnlyUnsent` (ErrGetConnection / ErrNoConnection / ErrNoDestAddress /
   ErrNoDestService only: never a timeout or a handler error, the call may
-  have run), one `circuitbreak.CBSuite` per process keyed by
-  `RPCInfo2Key` (service + method), closed by an OnShutdown hook. Section
-  `rpc_client:` (`RPCClientConfig`) changes them. `TestClientOptions` counts
-  these options (8 without a registry, 9 with the caller's name).
+  have run), and a `circuitbreak.CBSuite` per *client* keyed by
+  `RPCInfo2Key` (caller + service + method): `breakerPerClient` is an option
+  whose F makes the suite when it is applied, because one ClientOptions
+  slice serves several clients (a gateway's deps). Kitex closes a client's
+  suite in `Close` and in the finalizer of a collected client (kitex v0.16.3
+  client/client.go) and points it at the client's event queue, and kitex's
+  `NewCBSuite` asks for one per client; the process-wide suite of up to the
+  v0.74.0 (closed by an OnShutdown hook) was closed by any client's
+  finalizer under the clients still using it, a data race with the next
+  client's `initServiceCB` that `go test -race` found in ser-bet's handler
+  tests (`TestClientsComeAndGoWithoutARace`, `TestEveryClientHasItsOwnBreaker`).
+  Section `rpc_client:` (`RPCClientConfig`) changes them. `TestClientOptions`
+  counts these options.
 - `cmd/apidoc` + `hertzx/docs.go`: OpenAPI from the IDL. The CloudWeGo plugin
   `thrift-gen-http-swagger` documents only annotated fields and emits
   `responses: {}` for a response struct without `api.body` on its fields, so

@@ -2,8 +2,10 @@ package testx
 
 import (
 	"context"
+	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -89,6 +91,37 @@ func TestRuntimeMySQL(t *testing.T) {
 	}
 	if ev := rt.WaitEvent("events.order", "order.cancelled", 5*time.Second); ev.Type != "order.cancelled" {
 		t.Fatal(ev)
+	}
+}
+
+// TestRuntimeMySQLClosesItsPool: the database handle of a test is closed
+// when the test ends. Before, only the admin connection was: every test left
+// its pool's idle connections open until the process ended, and go test
+// -count=100 of a handler package ran the local MySQL out of connections
+// (1040 Too many connections).
+func TestRuntimeMySQLClosesItsPool(t *testing.T) {
+	if os.Getenv(DSNEnv) == "" {
+		t.Skip(DSNEnv + " not set")
+	}
+	var pool *sql.DB
+	t.Run("a test with a database", func(t *testing.T) {
+		rt := New(t, "order", WithMySQL(""))
+		var err error
+		if pool, err = rt.DB.DB(); err != nil {
+			t.Fatal(err)
+		}
+		if err := pool.Ping(); err != nil {
+			t.Fatal(err)
+		}
+	})
+	if pool == nil {
+		t.Skip("no MySQL answered")
+	}
+	if err := pool.Ping(); err == nil || !strings.Contains(err.Error(), "database is closed") {
+		t.Fatalf("the pool must be closed when its test is over, ping: %v", err)
+	}
+	if n := pool.Stats().OpenConnections; n != 0 {
+		t.Fatalf("%d connections still open", n)
 	}
 }
 

@@ -3,39 +3,60 @@ package mysqlx
 import (
 	"context"
 	"database/sql"
+	"net"
+	"strconv"
 	"strings"
 	"testing"
+
+	gomysql "github.com/go-sql-driver/mysql"
 )
 
+// testResolveAndOpen runs against the server rootDSN names, wherever it
+// listens and with whatever account: the datasource rows it writes point
+// back at that server. (It assumed 127.0.0.1:13306 and the account root, the
+// CI job's container, and failed against any other, the local stack's 3306
+// among them.)
 func testResolveAndOpen(t *testing.T, rootDSN string) {
 	ctx := context.Background()
+	root, err := gomysql.ParseDSN(rootDSN)
+	if err != nil {
+		t.Fatalf("MYSQL_TEST_DSN_ROOT: %v", err)
+	}
+	host, port, err := net.SplitHostPort(root.Addr)
+	if root.Net != "tcp" || err != nil {
+		t.Skipf("MYSQL_TEST_DSN_ROOT names %s(%s): the datasource table holds a host and a port, the test needs a TCP address", root.Net, root.Addr)
+	}
+	portNo, err := strconv.Atoi(port)
+	if err != nil {
+		t.Fatalf("MYSQL_TEST_DSN_ROOT port %q: %v", port, err)
+	}
 	admin, err := sql.Open("mysql", rootDSN)
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer admin.Close()
-	for _, q := range []string{
-		"DROP DATABASE IF EXISTS mysqlx_platform", "DROP DATABASE IF EXISTS mysqlx_tenant",
-		"CREATE DATABASE mysqlx_platform", "CREATE DATABASE mysqlx_tenant",
-		`CREATE TABLE mysqlx_platform.datasource (
+	mysqlRow := "INSERT INTO mysqlx_platform.datasource VALUES (?, ?, 'mysql', ?, ?, ?, ?, 'MYSQLX_TEST_PW', '')"
+	for _, s := range [][]any{
+		{"DROP DATABASE IF EXISTS mysqlx_platform"}, {"DROP DATABASE IF EXISTS mysqlx_tenant"},
+		{"CREATE DATABASE mysqlx_platform"}, {"CREATE DATABASE mysqlx_tenant"},
+		{`CREATE TABLE mysqlx_platform.datasource (
 			tenant_code VARCHAR(32), role VARCHAR(16), kind VARCHAR(16), host VARCHAR(255), port INT,
-			db_name VARCHAR(64), username VARCHAR(64), password_env VARCHAR(64), params VARCHAR(255))`,
-		"INSERT INTO mysqlx_platform.datasource VALUES ('tenant_a','tenant','mysql','127.0.0.1',13306,'mysqlx_tenant','root','MYSQLX_TEST_PW','')",
-		"INSERT INTO mysqlx_platform.datasource VALUES ('platform','platform','mysql','127.0.0.1',13306,'mysqlx_platform','root','MYSQLX_TEST_PW','')",
-		"INSERT INTO mysqlx_platform.datasource VALUES ('tenant_a','tenant','valkey','valkey',6379,'2','','MYSQLX_TEST_PW','')",
-		"CREATE TABLE mysqlx_tenant.t (id INT PRIMARY KEY)", "INSERT INTO mysqlx_tenant.t VALUES (1)",
+			db_name VARCHAR(64), username VARCHAR(64), password_env VARCHAR(64), params VARCHAR(255))`},
+		{mysqlRow, "tenant_a", "tenant", host, portNo, "mysqlx_tenant", root.User},
+		{mysqlRow, "platform", "platform", host, portNo, "mysqlx_platform", root.User},
+		{"INSERT INTO mysqlx_platform.datasource VALUES ('tenant_a','tenant','valkey','valkey',6379,'2','','MYSQLX_TEST_PW','')"},
+		{"CREATE TABLE mysqlx_tenant.t (id INT PRIMARY KEY)"}, {"INSERT INTO mysqlx_tenant.t VALUES (1)"},
 	} {
-		if _, err := admin.ExecContext(ctx, q); err != nil {
-			t.Fatalf("%s: %v", q, err)
+		if _, err := admin.ExecContext(ctx, s[0].(string), s[1:]...); err != nil {
+			t.Fatalf("%s: %v", s[0], err)
 		}
 	}
 	defer admin.Exec("DROP DATABASE IF EXISTS mysqlx_platform")
 	defer admin.Exec("DROP DATABASE IF EXISTS mysqlx_tenant")
 
-	// root DSN "root:root@tcp(127.0.0.1:13306)/" -> platform target
-	userPass := strings.SplitN(strings.SplitN(rootDSN, "@", 2)[0], ":", 2)
-	platform := Target{Addr: "127.0.0.1:13306", DB: "mysqlx_platform", User: userPass[0], Password: userPass[1]}
-	env := map[string]string{"MYSQLX_TEST_PW": userPass[1]}
+	// the root DSN's server and account -> the platform target
+	platform := Target{Addr: root.Addr, DB: "mysqlx_platform", User: root.User, Password: root.Passwd}
+	env := map[string]string{"MYSQLX_TEST_PW": root.Passwd}
 	getenv := func(k string) string { return env[k] }
 
 	if _, err := Resolve(ctx, platform, "", RoleTenant, getenv); err == nil || !strings.Contains(err.Error(), "TENANT_CODE") {
@@ -51,8 +72,8 @@ func testResolveAndOpen(t *testing.T, rootDSN string) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if tgt.DB != "mysqlx_tenant" || tgt.Addr != "127.0.0.1:13306" {
-		t.Errorf("resolved %+v", tgt)
+	if tgt.DB != "mysqlx_tenant" || tgt.Addr != root.Addr || tgt.User != root.User {
+		t.Errorf("resolved %s/%s as %s, want %s/mysqlx_tenant as %s", tgt.Addr, tgt.DB, tgt.User, root.Addr, root.User)
 	}
 	ptgt, err := Resolve(ctx, platform, "whatever", RolePlatform, getenv)
 	if err != nil || ptgt.DB != "mysqlx_platform" {

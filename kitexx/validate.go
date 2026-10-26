@@ -65,6 +65,35 @@ func BizError(ctx context.Context, err error) error {
 	return err
 }
 
+// bizCode is the business code a call ended with, if it ended with one,
+// for a middleware that has called next and got err. Kitex does not return
+// a business error to the middlewares: on the server, invokeHandleEndpoint
+// moves the one a handler returns into the RPCInfo and returns nil (BizError
+// does the same for a middleware); on the client, the TTHeader meta handler
+// puts the one of the response into the RPCInfo, and only Call returns it,
+// after every middleware. So with err nil the code is the RPCInfo's; an err
+// that is itself a business error (a middleware further in returned it) is
+// one too; any other error is a failure without a code.
+//
+// bizCode 是调用以哪个业务码结束（中间件调完 next、拿到 err 之后用）。Kitex 不把业务错误返回给中间件：
+// 服务端 invokeHandleEndpoint 把 handler 返回的业务错误放进 RPCInfo 再返回 nil（BizError 对中间件也这样做），
+// 客户端由 TTHeader 元信息处理器把响应里的业务码放进 RPCInfo，等所有中间件都返回后 Call 才把它当 error 返回。
+// 所以 err 为 nil 时看 RPCInfo；err 本身是业务错误（更里层的中间件直接返回的）也算；其他 error 是没有业务码的失败。
+func bizCode(ctx context.Context, err error) (int32, bool) {
+	if err != nil {
+		if biz, ok := kerrors.FromBizStatusError(err); ok {
+			return biz.BizStatusCode(), true
+		}
+		return 0, false
+	}
+	if ri := rpcinfo.GetRPCInfo(ctx); ri != nil && ri.Invocation() != nil {
+		if biz := ri.Invocation().BizStatusErr(); biz != nil {
+			return biz.BizStatusCode(), true
+		}
+	}
+	return 0, false
+}
+
 var validatorMsg = regexp.MustCompile(`^field (\w+) (.*)$`)
 
 // FriendlyValidation turns thrift-gen-validator's "field Username min_size

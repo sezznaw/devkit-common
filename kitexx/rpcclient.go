@@ -10,6 +10,7 @@ import (
 	"github.com/cloudwego/kitex/pkg/kerrors"
 	"github.com/cloudwego/kitex/pkg/retry"
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
+	"github.com/cloudwego/kitex/pkg/utils"
 
 	"github.com/sezznaw/devkit-common/config"
 	"github.com/sezznaw/devkit-common/zlog"
@@ -32,7 +33,8 @@ type RPCClientConfig struct {
 	Retries *int `yaml:"retries"`
 	// Breaker, default true: calls to a service whose error rate is over
 	// 50% (of at least 200 calls in the window) fail at once with
-	// kerrors.ErrCircuitBreak until it recovers.
+	// kerrors.ErrCircuitBreak until it recovers. Every client has breakers
+	// of its own, per method of the service it calls (breakerPerClient).
 	Breaker *bool `yaml:"breaker"`
 }
 
@@ -64,9 +66,35 @@ func rpcClientOptions(cfg Config) []client.Option {
 		opts = append(opts, client.WithFailureRetry(p))
 	}
 	if c.breaker() {
-		opts = append(opts, client.WithCircuitBreaker(cbSuite()))
+		opts = append(opts, breakerPerClient())
 	}
+	protectionsLogged.Do(func() {
+		retries := "off"
+		if c.retries() > 0 {
+			retries = "only unsent requests"
+		}
+		zlog.Info("rpc client protections on", zlog.Str("timeout", c.Timeout.Or(defaultRPCTimeout).String()), zlog.Str("retry", retries), zlog.Bool("breaker", c.breaker()))
+	})
 	return opts
+}
+
+var protectionsLogged sync.Once
+
+// breakerPerClient is client.WithCircuitBreaker with a suite of its own for
+// every client the option is given to, keyed by the service and method
+// called (circuitbreak.RPCInfo2Key). A suite must not serve two clients:
+// Kitex closes a client's suite in Close and in the finalizer of a client
+// that is collected (kitex v0.16.3 client/client.go), which stops the
+// breakers of every other client of that suite and races with the next
+// client setting it up (initServiceCB, initInstanceCB), and each client
+// points the suite at its own event queue (SetEventBusAndQueue); kitex's
+// NewCBSuite asks for one per client. The options of ClientOptions are
+// usually given to several clients (a gateway's deps), so the suite is made
+// when the option is applied to a client, not when it is built.
+func breakerPerClient() client.Option {
+	return client.Option{F: func(o *client.Options, di *utils.Slice) {
+		client.WithCircuitBreaker(circuitbreak.NewCBSuite(circuitbreak.RPCInfo2Key)).F(o, di)
+	}}
 }
 
 // retryOnlyUnsent says yes only for errors that mean the request never
@@ -75,20 +103,4 @@ func rpcClientOptions(cfg Config) []client.Option {
 func retryOnlyUnsent(err error, _ rpcinfo.RPCInfo) bool {
 	return errors.Is(err, kerrors.ErrGetConnection) || errors.Is(err, kerrors.ErrNoConnection) ||
 		errors.Is(err, kerrors.ErrNoDestAddress) || errors.Is(err, kerrors.ErrNoDestService)
-}
-
-var (
-	cbOnce sync.Once
-	cb     *circuitbreak.CBSuite
-)
-
-// cbSuite is one circuit-breaker suite per process, keyed by the service
-// and method called; state changes are logged.
-func cbSuite() *circuitbreak.CBSuite {
-	cbOnce.Do(func() {
-		cb = circuitbreak.NewCBSuite(circuitbreak.RPCInfo2Key)
-		OnShutdown("circuit breaker", cb.Close)
-		zlog.Info("rpc client protections on", zlog.Str("timeout", defaultRPCTimeout.String()), zlog.Str("retry", "only unsent requests"), zlog.Bool("breaker", true))
-	})
-	return cb
 }

@@ -90,8 +90,18 @@ kitexx.Run(svr, cfg.Config)
   client and the configuration (`kitexx.Nacos(cfg)`, `nacosx.Shared`).
 - **Configuration that refreshes itself**: `kitexx.WatchConfig[T](cfg)`, see
   `nacosx` below.
-- Request logging middleware (method, caller, latency, error), and handler
-  panics turned into errors (the latter by Kitex itself).
+- Request logging middleware (method, caller, latency, outcome), and handler
+  panics turned into errors (the latter by Kitex itself). One `rpc` record
+  per RPC, its level set by the outcome: a success is INFO; a call answered
+  with a business code is INFO with the code in `code`, WARN for 5000-5999
+  (the service could not do the work: the framework's 5001 a dependency
+  failed, 5002 the idempotency store is down, 5003 busy); any other failure
+  is ERROR with `err`. The business message is not logged: a validation
+  message quotes the value it refused (thrift-gen-validator writes
+  `current value: <value>` for a pattern rule), a password among them.
+  Before v0.74.0 a business answer was the INFO record of a
+  success, without a code: Kitex keeps a business error in the RPCInfo and
+  hands the middlewares nil, and the framework now reads it there.
 
 ```yaml
 shutdown:
@@ -694,7 +704,19 @@ the call may have run), and a circuit breaker per service and method
 (`breaker: false` to switch off): over 50% errors in at least 200 calls and
 the calls fail at once with `kerrors.ErrCircuitBreak` until the downstream
 recovers. A caller that must retry a write does it itself with the same
-request_id; the idempotency middleware replays the result.
+request_id; the idempotency middleware replays the result. A call answered
+with a business code (1002 in progress, 5003 busy, ...) may be made again
+with the same request_id too: the service dropped the id (since the next
+version the client middleware no longer refuses that retry as "called a
+second time").
+
+The breakers are every client's own (v0.74.0): `ClientOptions` given
+to several clients (a gateway's deps) gives each its own when it is made.
+Before, one suite served the whole process, and Kitex closes a client's
+breakers when the client is closed or collected (its finalizer): the
+windows of the clients still in use stopped moving, and clients made and
+dropped again and again (`app.Setup` in every handler test, the post-deploy
+checks) were a data race (`go test -race` reported it).
 
 ### Overload protection of an RPC service (`limits:`)
 
@@ -915,11 +937,19 @@ Nothing to write: with `metrics.enabled` the framework serves `/metrics`
 is never reachable through the ingress, and records
 
 - `rpc_server_requests_total{rpc_service, rpc_method, code}` and
-  `rpc_server_duration_seconds`: every RPC handled; `code` is `ok`, the
-  business code of a `BizStatusError` (bounded by the table in the idl
-  repository), or `error`
-- `rpc_client_requests_total` / `rpc_client_duration_seconds`: the calls
-  this service makes, by the service called
+  `rpc_server_duration_seconds`: every RPC handled; `code` takes three kinds
+  of value: `ok` (a success); the number of a business code (a call answered
+  with a `BizStatusError`, `2001`, `1007`; bounded by the table in the idl
+  repository); `error` (any other failure: a plain error or a panic in the
+  handler, a timeout, no connection, an open breaker). A business code is
+  not an error: an error rate counts `code="error"` only. Kitex keeps a
+  business code in the RPCInfo and hands the middlewares nil; the framework
+  reads it there (v0.74.0; before, every call answered with a business
+  code was counted `ok`)
+- `rpc_client_requests_total{rpc_service, rpc_method, code}` /
+  `rpc_client_duration_seconds`: the calls this service makes, by the
+  service called, `code` as above (read from the RPCInfo here too: Kitex
+  hands the caller a business error only after every middleware returned)
 - `http_server_requests_total{http_method, http_route, status}` /
   `http_server_duration_seconds` (Hertz): the route is the IDL pattern,
   never the raw path; a request that matched no route is `unmatched`
@@ -949,7 +979,7 @@ A change that spans several services (a new RPC method and the gateway that call
 
 ### Tests with `testx`
 
-A handler test builds the Runtime the framework would hand `app.Setup`, on infrastructure that lives for that one test: `rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` gives Redis in-process (miniredis, `rt.MiniRedis` to look at it), Kafka in-process (kfake), a fake Centrifugo that records what was pushed (`rt.Pushes()`, `rt.WaitPush(channel, timeout)`) and, with `WithMySQL`, a database created from the project's `*.up.sql` migrations and dropped afterwards. The database is the one thing not in-process: it comes from `MYSQL_TEST_DSN_ROOT` (the template's Makefile points it at the local stack, CI at a MySQL service container) and the test is skipped, not failed, when no server answers. Then `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)` and call the handler with `testx.Ctx(uid)` (a logged-in member; `CtxAs(realm, uid)` for others; a route test that bypasses the real login puts an identity in with `kitexx.WithIdentity`). `rt.Start()` runs what the server would after Setup (the subscribed consumers, the outbox relay, the delayed-task poller); `rt.RunDue()` runs the delayed tasks that are due without waiting (set a task's `run_at` back first); `rt.WaitEvent(topic, type, timeout)` and `rt.Events(topic, timeout)` read what reached a topic. For a gateway, `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))` and `testx.Get` call a route in-process and return the parsed envelope (`MustCode(t, 200, 0)`, `Decode(t, &out)`); `testx.From(ip)` sets the client IP the guard counts. `devkit lint` (rule `tests`) reminds a service whose handler package has no test at all.
+A handler test builds the Runtime the framework would hand `app.Setup`, on infrastructure that lives for that one test: `rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` gives Redis in-process (miniredis, `rt.MiniRedis` to look at it), Kafka in-process (kfake), a fake Centrifugo that records what was pushed (`rt.Pushes()`, `rt.WaitPush(channel, timeout)`) and, with `WithMySQL`, a database created from the project's `*.up.sql` migrations and dropped afterwards (when the test ends the pool of `rt.DB` is closed, then the database dropped; before v0.74.0 the pool stayed open, with up to 5 idle connections per test until the process ended, and `go test -count` with a large count ran the local MySQL out of connections, 1040). The database is the one thing not in-process: it comes from `MYSQL_TEST_DSN_ROOT` (the template's Makefile points it at the local stack, CI at a MySQL service container) and the test is skipped, not failed, when no server answers. Then `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)` and call the handler with `testx.Ctx(uid)` (a logged-in member; `CtxAs(realm, uid)` for others; a route test that bypasses the real login puts an identity in with `kitexx.WithIdentity`). `rt.Start()` runs what the server would after Setup (the subscribed consumers, the outbox relay, the delayed-task poller); `rt.RunDue()` runs the delayed tasks that are due without waiting (set a task's `run_at` back first); `rt.WaitEvent(topic, type, timeout)` and `rt.Events(topic, timeout)` read what reached a topic. For a gateway, `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))` and `testx.Get` call a route in-process and return the parsed envelope (`MustCode(t, 200, 0)`, `Decode(t, &out)`); `testx.From(ip)` sets the client IP the guard counts. `devkit lint` (rule `tests`) reminds a service whose handler package has no test at all.
 
 ### Scheduled jobs with `jobx`
 

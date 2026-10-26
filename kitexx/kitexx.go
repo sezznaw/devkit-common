@@ -234,7 +234,7 @@ func (rt *Runtime) Options() ([]server.Option, error) {
 		server.WithMiddleware(LoggingMiddleware()),
 		// service identity: the caller's ServiceAccount token, before callers (which then matches the proven name)
 		server.WithMiddleware(svcIdentity),
-		// callers.rules: after the log line (a refusal is logged as an rpc error), before any work
+		// callers.rules: after the log line (a refusal is in it with code 1007), before any work
 		server.WithMiddleware(Callers(cfg.Service.Name, cfg.Callers)),
 		// identity: the claimed login must match the user token it carries (log first, then enforce)
 		server.WithMiddleware(identity),
@@ -466,9 +466,18 @@ const (
 	traceIDField = "trace_id"
 )
 
-// LoggingMiddleware logs every RPC with method, caller, latency and error, and
-// gives the context the logger of the request: what a handler logs with
+// LoggingMiddleware logs every RPC with method, caller, latency and outcome,
+// and gives the context the logger of the request: what a handler logs with
 // zlog.Ctx(ctx) carries trace_id and method.
+//
+// The outcome sets the level: a success is INFO; a call answered with a
+// business code carries it as `code`, INFO, or WARN for 5000-5999, the codes
+// of a service that could not do the work (serviceFault); any other failure
+// is ERROR with the error. Kitex hands a business error to the middlewares
+// as nil and keeps it in the RPCInfo, which is where it is read (bizCode).
+// Its message is not logged: a validation message quotes the value it
+// refused (thrift-gen-validator writes "current value: <value>" for a
+// pattern rule), a password among them.
 //
 // The trace_id is the id of the trace ServerTracing put into the context,
 // which is the caller's or a new one; with tracing off it is the one the
@@ -507,15 +516,28 @@ func LoggingMiddleware() endpoint.Middleware {
 			if from != "" {
 				fields = append(fields, zlog.Str("from", from))
 			}
-			if err != nil {
+			code, answered := bizCode(ctx, err)
+			switch {
+			case answered && serviceFault(code):
+				zlog.Ctx(ctx).Warn("rpc", append(fields, zlog.Int("code", code))...)
+			case answered:
+				zlog.Ctx(ctx).Info("rpc", append(fields, zlog.Int("code", code))...)
+			case err != nil:
 				zlog.Ctx(ctx).Error("rpc", append(fields, zlog.Err(err))...)
-			} else {
+			default:
 				zlog.Ctx(ctx).Info("rpc", fields...)
 			}
 			return err
 		}
 	}
 }
+
+// serviceFault says whether a business code is one of 5000-5999: the
+// service could not do the work, through no fault of the request (the
+// framework's own are there: 5001 a dependency failed, 5002 the idempotency
+// store is down, 5003 busy). Every other code answers the request (not
+// found, not allowed, a bad parameter).
+func serviceFault(code int32) bool { return code >= 5000 && code <= 5999 }
 
 // ensureTraceID returns the trace_id of the request: the span's when there is
 // one, else the TRACE_ID metainfo value, else a new one. It is stored as the

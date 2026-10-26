@@ -13,8 +13,10 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"net"
 	"net/url"
 	"regexp"
+	"strconv"
 	"strings"
 	"time"
 
@@ -349,7 +351,8 @@ func ResolveKind(ctx context.Context, platform Target, tenant, role, kind string
 			return Target{}, fmt.Errorf("mysqlx: the password of tenant %q's %s is to come from the environment variable %q, which is not set", code, kind, passwordEnv)
 		}
 	}
-	return Target{Addr: fmt.Sprintf("%s:%d", host, port), DB: dbName, User: user, Password: password, Params: params}, nil
+	// JoinHostPort: an IPv6 host gets its brackets ("[::1]:3306"; "%s:%d" made "::1:3306", which cannot be dialled)
+	return Target{Addr: net.JoinHostPort(host, strconv.Itoa(port)), DB: dbName, User: user, Password: password, Params: params}, nil
 }
 
 // hint goes with every connection failure: the three things that are usually wrong.

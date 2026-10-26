@@ -352,8 +352,13 @@ func CtxAs(realm authx.Realm, uid int64) context.Context {
 }
 
 // openMySQL creates a fresh database on MYSQL_TEST_DSN_ROOT, applies the
-// migrations and returns the service's handle; the database is dropped at
-// the end of the test. No server: the test is skipped.
+// migrations and returns the service's handle; at the end of the test the
+// handle's pool is closed and the database dropped. No server: the test is
+// skipped.
+//
+// openMySQL 在 MYSQL_TEST_DSN_ROOT 上建一个新库、跑迁移，返回服务用的句柄；测试结束时先关这个句柄的
+// 连接池再删库（以前连接池不关，每个测试留下最多 5 条空闲连接直到进程退出，go test -count 大时
+// 把本机 MySQL 的连接数打满，报 1040）。连不上就跳过。
 func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 	t.Helper()
 	require := os.Getenv(RequireEnv) == "1"
@@ -394,14 +399,14 @@ func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 		}
 		t.Skipf("testx: no MySQL at %s (%v); start the project's local stack (its local/local.sh up) to run database tests", dsn.Addr, pingErr)
 	}
+	// Cleanups run last first: the pool of the handle (registered at the
+	// end) is closed, then the database dropped, then admin closed.
+	t.Cleanup(func() { _ = admin.Close() })
 	name := fmt.Sprintf("test_%s_%d", strings.ReplaceAll(service, "-", "_"), time.Now().UnixNano()%1_000_000_000)
 	if _, err := admin.Exec("CREATE DATABASE `" + name + "` CHARACTER SET utf8mb4"); err != nil {
 		t.Fatalf("testx: create database: %v", err)
 	}
-	t.Cleanup(func() {
-		_, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`")
-		_ = admin.Close()
-	})
+	t.Cleanup(func() { _, _ = admin.Exec("DROP DATABASE IF EXISTS `" + name + "`") })
 	var files []string
 	if migrationsDir != "" {
 		files, err = filepath.Glob(filepath.Join(migrationsDir, "*.up.sql"))
@@ -417,6 +422,7 @@ func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	defer func() { _ = conn.Close() }()
 	for _, f := range files {
 		b, err := os.ReadFile(f)
 		if err != nil {
@@ -426,10 +432,10 @@ func openMySQL(t testing.TB, service, migrationsDir string) *gorm.DB {
 			t.Fatalf("testx: migration %s: %v", filepath.Base(f), err)
 		}
 	}
-	_ = conn.Close()
 	db, err := mysqlx.Open(context.Background(), mysqlx.Target{Addr: dsn.Addr, DB: name, User: dsn.User, Password: dsn.Passwd}, mysqlx.Config{})
 	if err != nil {
 		t.Fatalf("testx: open test database: %v", err)
 	}
+	t.Cleanup(func() { _ = mysqlx.Close(db) })
 	return db
 }

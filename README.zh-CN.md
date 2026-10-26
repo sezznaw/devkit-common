@@ -60,7 +60,7 @@ kitexx.Run(svr, cfg.Config)
 - **连不上 Nacos 时给出明确的提示。** 在创建 Nacos 客户端之前，服务会先检查配置的服务器，Nacos 2.x 客户端需要的两个端口都检查（主端口，以及用于 gRPC 的主端口加 1000）。连不上就直接停下，并说明是哪个地址、什么原因、该看哪个配置项，而不是 SDK 那句 `client not connected, current status:STARTING`。
 - **每个进程只有一个 Nacos 客户端**，注册、所有下游客户端和配置共用（`kitexx.Nacos(cfg)`、`nacosx.Shared`）。
 - **自动刷新的配置**：`kitexx.WatchConfig[T](cfg)`，见下文 `nacosx`。
-- 请求日志中间件（方法、调用方、耗时、错误）；handler 的 panic 会被转成错误（这一点由 Kitex 自身提供）。
+- 请求日志中间件（方法、调用方、耗时、结果）；handler 的 panic 会被转成错误（这一点由 Kitex 自身提供）。每个 RPC 一条 `rpc` 记录，级别看结果：成功 INFO；以业务码作答的调用 INFO，业务码在 `code` 字段，5000–5999（服务没办成，比如框架的 5001 下游失败、5002 幂等存储不可用、5003 忙）记 WARN；其他失败 ERROR，带 `err`。业务码的消息不记：参数校验的消息会带被拒的原值（thrift-gen-validator 对 pattern 规则写 `current value: <值>`），密码也在其中。v0.74.0以前，以业务码作答的调用记成一条和成功一样的 INFO、没有 `code`：Kitex 把业务错误放进 RPCInfo、对中间件返回 nil，框架现在从 RPCInfo 读。
 
 ```yaml
 shutdown:
@@ -478,7 +478,12 @@ handler 仍要幂等：厂商可能用两个 id 发同一件事。
 单次调用 3s 超时（`timeout`）、建连 1s（`connect_timeout`）、重试 1 次（`retries`）但只在请求根本没发出去时
 （没有实例、没有连接；超时或 handler 的错误不重试，因为那次可能已经执行了）、按被调服务和方法熔断（`breaker: false` 关闭）：
 至少 200 次调用里错误超过一半就立刻以 `kerrors.ErrCircuitBreak` 失败，直到下游恢复。写操作要重试的话由调用方自己带同一个
-request_id 再调，幂等中间件会回放结果。
+request_id 再调，幂等中间件会回放结果；以业务码作答的调用（1002 处理中、5003 忙……）也可以带同一个 request_id 再调，
+被调方已经丢掉了这个 id（v0.74.0 起客户端中间件不再把这种重试当成「同一请求调了两次」拒掉）。
+
+熔断器每个客户端一份（v0.74.0 起）：同一份 `ClientOptions` 交给几个客户端（网关的 deps）时，每个客户端在建出来时拿到自己的
+熔断器。以前全进程共用一份，而 Kitex 在客户端 `Close` 或被回收（终结器）时会关掉它的熔断器：其他还在用的客户端的熔断窗口从此
+不再滚动，反复建客户端又丢掉（handler 测试里每次 `app.Setup`、部署后检查）时还是一处数据竞争（`go test -race` 报）。
 
 ### 按调用方放行（`callers:`）
 
@@ -629,8 +634,11 @@ metrics:
 所以永远不会从 ingress 暴露出去。记录的指标：
 
 - `rpc_server_requests_total{rpc_service, rpc_method, code}` 和 `rpc_server_duration_seconds`：处理的每个 RPC；
-  `code` 是 `ok`、`BizStatusError` 的业务码（码表有限，在 idl 仓库）或 `error`
-- `rpc_client_requests_total` / `rpc_client_duration_seconds`：本服务发出的调用，按被调服务分
+  `code` 只有三种取值：`ok`（成功）；业务码的数字（以 `BizStatusError` 作答的调用，如 `2001`、`1007`，码表有限，在 idl 仓库）；
+  `error`（其他失败：handler 返回普通 error 或 panic、超时、连不上、熔断）。业务码不是错误，错误率只数 `code="error"`。
+  Kitex 把业务码放在 RPCInfo 里、对中间件返回 nil，框架从那里读（v0.74.0 起；以前以业务码作答的调用全记成 `ok`）
+- `rpc_client_requests_total{rpc_service, rpc_method, code}` / `rpc_client_duration_seconds`：本服务发出的调用，按被调服务分，
+  `code` 的取值同上（客户端同样从 RPCInfo 读：Kitex 等所有中间件返回后才把业务错误交给调用方）
 - `http_server_requests_total{http_method, http_route, status}` / `http_server_duration_seconds`（Hertz）：
   route 是 IDL 里的模式，不是原始路径；没匹配到路由的请求记为 `unmatched`
 - `go_sql_*`（MySQL 连接池，按库）、`redis_commands_total{cmd, status}` / `redis_command_duration_seconds`、
@@ -656,7 +664,7 @@ metrics:
 
 ### 用 `testx` 写测试
 
-handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`；绕过真实登录的路由测试用 `kitexx.WithIdentity` 塞身份）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
+handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库（测试结束时先关 `rt.DB` 的连接池再删库；v0.74.0以前连接池不关，每个测试留下最多 5 条空闲连接直到进程退出，`go test -count` 跑很多遍时会把本机 MySQL 的连接数打满，报 1040）。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`；绕过真实登录的路由测试用 `kitexx.WithIdentity` 塞身份）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
 
 ### 用 `jobx` 写定时任务
 

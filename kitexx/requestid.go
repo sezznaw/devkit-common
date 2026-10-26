@@ -79,7 +79,9 @@ func scopeOf(ctx context.Context) *requestScope {
 //     refused, the service would only replay the first call's result.
 //
 // A call that fails may be made again with the same id: that is the retry
-// idempotency is for. ClientOptions installs it.
+// idempotency is for. So may a call answered with a business code (1002 in
+// progress, 5003 busy, ...): the service dropped the id. ClientOptions
+// installs it.
 func ClientRequestID() endpoint.Middleware {
 	return func(next endpoint.Endpoint) endpoint.Endpoint {
 		return func(ctx context.Context, req, resp any) error {
@@ -109,8 +111,9 @@ func ClientRequestID() endpoint.Middleware {
 				return refuse(ctx, target, id, "is called a second time with the same request_id in one request: the service would return the first call's result and do nothing; give each call its own id with kitexx.SubRequestID(ctx, part)")
 			}
 			err := next(ctx, req, resp)
-			if err != nil {
-				// not done: the same id may be tried again
+			if err != nil || bizFailed(ctx) {
+				// not done: the same id may be tried again. Kitex returns nil
+				// for a business answer and keeps it in the RPCInfo (bizCode)
 				sc.mu.Lock()
 				delete(sc.made, key)
 				sc.mu.Unlock()

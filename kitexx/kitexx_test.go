@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"github.com/bytedance/gopkg/cloud/metainfo"
+	"github.com/cloudwego/kitex/pkg/kerrors"
 	"github.com/cloudwego/kitex/pkg/registry"
 	"github.com/cloudwego/kitex/pkg/utils"
 	"github.com/nacos-group/nacos-sdk-go/v2/clients/naming_client"
@@ -130,6 +131,42 @@ func TestLoggingMiddleware(t *testing.T) {
 	}
 	if r := recs[2]; r.Level != "INFO" || r.Fields["trace_id"] != "from-caller" {
 		t.Errorf("rpc record of the call with a trace_id: %+v", r)
+	}
+}
+
+// TestLoggingMiddlewareLogsTheBusinessCode: a call answered with a business
+// code (in the RPCInfo, nil to the middlewares, the way Kitex and BizError
+// do it) is logged with the code: INFO, WARN for 5000-5999, the codes of a
+// service that could not do the work (a dependency failed, its idempotency
+// store is down, it is busy). Never the message: a validation message quotes
+// the value it refused, a password among them. Before, the record was the
+// INFO of a success.
+func TestLoggingMiddlewareLogsTheBusinessCode(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	answer := func(code int32) error {
+		ep := LoggingMiddleware()(func(ctx context.Context, req, resp any) error {
+			return BizError(ctx, kerrors.NewBizStatusError(code, "password: pattern rule failed, current value: hunter2"))
+		})
+		return ep(withRPCInfo(context.Background(), "member", "Register", "ser-api"), nil, nil)
+	}
+	for _, code := range []int32{2001, 1007, 5001, 5999, 6000} {
+		if err := answer(code); err != nil {
+			t.Fatal(err)
+		}
+	}
+	want := map[float64]string{2001: "INFO", 1007: "INFO", 5001: "WARN", 5999: "WARN", 6000: "INFO"}
+	recs := logs.Records()
+	if len(recs) != len(want) {
+		t.Fatalf("want %d records, got %d:\n%s", len(want), len(recs), logs)
+	}
+	for _, r := range recs {
+		code, _ := r.Fields["code"].(float64)
+		if r.Msg != "rpc" || want[code] == "" || r.Level != want[code] || r.Fields["err"] != nil || r.Fields["from"] != "ser-api" {
+			t.Errorf("record of a business answer: %+v", r)
+		}
+	}
+	if strings.Contains(logs.String(), "hunter2") {
+		t.Errorf("the business message must not be logged:\n%s", logs)
 	}
 }
 

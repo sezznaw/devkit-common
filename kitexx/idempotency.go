@@ -12,7 +12,6 @@ import (
 
 	"github.com/cloudwego/kitex/pkg/endpoint"
 	"github.com/cloudwego/kitex/pkg/kerrors"
-	"github.com/cloudwego/kitex/pkg/rpcinfo"
 	"github.com/cloudwego/kitex/pkg/serviceinfo"
 	"github.com/redis/go-redis/v9"
 
@@ -124,11 +123,12 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 	}
 }
 
-// bizFailed reports whether the handler of this call answered with a
-// business error, which Kitex keeps in the RPCInfo instead of returning it.
+// bizFailed reports whether this call was answered with a business error,
+// which Kitex keeps in the RPCInfo instead of returning it (bizCode): by the
+// handler, on the server; by the service called, on the client.
 func bizFailed(ctx context.Context) bool {
-	ri := rpcinfo.GetRPCInfo(ctx)
-	return ri != nil && ri.Invocation() != nil && ri.Invocation().BizStatusErr() != nil
+	_, failed := bizCode(ctx, nil)
+	return failed
 }
 
 // checkIdempotencyStore refuses to start a service that has idempotent

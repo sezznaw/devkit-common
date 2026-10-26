@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/cloudwego/kitex/pkg/kerrors"
 	"github.com/cloudwego/kitex/pkg/rpcinfo"
 
 	"github.com/sezznaw/devkit-common/zlog/zlogtest"
@@ -76,6 +77,39 @@ func TestClientRequestID(t *testing.T) {
 	}
 	if RequestID(context.Background()) != "" || SubRequestID(context.Background(), "x") != "" || RequestID(WithRequestID(context.Background(), "")) != "" {
 		t.Fatal("no request, no id")
+	}
+}
+
+// A call answered with a business code is not done either: Kitex keeps the
+// code in the RPCInfo and returns nil to the middlewares, and the service
+// dropped the id (Idempotency), so the same call with the same id runs
+// again. Before, the id stayed taken and that retry (after 1002 in
+// progress, 5003 busy) was refused as "a second time".
+func TestClientRequestIDAfterABusinessAnswer(t *testing.T) {
+	zlogtest.Discard(t)
+	sent := 0
+	var answer error = kerrors.NewBizStatusError(CodeBusy, "busy")
+	call := ClientRequestID()(func(ctx context.Context, req, resp any) error {
+		sent++
+		if b, ok := kerrors.FromBizStatusError(answer); ok {
+			// what the client's TTHeader meta handler does with the status of the response
+			rpcinfo.GetRPCInfo(ctx).Invocation().(rpcinfo.InvocationSetter).SetBizStatusErr(b)
+		}
+		return nil
+	})
+	request := WithRequestID(context.Background(), "r2") // each call has its own RPCInfo, the request one scope
+	if err := call(clientCtx(request), debit("r2"), nil); err != nil {
+		t.Fatal(err)
+	}
+	answer = nil
+	if err := call(clientCtx(request), debit("r2"), nil); err != nil {
+		t.Fatalf("the retry after a business answer must be sent: %v", err)
+	}
+	if err := call(clientCtx(request), debit("r2"), nil); err == nil || !strings.Contains(err.Error(), "a second time") {
+		t.Fatalf("after the success the id is taken: %v", err)
+	}
+	if sent != 2 {
+		t.Fatalf("%d calls sent, want 2", sent)
 	}
 }
 
