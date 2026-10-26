@@ -99,6 +99,9 @@ kitexx.Run(svr, cfg.Config)
   is ERROR with `err`. The business message is not logged: a validation
   message quotes the value it refused (thrift-gen-validator writes
   `current value: <value>` for a pattern rule), a password among them.
+  Since v0.74.1 `FriendlyValidation` also drops that value from the message
+  the client gets for the rules that echo the field's text (pattern, prefix,
+  in, ...); sizes and numbers keep theirs.
   Before v0.74.0 a business answer was the INFO record of a
   success, without a code: Kitex keeps a business error in the RPCInfo and
   hands the middlewares nil, and the framework now reads it there.

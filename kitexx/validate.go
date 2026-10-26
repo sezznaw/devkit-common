@@ -96,15 +96,30 @@ func bizCode(ctx context.Context, err error) (int32, bool) {
 
 var validatorMsg = regexp.MustCompile(`^field (\w+) (.*)$`)
 
+// echoedValue is a rule whose "current value" is the field's own text
+// (pattern, prefix, in, ...): the value is dropped from the message, or a
+// password refused by a pattern rule would reach the client, the gateway's
+// audit log and whoever reads either. Rules about sizes and numbers keep
+// theirs (a length or a number).
+// echoedValue 是「当前值」就是字段原文的规则（pattern、prefix、in……）：消息里去掉这个值，否则被 pattern 规则拒掉的密码
+// 会原样回给客户端、进网关的审计日志。长度、数值类的规则保留（那是长度或数字）。
+var echoedValue = regexp.MustCompile(`^((?:pattern|prefix|suffix|contains|not_contains|in|not_in|const|elem|key|value) rule failed), current value: .*$`)
+
 // FriendlyValidation turns thrift-gen-validator's "field Username min_size
 // rule failed, current value: 2" into "username: min_size rule failed,
-// current value: 2": the field as the client knows it (snake_case).
+// current value: 2": the field as the client knows it (snake_case). For a
+// rule that echoes the field's text (echoedValue) the value is left out:
+// "password: pattern rule failed".
 func FriendlyValidation(msg string) string {
 	m := validatorMsg.FindStringSubmatch(strings.TrimSpace(msg))
 	if m == nil {
 		return msg
 	}
-	return snake(m[1]) + ": " + m[2]
+	rule := m[2]
+	if e := echoedValue.FindStringSubmatch(rule); e != nil {
+		rule = e[1]
+	}
+	return snake(m[1]) + ": " + rule
 }
 
 func snake(s string) string {

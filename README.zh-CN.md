@@ -60,7 +60,7 @@ kitexx.Run(svr, cfg.Config)
 - **连不上 Nacos 时给出明确的提示。** 在创建 Nacos 客户端之前，服务会先检查配置的服务器，Nacos 2.x 客户端需要的两个端口都检查（主端口，以及用于 gRPC 的主端口加 1000）。连不上就直接停下，并说明是哪个地址、什么原因、该看哪个配置项，而不是 SDK 那句 `client not connected, current status:STARTING`。
 - **每个进程只有一个 Nacos 客户端**，注册、所有下游客户端和配置共用（`kitexx.Nacos(cfg)`、`nacosx.Shared`）。
 - **自动刷新的配置**：`kitexx.WatchConfig[T](cfg)`，见下文 `nacosx`。
-- 请求日志中间件（方法、调用方、耗时、结果）；handler 的 panic 会被转成错误（这一点由 Kitex 自身提供）。每个 RPC 一条 `rpc` 记录，级别看结果：成功 INFO；以业务码作答的调用 INFO，业务码在 `code` 字段，5000–5999（服务没办成，比如框架的 5001 下游失败、5002 幂等存储不可用、5003 忙）记 WARN；其他失败 ERROR，带 `err`。业务码的消息不记：参数校验的消息会带被拒的原值（thrift-gen-validator 对 pattern 规则写 `current value: <值>`），密码也在其中。v0.74.0以前，以业务码作答的调用记成一条和成功一样的 INFO、没有 `code`：Kitex 把业务错误放进 RPCInfo、对中间件返回 nil，框架现在从 RPCInfo 读。
+- 请求日志中间件（方法、调用方、耗时、结果）；handler 的 panic 会被转成错误（这一点由 Kitex 自身提供）。每个 RPC 一条 `rpc` 记录，级别看结果：成功 INFO；以业务码作答的调用 INFO，业务码在 `code` 字段，5000–5999（服务没办成，比如框架的 5001 下游失败、5002 幂等存储不可用、5003 忙）记 WARN；其他失败 ERROR，带 `err`。业务码的消息不记：参数校验的消息会带被拒的原值（thrift-gen-validator 对 pattern 规则写 `current value: <值>`），密码也在其中。v0.74.1 起 `FriendlyValidation` 对回显字段原文的规则（pattern、prefix、in……）也把这个值从回给客户端的 1001 消息里去掉，长度、数值类的规则保留。v0.74.0以前，以业务码作答的调用记成一条和成功一样的 INFO、没有 `code`：Kitex 把业务错误放进 RPCInfo、对中间件返回 nil，框架现在从 RPCInfo 读。
 
 ```yaml
 shutdown:

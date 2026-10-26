@@ -239,7 +239,9 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   JSON server and client over TTHeader), not against our idea of it. The
   request log writes the code, never the message: thrift-gen-validator puts
   the refused value ("current value: <value>") in a pattern rule's message,
-  passwords included. Level: INFO, WARN for 5000-5999 (`serviceFault`).
+  passwords included; since v0.74.1 `FriendlyValidation` (validate.go,
+  `echoedValue`) also strips it from the 1001 message the client gets for the
+  rules that echo the field's text. Level: INFO, WARN for 5000-5999 (`serviceFault`).
 - `hertzx`: kitexx for API services on Hertz (`devkit nas`, template `hertz-service`).
   `hertzx.Config` is an alias of `kitexx.Config` on purpose (one set of conf files and docs, and
   `kitexx.ClientOptions(cfg)` for the RPC services behind the API). It reuses, not copies,

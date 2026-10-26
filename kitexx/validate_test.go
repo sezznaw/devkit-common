@@ -60,8 +60,12 @@ func TestFriendlyValidation(t *testing.T) {
 	cases := map[string]string{
 		"field Username min_size rule failed, current value: 2":     "username: min_size rule failed, current value: 2",
 		"field NewPassword_ min_size rule failed, current value: 1": "new_password: min_size rule failed, current value: 1",
-		"field RequestId const rule failed":                         "request_id: const rule failed",
-		"something else":                                            "something else",
+		// the refused text itself is not echoed (a password, here)
+		"field Password pattern rule failed, current value: hunter2": "password: pattern rule failed",
+		"field Username prefix rule failed, current value: admin_x":  "username: prefix rule failed",
+		"field Status in rule failed, current value: 9":              "status: in rule failed",
+		"field RequestId const rule failed":                          "request_id: const rule failed",
+		"something else":                                             "something else",
 	}
 	for in, want := range cases {
 		if got := FriendlyValidation(in); got != want {
