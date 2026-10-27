@@ -14,7 +14,9 @@ jobs:
           go-version-file: go.mod
       - run: test -z "$(gofmt -l .)"
       - run: go vet ./...
-      - run: go test ./...
+      # -race: a data race shows only under the race detector (the Kitex
+      # clients' shared circuit breaker, TestClientsComeAndGoWithoutARace)
+      - run: go test -race ./...
 
   # The tests above put fakes underneath nacosx. This one runs it against a
   # real server, where the assumptions the fakes are built on are checked.
