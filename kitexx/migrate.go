@@ -108,11 +108,14 @@ func (rt *Runtime) EnsureFrameworkTables() error {
 // deliberately does not:
 //
 //   - Adds tables, columns and indexes, and alters a column whose type,
-//     nullability or default differs from the model (a wider varchar, a
-//     bigger integer, a new default). Never drops or renames a column,
-//     never narrows a type (it refuses to start instead), never backfills
-//     data: those kinds of change need a hand-written migration (the
-//     project's guide says who).
+//     nullability, default or collation differs from the model (a wider
+//     varchar, a bigger integer, a new default, `COLLATE utf8mb4_0900_bin`
+//     in the type tag). Never drops or renames a column, never narrows a
+//     type (it refuses to start instead), never backfills data: those kinds
+//     of change need a hand-written migration (the project's guide says
+//     who). A collation may only move to a binary one (*_bin): under a
+//     looser one values that were distinct become equal and a unique index
+//     may have duplicates, so that direction is refused like a narrowing.
 //   - Reads the tables in one snapshot (two information_schema queries)
 //     and compares in memory; when nothing differs it returns at once,
 //     without the lock. Only the tables that differ are handed to GORM.
@@ -213,6 +216,17 @@ func (rt *Runtime) AutoMigrate(models ...any) error {
 		if err := rt.DB.WithContext(ctx).AutoMigrate(changed...); err != nil {
 			return fmt.Errorf("kitexx: auto migrate: %w", err)
 		}
+		// Collations: GORM's AutoMigrate compares types, not collations, so a
+		// column whose only difference is the COLLATE in its tag is altered
+		// here, by GORM's AlterColumn, which writes the full definition from
+		// the tag.
+		for _, p := range todo {
+			for _, field := range p.collate {
+				if err := rt.DB.WithContext(ctx).Migrator().AlterColumn(p.model, field); err != nil {
+					return fmt.Errorf("kitexx: auto migrate: %s.%s: alter collation: %w", p.table, field, err)
+				}
+			}
+		}
 		// What happened, from the database, not from the plan.
 		after, err := snapshot(rt.DB.WithContext(ctx), tables)
 		if err != nil {
@@ -258,6 +272,10 @@ type tablePlan struct {
 	addIndexes   []string
 	alterColumns []string // "name: have -> want"
 	narrowing    []string // the alterations that would narrow a type
+	// collate are the fields whose collation differs: GORM's migrator does
+	// not compare collations, so AutoMigrate alters these itself
+	// (Migrator().AlterColumn builds the column from the tag, COLLATE included).
+	collate []string
 }
 
 func (p tablePlan) changes() bool {
@@ -306,6 +324,8 @@ func (p tablePlan) applied(after schemaSnapshot) string {
 			altered = append(altered, name+": "+nullability(old.Nullable)+" -> "+nullability(col.Nullable))
 		case !sameDefault(old.Default, col.Default):
 			altered = append(altered, name+": default "+defaultText(old.Default)+" -> "+defaultText(col.Default))
+		case old.Collation != col.Collation:
+			altered = append(altered, name+": collate "+old.Collation+" -> "+col.Collation)
 		}
 	}
 	for name := range now.indexes {
@@ -363,9 +383,10 @@ func (ps migrationPlan) refuseNarrowing() error {
 
 // columnInfo is a column as information_schema describes it.
 type columnInfo struct {
-	Type     string // COLUMN_TYPE, normalized (normalizeType)
-	Nullable bool
-	Default  *string
+	Type      string // COLUMN_TYPE, normalized (normalizeType)
+	Nullable  bool
+	Default   *string
+	Collation string // COLLATION_NAME, lowercase; "" for a non-string column
 }
 
 // tableSnapshot is one table's columns and index names, keys lowercase.
@@ -393,8 +414,9 @@ func snapshot(db *gorm.DB, tables []string) (schemaSnapshot, error) {
 		ColumnType    string  `gorm:"column:column_type"`
 		IsNullable    string  `gorm:"column:is_nullable"`
 		ColumnDefault *string `gorm:"column:column_default"`
+		Collation     *string `gorm:"column:collation_name"`
 	}
-	if err := db.Raw("SELECT table_name AS table_name, column_name AS column_name, column_type AS column_type, is_nullable AS is_nullable, column_default AS column_default FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name IN ?", tables).Scan(&cols).Error; err != nil {
+	if err := db.Raw("SELECT table_name AS table_name, column_name AS column_name, column_type AS column_type, is_nullable AS is_nullable, column_default AS column_default, collation_name AS collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name IN ?", tables).Scan(&cols).Error; err != nil {
 		return nil, fmt.Errorf("kitexx: auto migrate: read columns: %w", err)
 	}
 	for _, c := range cols {
@@ -404,7 +426,11 @@ func snapshot(db *gorm.DB, tables []string) (schemaSnapshot, error) {
 			ts = tableSnapshot{columns: map[string]columnInfo{}, indexes: map[string]bool{}}
 			out[t] = ts
 		}
-		ts.columns[strings.ToLower(c.ColumnName)] = columnInfo{Type: normalizeType(c.ColumnType), Nullable: strings.EqualFold(c.IsNullable, "YES"), Default: c.ColumnDefault}
+		ci := columnInfo{Type: normalizeType(c.ColumnType), Nullable: strings.EqualFold(c.IsNullable, "YES"), Default: c.ColumnDefault}
+		if c.Collation != nil {
+			ci.Collation = strings.ToLower(*c.Collation)
+		}
+		ts.columns[strings.ToLower(c.ColumnName)] = ci
 	}
 	var idx []struct {
 		TableName string `gorm:"column:table_name"`
@@ -470,11 +496,24 @@ func migratePlan(db *gorm.DB, models []any) (migrationPlan, error) {
 				p.addColumns = append(p.addColumns, f.DBName)
 				continue
 			}
-			want := normalizeType(f.TagSettings["TYPE"])
+			typeTag, wantCollation := splitCollate(f.TagSettings["TYPE"])
+			want := normalizeType(typeTag)
 			if want != col.Type {
 				p.alterColumns = append(p.alterColumns, f.DBName+": "+col.Type+" -> "+want)
 				if narrows(col.Type, want) {
 					p.narrowing = append(p.narrowing, s.Table+"."+f.DBName+": "+col.Type+" -> "+want)
+				}
+				continue
+			}
+			// Collation: only when the tag states one and the column has one
+			// (a string column). Loosening it (binary -> case-insensitive) can
+			// put duplicates under a unique index: refused like a narrowing.
+			if wantCollation != "" && col.Collation != "" && wantCollation != col.Collation {
+				p.alterColumns = append(p.alterColumns, f.DBName+": collate "+col.Collation+" -> "+wantCollation)
+				if !strings.HasSuffix(wantCollation, "_bin") {
+					p.narrowing = append(p.narrowing, s.Table+"."+f.DBName+": collate "+col.Collation+" -> "+wantCollation+" (only a *_bin collation is applied automatically)")
+				} else {
+					p.collate = append(p.collate, f.Name)
 				}
 				continue
 			}
@@ -530,6 +569,37 @@ func sameDefault(a, b *string) bool {
 	x, errX := strconv.ParseFloat(strings.TrimSpace(*a), 64)
 	y, errY := strconv.ParseFloat(strings.TrimSpace(*b), 64)
 	return errX == nil && errY == nil && x == y
+}
+
+// splitCollate takes the `COLLATE <name>` (and a `CHARACTER SET <cs>` before
+// it) out of a type tag: "varchar(128) COLLATE utf8mb4_0900_bin" ->
+// "varchar(128)", "utf8mb4_0900_bin". information_schema's COLUMN_TYPE
+// never carries them; the collation is compared on its own.
+func splitCollate(t string) (typ, collation string) {
+	fields := strings.Fields(strings.TrimSpace(t))
+	var kept []string
+	for i := 0; i < len(fields); i++ {
+		switch strings.ToLower(fields[i]) {
+		case "collate":
+			if i+1 < len(fields) {
+				collation = strings.ToLower(fields[i+1])
+				i++
+			}
+		case "character":
+			if i+2 < len(fields) && strings.EqualFold(fields[i+1], "set") {
+				i += 2
+			} else {
+				kept = append(kept, fields[i])
+			}
+		case "charset":
+			if i+1 < len(fields) {
+				i++
+			}
+		default:
+			kept = append(kept, fields[i])
+		}
+	}
+	return strings.Join(kept, " "), collation
 }
 
 // normalizeType makes a column type from a gorm tag and one from

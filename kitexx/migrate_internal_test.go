@@ -46,3 +46,18 @@ func TestNormalizeTypeAndNarrows(t *testing.T) {
 		}
 	}
 }
+
+func TestSplitCollate(t *testing.T) {
+	for in, want := range map[string][2]string{
+		"varchar(128) COLLATE utf8mb4_0900_bin":                      {"varchar(128)", "utf8mb4_0900_bin"},
+		"varchar(64) CHARACTER SET utf8mb4 COLLATE utf8mb4_0900_bin": {"varchar(64)", "utf8mb4_0900_bin"},
+		"varchar(64) charset utf8mb4 collate utf8mb4_bin":            {"varchar(64)", "utf8mb4_bin"},
+		"decimal(24,3)":   {"decimal(24,3)", ""},
+		"bigint unsigned": {"bigint unsigned", ""},
+	} {
+		typ, coll := splitCollate(in)
+		if typ != want[0] || coll != want[1] {
+			t.Errorf("%q: got %q %q, want %q %q", in, typ, coll, want[0], want[1])
+		}
+	}
+}

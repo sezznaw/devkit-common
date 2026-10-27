@@ -360,7 +360,7 @@ func (Bet) TableName() string { return "bet" }
 
 What `rt.AutoMigrate` does: creates a table that is missing; adds the columns
 and indexes a table lacks; alters a column whose type, nullability or default
-differs from the model (a wider varchar, a bigger integer, a new default);
+differs from the model (a wider varchar, a bigger integer, a new default; since v0.75.0 also a `COLLATE <name>` written in the `type:` tag, applied by AutoMigrate itself because GORM's migrator ignores collations — only towards a `*_bin` collation, the looser direction is refused like a narrowing: under it distinct keys become equal and a unique index may hold duplicates);
 logs each difference it fixed (`auto migrate: bet: columns added
 [settle_time]; columns altered [remark: varchar(64) -> varchar(255)]`) or that
 there was nothing to do. It reads the tables in one snapshot (two

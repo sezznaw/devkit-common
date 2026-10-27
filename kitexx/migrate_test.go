@@ -200,3 +200,84 @@ type migUntypedOK struct {
 }
 
 func (migUntypedOK) TableName() string { return "mig_other" }
+
+// The same table with its key column under a binary collation, and back.
+type migColCI struct {
+	ID  int64  `gorm:"column:id;type:bigint;primaryKey;autoIncrement"`
+	Key string `gorm:"column:biz_key;type:varchar(64);not null;uniqueIndex:uk_mig_collate_key"`
+}
+
+func (migColCI) TableName() string { return "mig_collate" }
+
+type migColBin struct {
+	ID  int64  `gorm:"column:id;type:bigint;primaryKey;autoIncrement"`
+	Key string `gorm:"column:biz_key;type:varchar(64) COLLATE utf8mb4_0900_bin;not null;uniqueIndex:uk_mig_collate_key"`
+}
+
+func (migColBin) TableName() string { return "mig_collate" }
+
+// A `COLLATE` in the type tag is compared with the column's collation and
+// applied (GORM's own migrator ignores collations): an idempotency key that
+// was case-insensitive becomes byte-compared. The other direction is refused
+// like a narrowing: under the looser collation "R1" and "r1" would collide in
+// the unique index.
+// 类型标签里的 COLLATE 和列的排序规则比较并应用（GORM 自己的迁移器不看排序规则）：不分大小写的幂等键改成按字节比较。
+// 反方向拒绝，和收窄一样：放宽后 "R1" 和 "r1" 会在唯一索引里相撞。
+func TestAutoMigrateAppliesABinaryCollationAndRefusesALooserOne(t *testing.T) {
+	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
+	if err := rt.AutoMigrate(migColCI{}); err != nil {
+		t.Fatal(err)
+	}
+	if c := collationOf(t, rt, "mig_collate", "biz_key"); c != "utf8mb4_0900_ai_ci" {
+		t.Fatalf("server default expected first: %s", c)
+	}
+	logs := zlogtest.Capture(t)
+	if err := rt.AutoMigrate(migColBin{}); err != nil {
+		t.Fatal(err)
+	}
+	if c := collationOf(t, rt, "mig_collate", "biz_key"); c != "utf8mb4_0900_bin" {
+		t.Fatalf("collation not applied: %s", c)
+	}
+	if typ, _ := columnOf(t, rt, "mig_collate", "biz_key"); typ != "varchar(64)" {
+		t.Fatalf("type changed: %s", typ)
+	}
+	if !logs.Has("INFO", "mig_collate: columns altered [biz_key: collate utf8mb4_0900_ai_ci -> utf8mb4_0900_bin]") {
+		t.Fatalf("the record says what was altered: %s", logs)
+	}
+	// once more: nothing to do, no lock
+	logs = zlogtest.Capture(t)
+	if err := rt.AutoMigrate(migColBin{}); err != nil {
+		t.Fatal(err)
+	}
+	if !logs.Has("INFO", "auto migrate: tables match the models") {
+		t.Fatalf("a second run should find nothing: %s", logs)
+	}
+	// back to case-insensitive: refused, column untouched
+	err := rt.AutoMigrate(migColCI{})
+	if err != nil {
+		t.Fatalf("the plain tag states no collation, it must not fight the column: %v", err)
+	}
+	err = rt.AutoMigrate(&migColLooseModel{})
+	if err == nil || !strings.Contains(err.Error(), "narrow") || !strings.Contains(err.Error(), "collate utf8mb4_0900_bin -> utf8mb4_0900_ai_ci") {
+		t.Fatalf("loosening accepted: %v", err)
+	}
+	if c := collationOf(t, rt, "mig_collate", "biz_key"); c != "utf8mb4_0900_bin" {
+		t.Fatalf("loosening was applied: %s", c)
+	}
+}
+
+type migColLooseModel struct {
+	ID  int64  `gorm:"column:id;type:bigint;primaryKey;autoIncrement"`
+	Key string `gorm:"column:biz_key;type:varchar(64) COLLATE utf8mb4_0900_ai_ci;not null;uniqueIndex:uk_mig_collate_key"`
+}
+
+func (*migColLooseModel) TableName() string { return "mig_collate" }
+
+func collationOf(t *testing.T, rt *testx.Runtime, table, column string) string {
+	t.Helper()
+	var c string
+	if err := rt.DB.Raw("SELECT collation_name FROM information_schema.columns WHERE table_schema = DATABASE() AND table_name = ? AND column_name = ?", table, column).Scan(&c).Error; err != nil {
+		t.Fatal(err)
+	}
+	return c
+}

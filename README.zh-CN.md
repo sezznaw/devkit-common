@@ -232,7 +232,7 @@ func (Bet) TableName() string { return "bet" }
 ```
 
 `rt.AutoMigrate` 做的事：缺表建表，缺列、缺索引补上，列的类型、可空、默认值和模型不一致就改过来（放宽 varchar、int 变 bigint、
-换默认值），每处差异打一条日志（`auto migrate: bet: columns added [settle_time]; columns altered [remark: varchar(64) -> varchar(255)]`），
+换默认值；v0.75.0 起 `type:` 标签里写的 `COLLATE <排序规则>` 也算：GORM 的迁移器不看排序规则，由 AutoMigrate 自己 ALTER，只允许改成 `*_bin`，反方向当收窄拒绝——放宽后原本不同的键会相等、唯一索引可能出现重复），每处差异打一条日志（`auto migrate: bet: columns added [settle_time]; columns altered [remark: varchar(64) -> varchar(255)]`），
 没差异也说一句。它用两条 `information_schema` 查询一次读完这批表的列和索引（和表数无关），在内存里比对，没差异立刻返回；
 有差异才拿 Redis 锁（`lock:<服务>:auto-migrate`，多副本、多服务同时启动也只有一个在改表），锁内再规划一次，**只把有差异的表**交给
 GORM，GORM 改之前还会逐列再比一遍。字段没有显式 `type:` 直接拒绝、不碰库：GORM 的默认类型（string 变 longtext、float 变 double）不是金额列该有的样子。
