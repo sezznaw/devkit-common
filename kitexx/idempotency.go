@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -71,8 +72,7 @@ func (rt *Runtime) Idempotency() endpoint.Middleware {
 				zlog.Ctx(ctx).Error("idempotent request but redis.enabled is false", zlog.Str("request_id", id))
 				return BizError(ctx, kerrors.NewBizStatusError(CodeIdempotencyUnavailable, "idempotency store is not configured"))
 			}
-			_, method, _ := rpcNames(ctx)
-			key := fmt.Sprintf("idem:%s:%s:%s", service, method, id)
+			key := idempotencyKey(ctx, service, id)
 
 			claimed, err := rdb.SetNX(ctx, key, pending, IdempotencyTTL).Result()
 			if err != nil {
@@ -201,4 +201,20 @@ func setSuccess(resp any, data []byte) error {
 	}
 	f.Set(v)
 	return nil
+}
+
+// idempotencyKey is the Redis key a request's answer is kept under. A
+// login's request is its own: the same request_id from another login must
+// not be answered with this one's result (nor skip the handler for it), so
+// the key carries the login's uid. Requests without a login (jobs,
+// consumers, service calls) share the plain key.
+// idempotencyKey 是请求结果在 Redis 里的键。带登录者的请求按登录者分键：别的登录者拿同一个 request_id 不能拿到这个人的结果、
+// 也不能跳过 handler。没有登录者的请求（任务、消费者、服务间调用）用原来的键。
+func idempotencyKey(ctx context.Context, service, requestID string) string {
+	_, method, _ := rpcNames(ctx)
+	key := fmt.Sprintf("idem:%s:%s:%s", service, method, requestID)
+	if uid, ok := UID(ctx); ok {
+		key += ":u" + strconv.FormatInt(uid, 10)
+	}
+	return key
 }
