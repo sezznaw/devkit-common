@@ -758,8 +758,16 @@ in two files is an error) and written to `cmd/<service>/openapi.yaml`, which
 
 The IDL return type of a method is its data struct; apidoc wraps every response
 in the `{code, msg, data}` envelope the gateway adds (see below), synthesizes a
-200 for methods returning `common.Empty`, marks every field without `optional`
-as `required`, writes `// @limit` as `x-rate-limit`, `// @maxbody` as `x-max-body`, `// @sensitive` as `x-sensitive` (the response shows personal data in clear: the audit log keeps the request, not the response), and writes the code table
+200 for methods returning `common.Empty`, marks every non-`optional` field of a response struct as `required` (Go
+always serializes them); in a request struct (every schema reachable from a
+requestBody) only the fields the gateway really refuses to go without are
+`required`: those the Thrift declares `required`, and those whose `api.vd`
+rule rejects the zero value (apidoc evaluates the expression with `$` empty:
+`len($)>0` and `$>=1 && $<=2` require, `len($)<=64` and `$>=0` do not); every
+other request field is `nullable: true`, since Hertz binds a missing or null
+member to the zero value and treats it as not sent. An expression it cannot
+read counts as required and is reported on stderr. The convention is appended
+to the document's info.description for whoever tests against it, writes `// @limit` as `x-rate-limit`, `// @maxbody` as `x-max-body`, `// @sensitive` as `x-sensitive` (the response shows personal data in clear: the audit log keeps the request, not the response), and writes the code table
 of `idl/errors/*.thrift` as `x-error-codes` (code, name, message, domain) for
 the front-end generators. Comments on methods and fields in the IDL become the
 descriptions: the first sentence of a method's comment is its title, the rest

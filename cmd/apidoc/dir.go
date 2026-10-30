@@ -106,8 +106,9 @@ func runDir(dir, out, title, version, desc string) error {
 	if master == nil {
 		return fmt.Errorf("%s: no file declares a service", dir)
 	}
-	// Fields are present unless the IDL says optional: tell the front end.
-	Required(master.Content[0], requiredFields(filepath.Dir(dir)))
+	// Response fields are present unless the IDL says optional; request fields
+	// are required only where the gateway refuses their absence (required.go).
+	Required(master.Content[0], structFields(filepath.Dir(dir)))
 	// The business codes, from the repository's errors/ directory (one Thrift
 	// file per domain), so a front end generates its code table from the
 	// same document it generates its types from.
