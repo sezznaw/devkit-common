@@ -242,8 +242,18 @@ func TestSetSpecRaisesTheRunningServersLimit(t *testing.T) {
 	ok := func(ctx context.Context, c *app.RequestContext) { c.JSON(200, map[string]any{"code": 0}) }
 	h.POST("/v1/agency/addMembers", ok)
 	h.POST("/v1/member/getProfile", ok)
-	go h.Spin()
-	t.Cleanup(func() { _ = h.Shutdown(context.Background()) })
+	// Spin logs through hlog after Shutdown returns (the Run error, its own
+	// Shutdown call), so the cleanup waits for it: the next test may swap the
+	// hlog logger (TestHertzLogsThroughZlog), a data race under -race.
+	spun := make(chan struct{})
+	go func() { h.Spin(); close(spun) }()
+	t.Cleanup(func() {
+		_ = h.Shutdown(context.Background())
+		select {
+		case <-spun:
+		case <-time.After(3 * time.Second):
+		}
+	})
 	for i := 0; i < 50; i++ {
 		if c, err := net.Dial("tcp", addr); err == nil {
 			c.Close()
