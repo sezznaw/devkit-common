@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -26,7 +27,11 @@ import (
 // value (zeroPasses evaluates the expression with `$` empty) or the Thrift
 // says `required`; every other request field is `nullable: true`, which is
 // what the gateway does with it (null = not sent). A schema reached from any
-// request body is a request schema, also when a response uses it too.
+// request body is a request schema. One that a response uses too (common.Money
+// under a filter and under a balance) is split: the request side gets a copy
+// named "<name>Request" carrying the nullable marks, the original stays a
+// response schema with exact `required`, so that a client generator does not
+// type every response amount as nullable because a request somewhere may omit it.
 
 // field is one struct field of the Thrift sources.
 type field struct {
@@ -108,8 +113,12 @@ func Required(top *yaml.Node, structs map[string][]field) {
 		return
 	}
 	request := requestSchemas(top, schemas)
+	original := splitShared(top, schemas, request)
 	for i := 0; i+1 < len(schemas.Content); i += 2 {
 		name, schema := schemas.Content[i].Value, schemas.Content[i+1]
+		if o, ok := original[name]; ok {
+			name = o
+		}
 		fields, ok := lookup(structs, name)
 		props := mapGet(schema, "properties")
 		if !ok || len(fields) == 0 || props == nil || mapGet(schema, "required") != nil {
@@ -122,9 +131,9 @@ func Required(top *yaml.Node, structs map[string][]field) {
 				continue
 			}
 			switch {
-			case request[name] && requiredOnRequest(name, f):
+			case request[schemas.Content[i].Value] && requiredOnRequest(name, f):
 				seq.Content = append(seq.Content, scalar(f.name))
-			case request[name]:
+			case request[schemas.Content[i].Value]:
 				setNullable(p)
 			case f.kind != "optional":
 				seq.Content = append(seq.Content, scalar(f.name))
@@ -214,6 +223,112 @@ func setNullable(p *yaml.Node) {
 // requestSchemas returns the names of the schemas reachable from any
 // operation's requestBody, through $ref, transitively.
 func requestSchemas(top, schemas *yaml.Node) map[string]bool {
+	return reachable(top, schemas, "requestBody")
+}
+
+// responseSchemas returns the names of the schemas reachable from any
+// operation's responses, through $ref, transitively.
+func responseSchemas(top, schemas *yaml.Node) map[string]bool {
+	return reachable(top, schemas, "responses")
+}
+
+// splitShared gives every schema that both a request and a response reach a
+// request-side copy named "<name>Request" (a longer suffix when that name is
+// taken): the copy is appended to schemas, every $ref on the request side
+// (request bodies, request-only schemas, the copies themselves) is pointed at
+// it, request is updated to hold the copies instead of the originals, and the
+// map from copy name to original name is returned, for the Thrift lookup.
+// 请求和响应共用的结构体拆成两份：请求侧用 "<名>Request" 副本（标 nullable），原 schema 只服务响应（精确的 required）。
+func splitShared(top, schemas *yaml.Node, request map[string]bool) map[string]string {
+	response := responseSchemas(top, schemas)
+	rename := map[string]string{}
+	for name := range request {
+		if !response[name] {
+			continue
+		}
+		c := name + "Request"
+		for mapGet(schemas, c) != nil {
+			c += "_"
+		}
+		rename[name] = c
+	}
+	if len(rename) == 0 {
+		return nil
+	}
+	if paths := mapGet(top, "paths"); paths != nil {
+		for i := 0; i+1 < len(paths.Content); i += 2 {
+			ops := paths.Content[i+1]
+			for j := 0; j+1 < len(ops.Content); j += 2 {
+				if rb := mapGet(ops.Content[j+1], "requestBody"); rb != nil {
+					rewriteRefs(rb, rename)
+				}
+			}
+		}
+	}
+	for name := range request {
+		if _, shared := rename[name]; !shared {
+			if s := mapGet(schemas, name); s != nil {
+				rewriteRefs(s, rename)
+			}
+		}
+	}
+	original := map[string]string{}
+	names := make([]string, 0, len(rename))
+	for name := range rename {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		c := copyNode(mapGet(schemas, name))
+		rewriteRefs(c, rename)
+		schemas.Content = append(schemas.Content, scalar(rename[name]), c)
+		original[rename[name]] = name
+		delete(request, name)
+		request[rename[name]] = true
+	}
+	return original
+}
+
+// rewriteRefs points every $ref below n at the renamed schema.
+func rewriteRefs(n *yaml.Node, rename map[string]string) {
+	switch n.Kind {
+	case yaml.MappingNode:
+		for i := 0; i+1 < len(n.Content); i += 2 {
+			v := n.Content[i+1]
+			if n.Content[i].Value == "$ref" && strings.HasPrefix(v.Value, schemaRefPrefix) {
+				if to, ok := rename[strings.TrimPrefix(v.Value, schemaRefPrefix)]; ok {
+					v.Value = schemaRefPrefix + to
+				}
+				continue
+			}
+			rewriteRefs(v, rename)
+		}
+	case yaml.SequenceNode, yaml.DocumentNode:
+		for _, c := range n.Content {
+			rewriteRefs(c, rename)
+		}
+	}
+}
+
+// copyNode is a deep copy of a yaml node.
+func copyNode(n *yaml.Node) *yaml.Node {
+	if n == nil {
+		return nil
+	}
+	c := *n
+	c.Content = make([]*yaml.Node, len(n.Content))
+	for i, x := range n.Content {
+		c.Content[i] = copyNode(x)
+	}
+	if n.Alias != nil {
+		c.Alias = copyNode(n.Alias)
+	}
+	return &c
+}
+
+// reachable returns the names of the schemas reachable from the given member
+// (requestBody or responses) of any operation, through $ref, transitively.
+func reachable(top, schemas *yaml.Node, member string) map[string]bool {
 	seen := map[string]bool{}
 	paths := mapGet(top, "paths")
 	if paths == nil {
@@ -223,7 +338,7 @@ func requestSchemas(top, schemas *yaml.Node) map[string]bool {
 	for i := 0; i+1 < len(paths.Content); i += 2 {
 		ops := paths.Content[i+1]
 		for j := 0; j+1 < len(ops.Content); j += 2 {
-			if rb := mapGet(ops.Content[j+1], "requestBody"); rb != nil {
+			if rb := mapGet(ops.Content[j+1], member); rb != nil {
 				stack = append(stack, refsIn(rb)...)
 			}
 		}

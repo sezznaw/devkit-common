@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -52,7 +53,7 @@ func TestRequiredRequestAndResponse(t *testing.T) {
 	dir := t.TempDir()
 	os.MkdirAll(filepath.Join(dir, "member"), 0o755)
 	os.MkdirAll(filepath.Join(dir, "common"), 0o755)
-	os.WriteFile(filepath.Join(dir, "common", "common.thrift"), []byte("namespace go common\n\nstruct PageReq {\n    1: i32 page\n    2: i32 page_size\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "common", "common.thrift"), []byte("namespace go common\n\nstruct PageReq {\n    1: i32 page\n    2: i32 page_size\n}\nstruct Money {\n    1: string amount\n    2: string currency\n}\n"), 0o644)
 	os.WriteFile(filepath.Join(dir, "member", "member.thrift"), []byte(`namespace go member
 
 struct ListReq {
@@ -62,16 +63,18 @@ struct ListReq {
     4: i32 kind (api.body="kind", api.vd="$>=0 && $<=3")
     5: optional i64 role_id (api.body="role_id", api.vd="$>0")
     6: required string tenant (api.body="tenant")
+    7: common.Money min_balance (api.body="min_balance")
 }
 struct MemberInfo {
     1: i64 uid
     2: string username
     3: optional i32 status
+    4: common.Money balance
 }
 struct Empty {}
 `), 0o644)
 	structs := structFields(dir)
-	if got := structs["member.ListReq"]; len(got) != 6 || got[2].vd != "len($)>0 && len($)<=32" || got[4].kind != "optional" || got[5].kind != "required" {
+	if got := structs["member.ListReq"]; len(got) != 7 || got[2].vd != "len($)>0 && len($)<=32" || got[4].kind != "optional" || got[5].kind != "required" {
 		t.Fatalf("fields = %+v", got)
 	}
 	doc := `openapi: 3.0.3
@@ -104,6 +107,13 @@ components:
         kind: {type: integer}
         role_id: {type: integer}
         tenant: {type: string}
+        min_balance:
+          $ref: '#/components/schemas/member.Money'
+    member.Money:
+      type: object
+      properties:
+        amount: {type: string}
+        currency: {type: string}
     member.PageReq:
       type: object
       properties:
@@ -115,6 +125,8 @@ components:
         uid: {type: integer}
         username: {type: string}
         status: {type: integer}
+        balance:
+          $ref: '#/components/schemas/member.Money'
     member.Empty:
       type: object
 `
@@ -137,6 +149,23 @@ components:
 		t.Fatal(err)
 	}
 	s := d.Components.Schemas
+	// Money is under a filter (request) and under a balance (response): the request side gets its own
+	// copy with the nullable marks, the response schema keeps exact required fields.
+	if got := s["member.Money"].Required; strings.Join(got, ",") != "amount,currency" {
+		t.Errorf("response Money required = %v, want amount,currency\n%s", got, out)
+	}
+	if _, ok := s["member.Money"].Properties["amount"]["nullable"]; ok {
+		t.Errorf("response Money must not be nullable\n%s", out)
+	}
+	if req, ok := s["member.MoneyRequest"]; !ok || req.Properties["amount"]["nullable"] != true || len(req.Required) != 0 {
+		t.Errorf("request copy of Money missing or not nullable: %+v\n%s", req, out)
+	}
+	if ref := fmt.Sprint(s["member.ListReqBody"].Properties["min_balance"]["allOf"]); !strings.Contains(ref, "#/components/schemas/member.MoneyRequest") {
+		t.Errorf("request ref must point at MoneyRequest, got %s\n%s", ref, out)
+	}
+	if ref := s["member.MemberInfo"].Properties["balance"]["$ref"]; ref != "#/components/schemas/member.Money" {
+		t.Errorf("response ref must stay at Money, got %v\n%s", ref, out)
+	}
 	if got := s["member.ListReqBody"].Required; strings.Join(got, ",") != "username,tenant" {
 		t.Errorf("request required = %v, want username,tenant\n%s", got, out)
 	}
@@ -159,8 +188,8 @@ components:
 	if s["member.PageReq"].Properties["page"]["nullable"] != true {
 		t.Errorf("PageReq.page is not nullable")
 	}
-	if got := s["member.MemberInfo"].Required; strings.Join(got, ",") != "uid,username" {
-		t.Errorf("response required = %v, want uid,username", got)
+	if got := s["member.MemberInfo"].Required; strings.Join(got, ",") != "uid,username,balance" {
+		t.Errorf("response required = %v, want uid,username,balance", got)
 	}
 	if _, ok := s["member.MemberInfo"].Properties["status"]["nullable"]; ok {
 		t.Errorf("response fields are not marked nullable")

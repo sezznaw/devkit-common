@@ -528,7 +528,7 @@ CloudWeGo 的 `thrift-gen-http-swagger` 插件生成，然后合并（schema 名
 `/docs`（Scalar 文档页，"Send request" 直接打本服务）。
 
 方法的 IDL 返回类型就是数据结构体；apidoc 给每个响应包上网关要加的 `{code, msg, data}` 壳（见下一节），返回 `common.Empty` 的方法合成一个 200，
-响应结构体里没写 `optional` 的字段标成 `required`（Go 一定会序列化它们）；请求结构体（从 requestBody 能引用到的 schema）只把网关真会拒绝缺失的字段标成 `required`：thrift 写了 `required` 的，或 `api.vd` 规则不接受零值的（apidoc 用 `$` 取空值把表达式算一遍，如 `len($)>0`、`$>=1 && $<=2`；`len($)<=64`、`$>=0` 这类接受零值的不算），其余请求字段标 `nullable: true`，因为 Hertz 把缺失和 null 都绑定成零值、当作没传；读不懂的表达式按 required 处理并在 stderr 提示。文档的 info.description 末尾会附上这条约定，让按文档验收的人看得到。`// @limit` 写成 `x-rate-limit`，`// @maxbody` 写成 `x-max-body`，`// @sensitive` 写成 `x-sensitive`（响应含明文个人信息的接口：审计只记请求不记响应），`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。
+响应结构体里没写 `optional` 的字段标成 `required`（Go 一定会序列化它们）；请求结构体（从 requestBody 能引用到的 schema）只把网关真会拒绝缺失的字段标成 `required`：thrift 写了 `required` 的，或 `api.vd` 规则不接受零值的（apidoc 用 `$` 取空值把表达式算一遍，如 `len($)>0`、`$>=1 && $<=2`；`len($)<=64`、`$>=0` 这类接受零值的不算），其余请求字段标 `nullable: true`，因为 Hertz 把缺失和 null 都绑定成零值、当作没传；读不懂的表达式按 required 处理并在 stderr 提示。请求和响应共用的结构体（如 `common.Money` 既在筛选条件里又在余额里）拆成两份：请求侧引用 `<名>Request` 副本（带 nullable），原 schema 只服务响应、required 按 Go 一定会序列化的字段写，这样前端生成器不会因为某个请求可以不传金额就把所有响应里的金额都当成可空。文档的 info.description 末尾会附上这条约定，让按文档验收的人看得到。`// @limit` 写成 `x-rate-limit`，`// @maxbody` 写成 `x-max-body`，`// @sensitive` 写成 `x-sensitive`（响应含明文个人信息的接口：审计只记请求不记响应），`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。
 IDL 里方法和字段的注释就是文档说明：方法注释的第一句是接口标题，其余是说明。`// @docs` 行（`// @docs title: ...`、`// @docs description: ...`、`// @docs tag member: 会员`）
 放在一个没有 `service` 的文件里，约定叫 `docs.thrift`；`@public`、`@perm`、`@audit`、`@limit` 从全部文件读。接口按路径第二段 `/v1/<领域>/...` 分组，`/ping` 归到"系统"。
 local 和 dev 开，生产关。
