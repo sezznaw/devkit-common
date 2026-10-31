@@ -689,6 +689,23 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   `c.Set(deviceCtxKey)` because `RequestLog` runs before and logs after. `ServeDocs`
   patches the served OpenAPI (yaml.Node, order kept) with the header parameters, since
   apidoc does not see the configuration; the docs page sends the first type by default.
+- `client.edges` (v0.77.0, sportsbook TY-282, 2026-10-31): the client IP behind CDNs. The
+  owner's requirement is that the origin never judges trust by the source address (CDN
+  ranges go stale, several CDNs and many domains are coming): each CDN *sets* a key header
+  and a client-IP header on the way to the origin, `kitexx.EdgeSet` (compiled from
+  `ClientConfig.Edges`, errors at start: short / shared / missing key, bad names) matches
+  the key in constant time, and `hertzx.ClientIP(trusted, edges)` takes the IP from that
+  edge's header, falling back to the X-Forwarded-For rule. `edgeOf` memoises the outcome in
+  the RequestContext (`edgeCtxKey`) because several middlewares ask `c.ClientIP()`.
+  `hertzx.Edge(trusted, edges)` (after RequestLog, before Guard) counts
+  `http_edge_requests_total{edge,result}`, warns, deletes the key header, refuses with
+  403 / 1011 under `required` (framework paths exempt) and sets the ClientIP function on
+  the request itself, because `engine.ServeHTTP` (ut.PerformRequest, testx) never installs
+  the engine's function, only `Serve` does: without that line the middleware would see
+  Hertz's default (leftmost X-Forwarded-For) in every in-process test. A valid key with a
+  bad IP header is refused too (fail closed). `peer_cidrs` only count and warn
+  (`peer_outside`), never refuse. The webhookx listener installs the same pair so a key
+  never reaches the callback archive. Tests: `hertzx/edge_test.go`, `kitexx/client_test.go`.
 - `authx` (v0.25.0; owner's design decisions 2026-10-08: a dedicated
   ser-auth, authentication for every realm, authorization elsewhere; members
   single-session, no guest login; access 15m, refresh 30d): HS256 JWT with

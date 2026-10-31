@@ -42,8 +42,15 @@ func Server(rt *kitexx.Runtime) *server.Hertz {
 	if err != nil {
 		panic(err)
 	}
-	h.SetClientIPFunc(hertzx.ClientIP(trusted))
+	edges, err := rt.Config.Client.EdgeSet()
+	if err != nil {
+		panic(err)
+	}
+	h.SetClientIPFunc(hertzx.ClientIP(trusted, edges))
 	h.Use(hertzx.Tracing(), hertzx.Metrics(), hertzx.RequestLog(), hertzx.Recovery())
+	if edges.Enabled() {
+		h.Use(hertzx.Edge(trusted, edges)) // the key header never reaches the archive
+	}
 	if prev, loaded := servers.LoadOrStore(rt, h); loaded {
 		return prev.(*server.Hertz)
 	}

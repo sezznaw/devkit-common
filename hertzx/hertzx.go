@@ -81,13 +81,23 @@ func New(rt *kitexx.Runtime, opts ...hconfig.Option) (*server.Hertz, error) {
 	if err != nil {
 		return nil, err
 	}
-	h.SetClientIPFunc(ClientIP(trusted))
+	edges, err := cfg.Client.EdgeSet()
+	if err != nil {
+		return nil, err
+	}
+	h.SetClientIPFunc(ClientIP(trusted, edges))
 	// CORS first: a preflight is answered before the login check sees it.
 	if cfg.CORS.Enabled {
 		h.Use(CORS(cfg.CORS))
 		zlog.Info("cors on", zlog.Any("allowed_origins", cfg.CORS.AllowedOrigins))
 	}
 	h.Use(Tracing(), DevTag(cfg.DevRoute), Metrics(), RequestLog(), Recovery())
+	// The edges after the request log (a refusal is a record) and before
+	// the guard (a request from an edge is counted by its real address).
+	if edges.Enabled() {
+		h.Use(Edge(trusted, edges))
+		zlog.Info("edges on", zlog.Any("edges", edges.Names()), zlog.Any("required", edges.Required), zlog.Str("key_header", edges.KeyHeader), zlog.Str("ip_header", edges.IPHeader))
+	}
 	// The guard after the request log, so a refused request is a record
 	// too; before the login check, so guessing passwords is limited.
 	debug := time.Duration(0)
@@ -294,6 +304,9 @@ func RequestLog() app.HandlerFunc {
 		fields := []zlog.Field{zlog.Int("status", status), zlog.Dur("latency", time.Since(start)), zlog.Str("client", c.ClientIP())}
 		if d := c.GetString(deviceCtxKey); d != "" {
 			fields = append(fields, zlog.Str("device", d))
+		}
+		if e := c.GetString(edgeNameCtxKey); e != "" {
+			fields = append(fields, zlog.Str("edge", e))
 		}
 		switch {
 		case status >= 500:

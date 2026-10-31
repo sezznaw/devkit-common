@@ -46,7 +46,7 @@ var deviceIDRe = regexp.MustCompile(`^[A-Za-z0-9._:-]{1,128}$`)
 func Client(cfg kitexx.ClientConfig) app.HandlerFunc {
 	d := cfg.Device
 	return func(ctx context.Context, c *app.RequestContext) {
-		cl := kitexx.Client{IP: c.ClientIP()}
+		cl := kitexx.Client{IP: c.ClientIP(), Edge: c.GetString(edgeNameCtxKey)}
 		framework := isFrameworkPath(string(c.Path()))
 		if d.Enabled() {
 			raw := strings.TrimSpace(string(c.GetHeader(DeviceHeader)))

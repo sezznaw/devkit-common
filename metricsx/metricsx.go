@@ -109,6 +109,9 @@ var (
 	HTTPRequestsRejected = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "http_requests_rejected_total", Help: "Requests the gateway's guard refused, by reason: rate_limit (429), timeout (504), body_too_large (413).",
 	}, []string{"reason"})
+	HTTPEdgeRequests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
+		Name: "http_edge_requests_total", Help: "Requests by the edge (CDN, client.edges) that vouched for them and the result: ok, peer_outside (valid key, connection outside the edge's ranges), bad_ip (valid key, unusable IP header), bad_key (unknown key), none (no key: judged by the connection).",
+	}, []string{"edge", "result"})
 	AuditEntriesDropped = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "audit_entries_dropped_total", Help: "Audit entries a gateway lost, by reason: queue_full, closed, store_error, store_down.",
 	}, []string{"reason"})

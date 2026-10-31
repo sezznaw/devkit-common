@@ -23,7 +23,7 @@ func TestClientIP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	resolve := ClientIP(trusted)
+	resolve := ClientIP(trusted, nil)
 	traefik := &net.TCPAddr{IP: net.ParseIP("10.42.0.7"), Port: 5000}
 	cases := []struct {
 		name string
