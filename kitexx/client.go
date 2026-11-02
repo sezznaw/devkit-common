@@ -165,8 +165,8 @@ func parseCIDRs(field string, list []string) ([]*net.IPNet, error) {
 type EdgesConfig struct {
 	Required bool `yaml:"required"`
 	// KeyHeader is the request header the edges put their key in; default
-	// X-Edge-Key. IPHeader is where they put the client address; default
-	// X-Edge-Client-IP. An edge that cannot write a variable into a header
+	// X-CDN-Key. IPHeader is where they put the client address; default
+	// X-CDN-Client-IP. An edge that cannot write a variable into a header
 	// of our name overrides IPHeader in its own entry.
 	KeyHeader string       `yaml:"key_header"`
 	IPHeader  string       `yaml:"ip_header"`
@@ -227,10 +227,12 @@ func (e *EdgeSet) Names() []string {
 	return out
 }
 
-// Default header names of client.edges.
+// Default header names of client.edges. They were X-Edge-* until v0.77.1:
+// CloudFront refuses to set a custom origin header named X-Edge-*, X-Amz-* or
+// X-Real-Ip (its own), and the CDNs known to us reserve nothing under X-CDN-.
 const (
-	DefaultEdgeKeyHeader = "X-Edge-Key"
-	DefaultEdgeIPHeader  = "X-Edge-Client-IP"
+	DefaultEdgeKeyHeader = "X-CDN-Key"
+	DefaultEdgeIPHeader  = "X-CDN-Client-IP"
 	// EdgeKeyMinBytes is the shortest key accepted: a short one is guessable.
 	EdgeKeyMinBytes = 16
 )
@@ -255,6 +257,9 @@ func (c ClientConfig) EdgeSet() (*EdgeSet, error) {
 	for _, h := range []string{out.KeyHeader, out.IPHeader} {
 		if !validHeaderName(h) {
 			return nil, fmt.Errorf("client.edges: %q is not a header name", h)
+		}
+		if why := edgeHeaderUnsettable(h); why != "" {
+			return nil, fmt.Errorf("client.edges: header %q: %s", h, why)
 		}
 	}
 	if strings.EqualFold(out.KeyHeader, out.IPHeader) {
@@ -325,6 +330,22 @@ func (e *EdgeSet) Match(presented []byte) (EdgeRule, bool) {
 		}
 	}
 	return found, ok == 1
+}
+
+// edgeHeaderUnsettable says why no CDN should be asked to set header h: the
+// key header and the shared IP header are headers *we* make the CDNs write,
+// so a name one CDN refuses to write is no use (CloudFront, 2026-11-02:
+// "The parameter HeaderName : X-Edge-Key is not allowed"). An edge's own
+// ip_header is not checked: it names a header that edge writes by itself.
+func edgeHeaderUnsettable(h string) string {
+	l := strings.ToLower(h)
+	switch {
+	case strings.HasPrefix(l, "x-edge-"), strings.HasPrefix(l, "x-amz-"), l == "x-real-ip":
+		return "CloudFront cannot set it (reserved name); use another, such as X-CDN-Key / X-CDN-Client-IP"
+	case strings.HasPrefix(l, "cf-"), strings.HasPrefix(l, "cloudfront-"), strings.HasPrefix(l, "x-forwarded-"), l == "host", l == "via":
+		return "a CDN or proxy writes that header itself; it cannot carry our key or IP"
+	}
+	return ""
 }
 
 // validHeaderName accepts an HTTP token: no spaces, separators or control characters.

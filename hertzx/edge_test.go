@@ -51,18 +51,18 @@ func TestClientIPEdge(t *testing.T) {
 		hdrs []hdr
 		want string
 	}{
-		{"cloudflare key: the edge's IP, not the connection", traefik, []hdr{{"X-Edge-Key", cfKey}, {"X-Edge-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "61.28.141.85"},
-		{"cloudfront key: its own header, ip:port", traefik, []hdr{{"X-Edge-Key", awsKey}, {"CloudFront-Viewer-Address", "61.28.141.85:40312"}, {"X-Forwarded-For", "95.40.203.136"}}, "61.28.141.85"},
-		{"cloudfront previous key during a rotation", traefik, []hdr{{"X-Edge-Key", awsOld}, {"CloudFront-Viewer-Address", "[2001:db8::1]:40312"}}, "2001:db8::1"},
-		{"IPv4 mapped in IPv6 comes out as IPv4", traefik, []hdr{{"X-Edge-Key", cfKey}, {"X-Edge-Client-IP", "::ffff:61.28.141.85"}}, "61.28.141.85"},
-		{"wrong key: judged by the connection", traefik, []hdr{{"X-Edge-Key", "not-a-key-but-long-enough-xxxx"}, {"X-Edge-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
-		{"key of one edge, IP header of the other: unusable", traefik, []hdr{{"X-Edge-Key", cfKey}, {"CloudFront-Viewer-Address", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
-		{"two IP headers: the edge did not replace the client's", traefik, []hdr{{"X-Edge-Key", cfKey}, {"X-Edge-Client-IP", "1.2.3.4"}, {"X-Edge-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
-		{"two key headers: same", traefik, []hdr{{"X-Edge-Key", cfKey}, {"X-Edge-Key", cfKey}, {"X-Edge-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
-		{"IP header that is not an address", traefik, []hdr{{"X-Edge-Key", cfKey}, {"X-Edge-Client-IP", "unknown"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
-		{"IP header unspecified", traefik, []hdr{{"X-Edge-Key", cfKey}, {"X-Edge-Client-IP", "0.0.0.0"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
-		{"a client on the internet forging both headers without a key", internet, []hdr{{"X-Edge-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "61.28.141.85"}}, "203.0.113.9"},
-		{"a direct connection with a valid key still takes the header (the network keeps keys away from the internet)", internet, []hdr{{"X-Edge-Key", cfKey}, {"X-Edge-Client-IP", "61.28.141.85"}}, "61.28.141.85"},
+		{"cloudflare key: the edge's IP, not the connection", traefik, []hdr{{"X-CDN-Key", cfKey}, {"X-CDN-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "61.28.141.85"},
+		{"cloudfront key: its own header, ip:port", traefik, []hdr{{"X-CDN-Key", awsKey}, {"CloudFront-Viewer-Address", "61.28.141.85:40312"}, {"X-Forwarded-For", "95.40.203.136"}}, "61.28.141.85"},
+		{"cloudfront previous key during a rotation", traefik, []hdr{{"X-CDN-Key", awsOld}, {"CloudFront-Viewer-Address", "[2001:db8::1]:40312"}}, "2001:db8::1"},
+		{"IPv4 mapped in IPv6 comes out as IPv4", traefik, []hdr{{"X-CDN-Key", cfKey}, {"X-CDN-Client-IP", "::ffff:61.28.141.85"}}, "61.28.141.85"},
+		{"wrong key: judged by the connection", traefik, []hdr{{"X-CDN-Key", "not-a-key-but-long-enough-xxxx"}, {"X-CDN-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
+		{"key of one edge, IP header of the other: unusable", traefik, []hdr{{"X-CDN-Key", cfKey}, {"CloudFront-Viewer-Address", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
+		{"two IP headers: the edge did not replace the client's", traefik, []hdr{{"X-CDN-Key", cfKey}, {"X-CDN-Client-IP", "1.2.3.4"}, {"X-CDN-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
+		{"two key headers: same", traefik, []hdr{{"X-CDN-Key", cfKey}, {"X-CDN-Key", cfKey}, {"X-CDN-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
+		{"IP header that is not an address", traefik, []hdr{{"X-CDN-Key", cfKey}, {"X-CDN-Client-IP", "unknown"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
+		{"IP header unspecified", traefik, []hdr{{"X-CDN-Key", cfKey}, {"X-CDN-Client-IP", "0.0.0.0"}, {"X-Forwarded-For", "95.40.203.136"}}, "95.40.203.136"},
+		{"a client on the internet forging both headers without a key", internet, []hdr{{"X-CDN-Client-IP", "61.28.141.85"}, {"X-Forwarded-For", "61.28.141.85"}}, "203.0.113.9"},
+		{"a direct connection with a valid key still takes the header (the network keeps keys away from the internet)", internet, []hdr{{"X-CDN-Key", cfKey}, {"X-CDN-Client-IP", "61.28.141.85"}}, "61.28.141.85"},
 		{"no edge headers at all", traefik, []hdr{{"X-Forwarded-For", "203.0.113.9"}}, "203.0.113.9"},
 	}
 	for _, c := range cases {
@@ -82,8 +82,8 @@ func TestClientIPEdge(t *testing.T) {
 	plain := ClientIP(trusted, nil)
 	ctx := app.NewContext(0)
 	ctx.SetConn(peerConn{addr: traefik})
-	ctx.Request.Header.Add("X-Edge-Key", cfKey)
-	ctx.Request.Header.Add("X-Edge-Client-IP", "61.28.141.85")
+	ctx.Request.Header.Add("X-CDN-Key", cfKey)
+	ctx.Request.Header.Add("X-CDN-Client-IP", "61.28.141.85")
 	ctx.Request.Header.Add("X-Forwarded-For", "95.40.203.136")
 	if got := plain(ctx); got != "95.40.203.136" {
 		t.Fatalf("without edges: got %s", got)
@@ -100,7 +100,7 @@ func edgeServer(t *testing.T, required bool) (*server.Hertz, *kitexx.Client, *bo
 	h.Use(RequestLog(), Edge(trusted, edges), Client(kitexx.ClientConfig{}))
 	h.POST("/v1/x", func(ctx context.Context, c *app.RequestContext) {
 		*seen = kitexx.ClientOf(ctx)
-		*keyLeaked = len(c.Request.Header.Peek("X-Edge-Key")) > 0
+		*keyLeaked = len(c.Request.Header.Peek("X-CDN-Key")) > 0
 		c.String(200, "ok")
 	})
 	h.GET("/ping", func(ctx context.Context, c *app.RequestContext) { c.String(200, "pong") })
@@ -118,7 +118,7 @@ func TestEdgeMiddleware(t *testing.T) {
 	refusedBefore := testutil.ToFloat64(metricsx.HTTPRequestsRejected.WithLabelValues("not_via_edge"))
 
 	// through an edge: served, the edge's IP and name in the context, the key gone
-	w := ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-Edge-Key", cfKey), hd("X-Edge-Client-IP", "61.28.141.85"), hd("X-Forwarded-For", "10.42.3.3"))
+	w := ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-CDN-Key", cfKey), hd("X-CDN-Client-IP", "61.28.141.85"), hd("X-Forwarded-For", "10.42.3.3"))
 	if w.Code != 200 || w.Body.String() != "ok" {
 		t.Fatalf("via edge: %d %s", w.Code, w.Body.String())
 	}
@@ -150,7 +150,7 @@ func TestEdgeMiddleware(t *testing.T) {
 		t.Fatalf("refusal counted %v", got)
 	}
 	// a wrong key is refused too and warned about
-	w = ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-Edge-Key", "guess-guess-guess-guess-guess"), hd("X-Edge-Client-IP", "61.28.141.85"))
+	w = ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-CDN-Key", "guess-guess-guess-guess-guess"), hd("X-CDN-Client-IP", "61.28.141.85"))
 	if w.Code != 403 {
 		t.Fatalf("bad key: %d", w.Code)
 	}
@@ -161,7 +161,7 @@ func TestEdgeMiddleware(t *testing.T) {
 		t.Fatalf("no warning for a bad key: %s", buf.String())
 	}
 	// a valid key with an unusable IP header is refused: fail closed
-	w = ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-Edge-Key", cfKey), hd("X-Edge-Client-IP", "nope"))
+	w = ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-CDN-Key", cfKey), hd("X-CDN-Client-IP", "nope"))
 	if w.Code != 403 {
 		t.Fatalf("bad ip: %d", w.Code)
 	}
@@ -170,7 +170,7 @@ func TestEdgeMiddleware(t *testing.T) {
 		t.Fatalf("ping: %d %s", w.Code, w.Body.String())
 	}
 	// a connection outside the edge's ranges is served and counted
-	w = ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-Edge-Key", cfKey), hd("X-Edge-Client-IP", "61.28.141.85"), hd("X-Forwarded-For", "198.51.100.7"))
+	w = ut.PerformRequest(h.Engine, "POST", "/v1/x", nil, hd("X-CDN-Key", cfKey), hd("X-CDN-Client-IP", "61.28.141.85"), hd("X-Forwarded-For", "198.51.100.7"))
 	if w.Code != 200 || seen.IP != "61.28.141.85" {
 		t.Fatalf("peer outside: %d %+v", w.Code, *seen)
 	}

@@ -52,10 +52,10 @@ func TestEdgeSet(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !e.Enabled() || e.KeyHeader != "X-Edge-Key" || e.IPHeader != "X-Edge-Client-IP" || len(e.List) != 2 {
+	if !e.Enabled() || e.KeyHeader != "X-CDN-Key" || e.IPHeader != "X-CDN-Client-IP" || len(e.List) != 2 {
 		t.Fatalf("compiled: %+v", e)
 	}
-	if len(e.List[0].Keys) != 1 || e.List[0].IPHeader != "X-Edge-Client-IP" || e.List[1].IPHeader != "CloudFront-Viewer-Address" || len(e.List[1].Peers) != 2 {
+	if len(e.List[0].Keys) != 1 || e.List[0].IPHeader != "X-CDN-Client-IP" || e.List[1].IPHeader != "CloudFront-Viewer-Address" || len(e.List[1].Peers) != 2 {
 		t.Fatalf("entries: %+v", e.List)
 	}
 	if x, ok := e.Match([]byte("cloudfront-key-0123456789abcdef")); !ok || x.Name != "cloudfront" {
@@ -83,8 +83,11 @@ func TestEdgeSet(t *testing.T) {
 		"bad cidr":                func(c *ClientConfig) { c.Edges.List[1].PeerCIDRs = []string{"13.32.0.0/15", "nope"} },
 		"bad header name":         func(c *ClientConfig) { c.Edges.KeyHeader = "X Edge Key" },
 		"bad ip header name":      func(c *ClientConfig) { c.Edges.List[0].IPHeader = "bad:header" },
-		"same header twice":       func(c *ClientConfig) { c.Edges.IPHeader = "x-edge-key" },
-		"ip header is the key":    func(c *ClientConfig) { c.Edges.List[0].IPHeader = "X-Edge-Key" },
+		"same header twice":       func(c *ClientConfig) { c.Edges.IPHeader = "x-cdn-key" },
+		"cloudfront reserved key": func(c *ClientConfig) { c.Edges.KeyHeader = "X-Edge-Key" },
+		"cloudfront reserved ip":  func(c *ClientConfig) { c.Edges.IPHeader = "X-Real-Ip" },
+		"cdn's own header as key": func(c *ClientConfig) { c.Edges.KeyHeader = "CF-Connecting-IP" },
+		"ip header is the key":    func(c *ClientConfig) { c.Edges.List[0].IPHeader = "X-CDN-Key" },
 	}
 	for name, mutate := range bad {
 		c := good()

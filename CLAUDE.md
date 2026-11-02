@@ -706,6 +706,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   bad IP header is refused too (fail closed). `peer_cidrs` only count and warn
   (`peer_outside`), never refuse. The webhookx listener installs the same pair so a key
   never reaches the callback archive. Tests: `hertzx/edge_test.go`, `kitexx/client_test.go`.
+  v0.77.1 (2026-11-02): the default header names became `X-CDN-Key` / `X-CDN-Client-IP`, because
+  CloudFront refuses custom origin headers named `X-Edge-*`, `X-Amz-*` or `X-Real-Ip` ("HeaderName :
+  X-Edge-Key is not allowed" at CreateDistribution); `edgeHeaderUnsettable` makes `EdgeSet` refuse
+  those names, and names a CDN writes itself (`CF-*`, `CloudFront-*`, `X-Forwarded-*`), for the key
+  header and the shared IP header. An edge's own `ip_header` is not checked.
 - `authx` (v0.25.0; owner's design decisions 2026-10-08: a dedicated
   ser-auth, authentication for every realm, authorization elsewhere; members
   single-session, no guest login; access 15m, refresh 30d): HS256 JWT with
