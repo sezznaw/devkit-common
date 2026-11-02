@@ -88,9 +88,18 @@ func TestGateway(t *testing.T) {
 	}))
 	defer srv.Close()
 	t.Setenv(BaseURLEnv, srv.URL)
+	SetDefaultHeaders(map[string]string{"X-CDN-Key": "k", "X-CDN-Client-IP": "127.0.0.1"})
+	defer SetDefaultHeaders(nil)
 	g := NewGateway("http://127.0.0.1:1")
 	if g.BaseURL != srv.URL {
 		t.Fatal("env wins")
+	}
+	if g.Headers["X-CDN-Key"] != "k" || g.Headers["X-CDN-Client-IP"] != "127.0.0.1" {
+		t.Fatalf("default headers not copied: %v", g.Headers)
+	}
+	g.Headers["X-Device-Type"] = "PC"
+	if NewGateway("").Headers["X-Device-Type"] != "" {
+		t.Fatal("a Gateway's headers leaked into the defaults")
 	}
 	if b, err := g.Get(context.Background(), "/ping"); err != nil || string(b) != "pong" {
 		t.Fatalf("ping %s %v", b, err)

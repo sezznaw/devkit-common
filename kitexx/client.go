@@ -215,6 +215,24 @@ type EdgeRule struct {
 // Enabled says whether any edge is configured.
 func (e *EdgeSet) Enabled() bool { return e != nil && len(e.List) > 0 }
 
+// SelfHeaders are the headers a check run inside the deployment (the
+// verify Job, VERIFY_BASE_URL = the Service) presents to come in as the
+// first edge: its key, and a loopback address in that edge's IP header.
+// The origin cannot tell the release's own check from an outsider, and must
+// not; the check holds the same secret the CDN holds. Nil when no edge has
+// a key.
+func (e *EdgeSet) SelfHeaders() map[string]string {
+	if e == nil {
+		return nil
+	}
+	for _, x := range e.List {
+		if len(x.Keys) > 0 {
+			return map[string]string{e.KeyHeader: string(x.Keys[0]), x.IPHeader: "127.0.0.1"}
+		}
+	}
+	return nil
+}
+
 // Names lists the edges, for the start-up record.
 func (e *EdgeSet) Names() []string {
 	if e == nil {

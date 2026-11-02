@@ -71,6 +71,19 @@ func TestEdgeSet(t *testing.T) {
 	if err != nil || empty.Enabled() || (*EdgeSet)(nil).Enabled() {
 		t.Fatalf("nothing configured: %+v %v", empty, err)
 	}
+	if h := empty.SelfHeaders(); h != nil {
+		t.Fatalf("no edge, no self headers: %v", h)
+	}
+	if h := (*EdgeSet)(nil).SelfHeaders(); h != nil {
+		t.Fatalf("nil set, no self headers: %v", h)
+	}
+	ok, err := good().EdgeSet()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if h := ok.SelfHeaders(); len(h) != 2 || h[ok.KeyHeader] != string(ok.List[0].Keys[0]) || h[ok.List[0].IPHeader] != "127.0.0.1" {
+		t.Fatalf("self headers: %v", h)
+	}
 
 	bad := map[string]func(c *ClientConfig){
 		"required without edges":  func(c *ClientConfig) { c.Edges.List, c.Edges.Required = nil, true },

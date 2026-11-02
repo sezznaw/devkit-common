@@ -31,6 +31,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/sezznaw/devkit-common/zlog"
@@ -131,14 +132,40 @@ type Gateway struct {
 	client  *http.Client
 }
 
+var defaultHeaders atomic.Pointer[map[string]string]
+
+// SetDefaultHeaders sets the headers every Gateway made afterwards starts
+// with. kitexx.NewRuntime sets the first edge's key and IP header when
+// client.edges is configured (app/verify.go makes its Gateway after that):
+// a check inside the deployment has no CDN in front of it, and
+// client.edges.required would otherwise refuse it with 403 / 1011.
+func SetDefaultHeaders(h map[string]string) {
+	if len(h) == 0 {
+		defaultHeaders.Store(nil)
+		return
+	}
+	c := make(map[string]string, len(h))
+	for k, v := range h {
+		c[k] = v
+	}
+	defaultHeaders.Store(&c)
+}
+
 // NewGateway reads VERIFY_BASE_URL, else uses fallback (e.g.
-// "http://127.0.0.1:8080").
+// "http://127.0.0.1:8080"). Headers starts as a copy of SetDefaultHeaders.
 func NewGateway(fallback string) *Gateway {
 	base := strings.TrimRight(os.Getenv(BaseURLEnv), "/")
 	if base == "" {
 		base = strings.TrimRight(fallback, "/")
 	}
-	return &Gateway{BaseURL: base, client: &http.Client{Timeout: 15 * time.Second}}
+	g := &Gateway{BaseURL: base, client: &http.Client{Timeout: 15 * time.Second}}
+	if d := defaultHeaders.Load(); d != nil {
+		g.Headers = make(map[string]string, len(*d))
+		for k, v := range *d {
+			g.Headers[k] = v
+		}
+	}
+	return g
 }
 
 // Envelope is a gateway answer.

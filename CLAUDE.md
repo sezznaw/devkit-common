@@ -711,6 +711,11 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   X-Edge-Key is not allowed" at CreateDistribution); `edgeHeaderUnsettable` makes `EdgeSet` refuse
   those names, and names a CDN writes itself (`CF-*`, `CloudFront-*`, `X-Forwarded-*`), for the key
   header and the shared IP header. An edge's own `ip_header` is not checked.
+  v0.77.2 (same day): the verify Job's checks call the gateway through the Service, with no
+  CDN in front, so under `required` every business path answered 403 / 1011 and the ArgoCD
+  PostSync hook never passed (seen on ser-api's `version` check). `NewRuntime` now calls
+  `verifyx.SetDefaultHeaders(edges.SelfHeaders())` (the first edge's key, loopback in its IP
+  header) and `verifyx.NewGateway` starts from those defaults; app/verify.go changes nothing.
 - `authx` (v0.25.0; owner's design decisions 2026-10-08: a dedicated
   ser-auth, authentication for every realm, authorization elsewhere; members
   single-session, no guest login; access 15m, refresh 30d): HS256 JWT with

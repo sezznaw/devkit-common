@@ -26,6 +26,7 @@ import (
 	"github.com/sezznaw/devkit-common/redisx"
 	"github.com/sezznaw/devkit-common/s3x"
 	"github.com/sezznaw/devkit-common/starrocksx"
+	"github.com/sezznaw/devkit-common/verifyx"
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
@@ -101,6 +102,12 @@ func NewRuntime(cfg Config) (*Runtime, error) {
 		return nil, err
 	}
 	rt := &Runtime{Config: cfg}
+	if edges, err := cfg.Client.EdgeSet(); err == nil && edges.Enabled() {
+		// The release's own verify Job reaches the gateway inside the
+		// deployment, with no CDN in between; it presents the first edge's
+		// key so that client.edges.required (fail closed) does not refuse it.
+		verifyx.SetDefaultHeaders(edges.SelfHeaders())
+	}
 	rt.serveMetrics()
 	if err := rt.openMySQL(); err != nil {
 		return nil, err
