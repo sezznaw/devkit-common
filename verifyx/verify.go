@@ -152,20 +152,16 @@ func SetDefaultHeaders(h map[string]string) {
 }
 
 // NewGateway reads VERIFY_BASE_URL, else uses fallback (e.g.
-// "http://127.0.0.1:8080"). Headers starts as a copy of SetDefaultHeaders.
+// "http://127.0.0.1:8080"). The default headers (SetDefaultHeaders) are
+// applied underneath Headers at request time, so a service that assigns
+// `gw.Headers = map[string]string{...}` (every gateway's app/verify.go
+// does, for X-Device-Type) does not lose them.
 func NewGateway(fallback string) *Gateway {
 	base := strings.TrimRight(os.Getenv(BaseURLEnv), "/")
 	if base == "" {
 		base = strings.TrimRight(fallback, "/")
 	}
-	g := &Gateway{BaseURL: base, client: &http.Client{Timeout: 15 * time.Second}}
-	if d := defaultHeaders.Load(); d != nil {
-		g.Headers = make(map[string]string, len(*d))
-		for k, v := range *d {
-			g.Headers[k] = v
-		}
-	}
-	return g
+	return &Gateway{BaseURL: base, client: &http.Client{Timeout: 15 * time.Second}}
 }
 
 // Envelope is a gateway answer.
@@ -216,6 +212,11 @@ func (g *Gateway) Post(ctx context.Context, path string, body any) (*Envelope, e
 }
 
 func (g *Gateway) setHeaders(req *http.Request) {
+	if d := defaultHeaders.Load(); d != nil {
+		for k, v := range *d {
+			req.Header.Set(k, v)
+		}
+	}
 	for k, v := range g.Headers {
 		req.Header.Set(k, v)
 	}

@@ -70,7 +70,9 @@ func TestRunRetries(t *testing.T) {
 }
 
 func TestGateway(t *testing.T) {
+	var seen http.Header
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seen = r.Header.Clone()
 		switch r.URL.Path {
 		case "/ping":
 			w.Write([]byte("pong"))
@@ -94,12 +96,15 @@ func TestGateway(t *testing.T) {
 	if g.BaseURL != srv.URL {
 		t.Fatal("env wins")
 	}
-	if g.Headers["X-CDN-Key"] != "k" || g.Headers["X-CDN-Client-IP"] != "127.0.0.1" {
-		t.Fatalf("default headers not copied: %v", g.Headers)
+	// What every gateway's app/verify.go does: assigns Headers wholesale.
+	// The defaults must still go out underneath, and Headers win on a clash.
+	g.Headers = map[string]string{"X-Device-Type": "PC", "X-CDN-Client-IP": "10.0.0.9"}
+	seen = nil
+	if _, err := g.Get(context.Background(), "/ping"); err != nil {
+		t.Fatal(err)
 	}
-	g.Headers["X-Device-Type"] = "PC"
-	if NewGateway("").Headers["X-Device-Type"] != "" {
-		t.Fatal("a Gateway's headers leaked into the defaults")
+	if seen.Get("X-CDN-Key") != "k" || seen.Get("X-CDN-Client-IP") != "10.0.0.9" || seen.Get("X-Device-Type") != "PC" {
+		t.Fatalf("headers on the wire: %v", seen)
 	}
 	if b, err := g.Get(context.Background(), "/ping"); err != nil || string(b) != "pong" {
 		t.Fatalf("ping %s %v", b, err)

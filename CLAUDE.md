@@ -715,7 +715,10 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   CDN in front, so under `required` every business path answered 403 / 1011 and the ArgoCD
   PostSync hook never passed (seen on ser-api's `version` check). `NewRuntime` now calls
   `verifyx.SetDefaultHeaders(edges.SelfHeaders())` (the first edge's key, loopback in its IP
-  header) and `verifyx.NewGateway` starts from those defaults; app/verify.go changes nothing.
+  header) and `Gateway.setHeaders` writes those defaults underneath `Headers` on every request
+  (v0.77.3; v0.77.2 copied them into `Headers`, which every gateway's app/verify.go then
+  replaced wholesale with `gw.Headers = map[string]string{X-Device-Type: ...}`, so the fix never
+  reached the wire). app/verify.go changes nothing.
 - `authx` (v0.25.0; owner's design decisions 2026-10-08: a dedicated
   ser-auth, authentication for every realm, authorization elsewhere; members
   single-session, no guest login; access 15m, refresh 30d): HS256 JWT with
