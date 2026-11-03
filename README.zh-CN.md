@@ -540,7 +540,9 @@ local 和 dev 开，生产关。
 网关方法的 IDL 返回类型就是数据结构体（没有数据用 `common.Empty`）；handler 以 `hertzx.OK(c, &data)`（`hertzx.OK(c, &common.Empty{})` 回没有 `data` 的壳）
 或 `hertzx.Fail(ctx, c, err)` 结束：`kerrors.BizStatusError` 变成它的 code 和 msg，其他错误连 trace 记日志并回 5001。网关自己定的码用 `hertzx.FailCode(c, code, msg)`；
 `hertzx.CodeOf(ctx, err) (int32, string)` 是 `Fail` 用的那套映射，给只想拿码、不想在这里应答的 handler。`{code, msg, data}` 的壳只在这里加一次，IDL 里不写，
-`devkit lint` 的 `no-envelope`、`envelope-write` 守着。
+`devkit lint` 的 `no-envelope`、`envelope-write` 守着。业务失败 HTTP 是 200、前端看 code；例外是登录态：`Fail` / `FailCode` 回 1004、1005 时 HTTP 是 401，
+和 `RequireLogin` 的回法一样（RPC 透传上来的也是，如 ser-auth 的 Refresh 在会话被吊销后回的 1005），1005 带 `data.reason`：取服务放在错误 extra 里的 `reason`
+（`kerrors.NewBizStatusErrorWithExtra(code, errcode.Message(code), map[string]string{"reason": authx.RevokeReason(err)})`），没给就是空串。
 
 列表请求带 `common.PageReq {page, page_size}`，响应在 `items` 旁边带 `common.PageInfo {page, page_size, total}`（`idl/common/common.thrift`）；
 `page, size, offset := pagex.Normalize(req.Page)` 统一默认值（第 1 页、每页 20、最多 100），默认值只在这一处。lint 规则 `paging` 拦裸的 `page` / `page_size` / `total` 字段。

@@ -49,3 +49,47 @@ func TestEnvelope(t *testing.T) {
 }
 
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
+
+// TY-108: a 1004 / 1005 relayed from an RPC (ser-auth's Refresh after the
+// account was deleted) is HTTP 401 like RequireLogin's, 1005 with data.reason.
+func TestLoginStateIs401(t *testing.T) {
+	h := server.Default()
+	h.GET("/revoked", func(ctx context.Context, c *app.RequestContext) {
+		Fail(ctx, c, kerrors.NewBizStatusErrorWithExtra(1005, "会话已失效", map[string]string{"reason": "deleted"}))
+	})
+	h.GET("/revoked-bare", func(ctx context.Context, c *app.RequestContext) {
+		Fail(ctx, c, kerrors.NewBizStatusError(1005, "会话已失效"))
+	})
+	h.GET("/unauth", func(ctx context.Context, c *app.RequestContext) {
+		Fail(ctx, c, kerrors.NewBizStatusError(1004, "未登录"))
+	})
+	h.GET("/unauth-mine", func(ctx context.Context, c *app.RequestContext) { FailCode(c, 1004, "未登录") })
+	h.GET("/refresh-invalid", func(ctx context.Context, c *app.RequestContext) {
+		Fail(ctx, c, kerrors.NewBizStatusError(1006, "刷新令牌无效"))
+	})
+	cases := []struct {
+		path   string
+		status int
+		want   string
+	}{
+		{"/revoked", 401, `{"code":1005,"msg":"会话已失效","data":{"reason":"deleted"}}`},
+		{"/revoked-bare", 401, `{"code":1005,"msg":"会话已失效","data":{"reason":""}}`},
+		{"/unauth", 401, `{"code":1004,"msg":"未登录"}`},
+		{"/unauth-mine", 401, `{"code":1004,"msg":"未登录"}`},
+		{"/refresh-invalid", 200, `{"code":1006,"msg":"刷新令牌无效"}`},
+	}
+	for _, tc := range cases {
+		res := ut.PerformRequest(h.Engine, "GET", tc.path, nil).Result()
+		if res.StatusCode() != tc.status {
+			t.Fatalf("%s: status %d want %d", tc.path, res.StatusCode(), tc.status)
+		}
+		var got, exp any
+		if err := json.Unmarshal(res.Body(), &got); err != nil {
+			t.Fatalf("%s: %v: %s", tc.path, err, res.Body())
+		}
+		_ = json.Unmarshal([]byte(tc.want), &exp)
+		if string(mustJSON(got)) != string(mustJSON(exp)) {
+			t.Fatalf("%s: got %s want %s", tc.path, res.Body(), tc.want)
+		}
+	}
+}

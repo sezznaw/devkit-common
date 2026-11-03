@@ -15,10 +15,14 @@ import (
 // Envelope is what every gateway endpoint answers: {code, msg, data}. The
 // IDL does not spell it out; a method returns its data struct and the
 // handler ends with OK or Fail, which add the envelope once, here. HTTP
-// status stays 200 for a business failure; the client looks at code.
+// status stays 200 for a business failure; the client looks at code. The
+// exception is the login state: 1004 and 1005 are HTTP 401 wherever they
+// come from (RequireLogin, or an RPC such as ser-auth's Refresh), because
+// the front end starts "refresh or log in again" on the 401.
 //
 // 每个网关接口的响应壳。IDL 里不写它：方法返回数据结构体，handler 以 OK 或 Fail 结束，
-// 壳在这里加一次。业务失败 HTTP 仍是 200，客户端看 code。
+// 壳在这里加一次。业务失败 HTTP 仍是 200，客户端看 code；例外是登录态：1004、1005 不管来自
+// RequireLogin 还是 RPC（如 ser-auth 的 Refresh）都是 HTTP 401，前端靠 401 走「换令牌或重新登录」。
 type Envelope struct {
 	Code int32  `json:"code"`
 	Msg  string `json:"msg"`
@@ -66,14 +70,45 @@ func isEmptyStruct(v any) bool {
 // (kerrors.NewBizStatusError in the service) goes through as its code and
 // msg; anything else is logged with the request's trace and answered as
 // 5001, because the client can do nothing with a transport error's text.
+//
+// 1004 / 1005 answer HTTP 401 like RequireLogin does, and 1005 carries
+// data.reason the same way: the reason the service put in the error's extra
+// under "reason" (ser-auth passes authx.RevokeReason), "" when it gave none.
 func Fail(ctx context.Context, c *app.RequestContext, err error) {
 	code, msg := CodeOf(ctx, err)
-	c.JSON(consts.StatusOK, &Envelope{Code: code, Msg: msg})
+	env := &Envelope{Code: code, Msg: msg}
+	if code == CodeSessionRevoked {
+		env.Data = map[string]string{"reason": bizExtra(err)["reason"]}
+	}
+	c.JSON(statusOf(code), env)
 }
 
-// FailCode answers a business failure the gateway decides itself.
+// FailCode answers a business failure the gateway decides itself (1004 /
+// 1005 as HTTP 401, like Fail).
 func FailCode(c *app.RequestContext, code int32, msg string) {
-	c.JSON(consts.StatusOK, &Envelope{Code: code, Msg: msg})
+	c.JSON(statusOf(code), &Envelope{Code: code, Msg: msg})
+}
+
+// statusOf is the HTTP status of a business code: 401 for the login state
+// (1004, 1005), so an answer relayed from an RPC looks the same as one from
+// RequireLogin; 200 for everything else.
+func statusOf(code int32) int {
+	if code == CodeUnauthenticated || code == CodeSessionRevoked {
+		return consts.StatusUnauthorized
+	}
+	return consts.StatusOK
+}
+
+// bizExtra is the extra map of a business error, nil when there is none.
+func bizExtra(err error) map[string]string {
+	var biz kerrors.BizStatusErrorIface
+	if errors.As(err, &biz) {
+		return biz.BizExtra()
+	}
+	if b, ok := kerrors.FromBizStatusError(err); ok {
+		return b.BizExtra()
+	}
+	return nil
 }
 
 // CodeOf is Fail's translation without the answer: the business code and
