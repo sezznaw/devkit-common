@@ -792,8 +792,10 @@ msg, anything else is logged with the trace and answered as 5001.
 handler that needs the code without answering. The envelope `{code, msg, data}`
 is added there, once; the IDL never spells it out and `devkit lint`
 (`no-envelope`, `envelope-write`) keeps it that way. A business failure is
-HTTP 200 and the client reads code, except the login state: `Fail` /
-`FailCode` answer 1004 and 1005 as HTTP 401, like `RequireLogin` does, also
+HTTP 200 and the client reads code, except the codes the framework's middleware answers with a status: `Fail` /
+`FailCode` answer 1004 and 1005 as HTTP 401 and 1007 as HTTP 403, like
+`RequireLogin` / `RequirePermission` do (a relayed callers.rules refusal,
+`CheckMemberUID` or `RequireRealm` 1007 too), also
 when an RPC relays them (ser-auth's Refresh of a revoked session), and 1005
 carries `data.reason` from the error's extra `reason`
 (`kerrors.NewBizStatusErrorWithExtra(code, errcode.Message(code),

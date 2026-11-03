@@ -51,8 +51,9 @@ func TestEnvelope(t *testing.T) {
 func mustJSON(v any) []byte { b, _ := json.Marshal(v); return b }
 
 // TY-108: a 1004 / 1005 relayed from an RPC (ser-auth's Refresh after the
-// account was deleted) is HTTP 401 like RequireLogin's, 1005 with data.reason.
-func TestLoginStateIs401(t *testing.T) {
+// account was deleted) is HTTP 401 like RequireLogin's, 1005 with data.reason;
+// a relayed 1007 is HTTP 403 like RequirePermission's.
+func TestFrameworkCodesKeepTheirStatus(t *testing.T) {
 	h := server.Default()
 	h.GET("/revoked", func(ctx context.Context, c *app.RequestContext) {
 		Fail(ctx, c, kerrors.NewBizStatusErrorWithExtra(1005, "会话已失效", map[string]string{"reason": "deleted"}))
@@ -64,6 +65,10 @@ func TestLoginStateIs401(t *testing.T) {
 		Fail(ctx, c, kerrors.NewBizStatusError(1004, "未登录"))
 	})
 	h.GET("/unauth-mine", func(ctx context.Context, c *app.RequestContext) { FailCode(c, 1004, "未登录") })
+	h.GET("/forbidden", func(ctx context.Context, c *app.RequestContext) {
+		Fail(ctx, c, kerrors.NewBizStatusError(1007, "ser-x may not call Y"))
+	})
+	h.GET("/forbidden-mine", func(ctx context.Context, c *app.RequestContext) { FailCode(c, 1007, "没有权限") })
 	h.GET("/refresh-invalid", func(ctx context.Context, c *app.RequestContext) {
 		Fail(ctx, c, kerrors.NewBizStatusError(1006, "刷新令牌无效"))
 	})
@@ -76,6 +81,8 @@ func TestLoginStateIs401(t *testing.T) {
 		{"/revoked-bare", 401, `{"code":1005,"msg":"会话已失效","data":{"reason":""}}`},
 		{"/unauth", 401, `{"code":1004,"msg":"未登录"}`},
 		{"/unauth-mine", 401, `{"code":1004,"msg":"未登录"}`},
+		{"/forbidden", 403, `{"code":1007,"msg":"ser-x may not call Y"}`},
+		{"/forbidden-mine", 403, `{"code":1007,"msg":"没有权限"}`},
 		{"/refresh-invalid", 200, `{"code":1006,"msg":"刷新令牌无效"}`},
 	}
 	for _, tc := range cases {

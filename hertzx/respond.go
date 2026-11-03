@@ -16,13 +16,16 @@ import (
 // IDL does not spell it out; a method returns its data struct and the
 // handler ends with OK or Fail, which add the envelope once, here. HTTP
 // status stays 200 for a business failure; the client looks at code. The
-// exception is the login state: 1004 and 1005 are HTTP 401 wherever they
-// come from (RequireLogin, or an RPC such as ser-auth's Refresh), because
-// the front end starts "refresh or log in again" on the 401.
+// exceptions are the codes the framework's own middleware answers with a
+// status: 1004 and 1005 are HTTP 401 and 1007 is HTTP 403 wherever they come
+// from (RequireLogin / RequirePermission, or an RPC: ser-auth's Refresh of a
+// revoked session, a callers.rules refusal, CheckMemberUID, RequireRealm),
+// so one code always comes with one status.
 //
 // 每个网关接口的响应壳。IDL 里不写它：方法返回数据结构体，handler 以 OK 或 Fail 结束，
-// 壳在这里加一次。业务失败 HTTP 仍是 200，客户端看 code；例外是登录态：1004、1005 不管来自
-// RequireLogin 还是 RPC（如 ser-auth 的 Refresh）都是 HTTP 401，前端靠 401 走「换令牌或重新登录」。
+// 壳在这里加一次。业务失败 HTTP 仍是 200，客户端看 code；例外是框架中间件自己带状态回的码：1004、1005
+// 是 HTTP 401，1007 是 HTTP 403，不管来自中间件还是 RPC（ser-auth Refresh 遇到吊销的会话、callers.rules
+// 拒绝、CheckMemberUID、RequireRealm），同一个码永远同一个状态。
 type Envelope struct {
 	Code int32  `json:"code"`
 	Msg  string `json:"msg"`
@@ -71,7 +74,8 @@ func isEmptyStruct(v any) bool {
 // msg; anything else is logged with the request's trace and answered as
 // 5001, because the client can do nothing with a transport error's text.
 //
-// 1004 / 1005 answer HTTP 401 like RequireLogin does, and 1005 carries
+// 1004 / 1005 answer HTTP 401 like RequireLogin does and 1007 HTTP 403 like
+// RequirePermission does; 1005 carries
 // data.reason the same way: the reason the service put in the error's extra
 // under "reason" (ser-auth passes authx.RevokeReason), "" when it gave none.
 func Fail(ctx context.Context, c *app.RequestContext, err error) {
@@ -84,17 +88,20 @@ func Fail(ctx context.Context, c *app.RequestContext, err error) {
 }
 
 // FailCode answers a business failure the gateway decides itself (1004 /
-// 1005 as HTTP 401, like Fail).
+// 1005 as HTTP 401 and 1007 as HTTP 403, like Fail).
 func FailCode(c *app.RequestContext, code int32, msg string) {
 	c.JSON(statusOf(code), &Envelope{Code: code, Msg: msg})
 }
 
 // statusOf is the HTTP status of a business code: 401 for the login state
-// (1004, 1005), so an answer relayed from an RPC looks the same as one from
-// RequireLogin; 200 for everything else.
+// (1004, 1005), 403 for 1007, so an answer relayed from an RPC looks the
+// same as one from RequireLogin / RequirePermission; 200 for everything else.
 func statusOf(code int32) int {
-	if code == CodeUnauthenticated || code == CodeSessionRevoked {
+	switch code {
+	case CodeUnauthenticated, CodeSessionRevoked:
 		return consts.StatusUnauthorized
+	case CodeForbidden:
+		return consts.StatusForbidden
 	}
 	return consts.StatusOK
 }
