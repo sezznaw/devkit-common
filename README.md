@@ -21,7 +21,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `otelx`   | tracing (OpenTelemetry): set up from the `otel:` section by `kitexx`/`hertzx`, every RPC, HTTP call, SQL, Redis command and Kafka message is a span; nothing to call directly |
 | `nacosx`  | Nacos: registration and discovery, configuration that refreshes itself while the program runs, everything logged through zlog; see below |
 | `kafkax`  | the event bus (Redpanda): `Publish` wraps the envelope and carries the trace, `Subscribe` handlers are run by the framework once the server is up, failures retried then parked in `<topic>.dlq`; see below |
-| `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` signs the client's JWT; see below |
+| `centrifugox` | push (Centrifugo): `Publish` to a channel, `ConnectionToken` / `ConnectionTokenChannels` sign the client's JWT; see below |
 | `authx`   | the login state: one authentication service issues access (JWT, 15m) and refresh (30d, rotated, replay detected) tokens per realm (member, admin, agent, or one a project adds) with sessions in Redis; every gateway verifies its realm's tokens locally plus one Redis read and puts the identity into the context (`kitexx.UID(ctx)`, carried over RPC); `hertzx.RequireLogin` protects every endpoint not marked `// @public` in the IDL; see below |
 | `s3x`     | object storage (SeaweedFS on dev, any S3 later) from the `s3:` section: `rt.S3.Put/Get/Stat/List/Delete`, presigned download and upload URLs, a public bucket (`rt.S3.Public()`, plain `URL(key)` per object), every file under the service's own prefix; the database stores keys, never URLs; source static or the deployment's datasource row; every call a span and a metric; see below |
 | `httpx`   | calls to external HTTP APIs (resty + otelhttp): providers listed under `providers:` with base URL, timeout, retries and headers from the environment; `rt.Provider("odds-feed").GetJSON(ctx, path, &out)`; trace carried on, one log record per call without secrets, metrics; a service with providers must run in the provider namespace; see below |
@@ -521,10 +521,20 @@ names. The client is `rt.Centrifugo`.
 - `rt.Centrifugo.UserChannel(uid)` is the channel of one member (`user:<uid>`); use it instead of formatting the string
 - `rt.Centrifugo.Publish(ctx, "user:42", data)`: to the clients subscribed
   to that channel; a span of the trace
-- `rt.Centrifugo.ConnectionToken("42")`: the JWT a logged-in client connects
+- `rt.Centrifugo.ConnectionToken("42")`: the JWT a logged-in member connects
   with (HS256, `token_ttl` default 24h), returned by the gateway with the
   login; Centrifugo then knows who the connection is, and a service can push
-  to `user:<id>`
+  to `user:<id>`. The token always carries `user:<uid>` first, then the extra
+  channels given (`ConnectionToken("42", "content:"+tenant)` also gets the
+  member the broadcasts)
+- `rt.Centrifugo.ConnectionTokenChannels(subject, channels...)`: a token with
+  exactly the channels listed, no `user:` added. For connections that are not
+  members, such as agents: an agent's numeric id may collide with a member's,
+  and `ConnectionToken` would subscribe the agent to the member's `user:`
+  channel. Centrifugo treats the subject as the user everywhere (presence,
+  disconnecting a user, per-user connection limits), so give a non-member a
+  subject that cannot be a member's, `agent:42` rather than the bare id:
+  `ConnectionTokenChannels("agent:"+uid, "agent:"+uid, "agent_content:"+tenant)`
 - `History(ctx, channel, n)`: the last messages of a channel (when the
   namespace keeps history), for tests and reconnecting clients
 

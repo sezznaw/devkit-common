@@ -166,19 +166,42 @@ func (c *Client) History(ctx context.Context, channel string, limit int) ([]json
 
 // ConnectionToken signs the JWT a client presents when it connects: its
 // subject is the user id, so Centrifugo knows who it is and the service can
-// publish to "user:<id>". The gateway hands it to a logged-in client.
+// publish to "user:<id>". The gateway hands it to a logged-in client. The
+// token always subscribes its holder to the user's own channel
+// (UserChannel), then to extraChannels: the member gateway's method.
+//
+// 签会员的连接令牌：subject 是 uid，频道永远先带 `user:<uid>`，再加 extraChannels。
 func (c *Client) ConnectionToken(userID string, extraChannels ...string) (string, error) {
+	return c.ConnectionTokenChannels(userID, append([]string{c.UserChannel(userID)}, extraChannels...)...)
+}
+
+// ConnectionTokenChannels signs a connection JWT for subject that subscribes
+// its holder to exactly channels, nothing added: no "user:<subject>" unless
+// the caller lists it. For a connection that is not a member, for instance an
+// agent, whose numeric id may collide with a member's; such a connection
+// must not receive the member's "user:" channel. Centrifugo also treats the
+// subject as the user everywhere (presence, disconnecting a user, per-user
+// connection limits), so give a non-member a subject that cannot be a
+// member's, such as "agent:42", rather than the bare id.
+//
+// 按明确的频道列表签连接令牌，不自动加 `user:`：给代理这类不是会员的连接用（代理与会员的数字 uid 可能重叠，
+// 不能让代理订到会员的 `user:` 频道）。Centrifugo 把 subject 当用户身份用在各处（在线状态、按用户踢连接、
+// 每用户连接数），非会员的 subject 建议用 `agent:42` 这类不会和会员撞上的值，不要裸 uid。
+func (c *Client) ConnectionTokenChannels(subject string, channels ...string) (string, error) {
 	if len(c.secret) == 0 {
 		return "", fmt.Errorf("centrifugox: token_secret is not set; connection tokens cannot be signed")
+	}
+	if strings.TrimSpace(subject) == "" {
+		return "", fmt.Errorf("centrifugox: a connection token needs a subject")
 	}
 	now := time.Now()
 	tok := jwt.NewWithClaims(jwt.SigningMethodHS256, connectionClaims{
 		RegisteredClaims: jwt.RegisteredClaims{
-			Subject:   userID,
+			Subject:   subject,
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(c.ttl)),
 		},
-		Channels: append([]string{c.UserChannel(userID)}, extraChannels...),
+		Channels: append([]string(nil), channels...),
 	})
 	return tok.SignedString(c.secret)
 }

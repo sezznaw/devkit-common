@@ -105,6 +105,68 @@ func TestConnectionToken(t *testing.T) {
 	}
 }
 
+// ConnectionTokenChannels: exactly the channels given, no user: channel added;
+// the member method still forces user:<uid> first. An agent whose id collides
+// with a member's therefore never receives the member's channel.
+func TestConnectionTokenChannels(t *testing.T) {
+	zlogtest.Discard(t)
+	srv, _ := fakeCentrifugo(t)
+	c, err := Open(context.Background(), Target{APIAddr: srv.URL, TokenSecret: "secret"}, Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parse := func(tok string) connectionClaims {
+		claims := connectionClaims{}
+		parsed, err := jwt.ParseWithClaims(tok, &claims, func(*jwt.Token) (any, error) { return []byte("secret"), nil })
+		if err != nil || !parsed.Valid {
+			t.Fatalf("token: %v", err)
+		}
+		return claims
+	}
+	must := func(tok string, err error) string {
+		t.Helper()
+		if err != nil {
+			t.Fatal(err)
+		}
+		return tok
+	}
+	tok, err := c.ConnectionTokenChannels("agent:42", "agent:42", "agent_content:sp")
+	if err != nil {
+		t.Fatal(err)
+	}
+	claims := parse(tok)
+	if claims.Subject != "agent:42" || claims.ExpiresAt == nil {
+		t.Errorf("subject / expiry: %+v", claims)
+	}
+	if got := strings.Join(claims.Channels, ","); got != "agent:42,agent_content:sp" {
+		t.Errorf("channels must be exactly the list given, no user: added: %q", got)
+	}
+	for _, ch := range claims.Channels {
+		if strings.HasPrefix(ch, "user:") {
+			t.Errorf("a user: channel crept in: %v", claims.Channels)
+		}
+	}
+	// No channels at all is allowed (the client subscribes itself where the namespace lets it).
+	if claims := parse(must(c.ConnectionTokenChannels("42"))); len(claims.Channels) != 0 {
+		t.Errorf("no channels asked, got %v", claims.Channels)
+	}
+	// user: only when the caller lists it.
+	if claims := parse(must(c.ConnectionTokenChannels("42", "user:42"))); strings.Join(claims.Channels, ",") != "user:42" {
+		t.Errorf("explicit user: channel kept as given: %v", claims.Channels)
+	}
+	// The member method keeps its contract: user:<uid> first, extras after.
+	if claims := parse(must(c.ConnectionToken("42", "odds:live", "content:sp"))); strings.Join(claims.Channels, ",") != "user:42,odds:live,content:sp" {
+		t.Errorf("ConnectionToken: %v", claims.Channels)
+	}
+	if _, err := c.ConnectionTokenChannels("", "agent:1"); err == nil {
+		t.Error("an empty subject is refused")
+	}
+	none, _ := Open(context.Background(), Target{APIAddr: srv.URL, APIKey: "key"}, Config{})
+	if _, err := none.ConnectionTokenChannels("agent:42", "agent:42"); err == nil {
+		t.Error("without a secret no token")
+	}
+}
+
 // One key each: the signer (token secret only) never calls the server and
 // cannot publish; the publisher (API key only) cannot sign; neither is no client.
 func TestSplitKeys(t *testing.T) {

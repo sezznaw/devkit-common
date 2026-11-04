@@ -21,7 +21,7 @@ go get github.com/sezznaw/devkit-common@latest
 | `otelx`   | trace（OpenTelemetry）：`kitexx`/`hertzx` 按 `otel:` 段装好，每个 RPC、HTTP 调用、SQL、Redis 命令、Kafka 消息都是一个 span；不用直接调 |
 | `nacosx`  | Nacos：服务注册与发现、运行中自动刷新的配置，所有输出都走 zlog；详见下文 |
 | `kafkax`  | 事件总线（Redpanda）：`Publish` 自动填信封和 trace 头，`Subscribe` 的消费者由框架在服务起来后拉起，失败重试后进 `<主题>.dlq`；详见下文 |
-| `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` 给客户端签连接 JWT；详见下文 |
+| `centrifugox` | 推送（Centrifugo）：`Publish` 到频道，`ConnectionToken` / `ConnectionTokenChannels` 给客户端签连接 JWT；详见下文 |
 | `authx`   | 登录态：一个认证服务按领域（member、admin、agent，项目可自加如 finance_admin）签发 access（JWT，15 分钟）和 refresh（30 天，轮换、检测重放）令牌，会话在 Redis；每个网关本地校验自己领域的令牌加一次 Redis 读，把身份放进上下文（`kitexx.UID(ctx)`，随 RPC 透传）；`hertzx.RequireLogin` 保护 IDL 里没标 `// @public` 的所有接口；详见下文 |
 | `s3x`     | 对象存储（dev 是 SeaweedFS，以后可换任何 S3），按 `s3:` 配置：`rt.S3.Put/Get/Stat/List/Delete`、预签名下载和上传链接、公开桶 `rt.S3.Public()`（每个对象一个固定 `URL(key)`），所有文件在服务自己的前缀下；库里只存 key 不存 URL；source static 或本部署的数据源表；每次调用一个 span 和一条指标；详见下文 |
 | `httpx`   | 调外部 HTTP 接口（resty + otelhttp）：`providers:` 里登记 base URL、超时、重试、来自环境变量的头；`rt.Provider("odds-feed").GetJSON(ctx, path, &out)`；trace 带过去，每次调用一条不含密钥的日志，指标；有 providers 的服务必须部署在 provider namespace；详见下文 |
@@ -339,8 +339,13 @@ handler 一直失败的消息在 `<主题>.dlq` 里，错误在 header 里。`<�
 
 - `rt.Centrifugo.UserChannel(uid)`：一个会员的频道名（`user:<uid>`），用它、不要自己拼字串
 - `rt.Centrifugo.Publish(ctx, "user:42", data)`：推给订阅了这个频道的客户端，是 trace 里的一个 span
-- `rt.Centrifugo.ConnectionToken("42")`：给登录后的客户端签连接 JWT（HS256，`token_ttl` 默认 24h），
-  网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推
+- `rt.Centrifugo.ConnectionToken("42")`：给登录后的会员签连接 JWT（HS256，`token_ttl` 默认 24h），
+  网关在登录响应里返回；Centrifugo 据此知道连接是谁，服务就能往 `user:<id>` 推。令牌永远先带 `user:<uid>`，
+  再带传入的额外频道（`ConnectionToken("42", "content:"+tenant)` 让会员同时收广播）
+- `rt.Centrifugo.ConnectionTokenChannels(subject, channels...)`：按明确的频道列表签令牌，不自动加 `user:`。给代理这类
+  不是会员的连接用：代理与会员的数字 uid 可能重叠，用 `ConnectionToken` 会让代理订到会员的 `user:` 频道。Centrifugo
+  把 subject 当用户身份用在各处（在线状态、按用户踢连接、每用户连接数），非会员的 subject 用 `agent:42` 这类不会和会员
+  撞上的值，不要裸 uid：`ConnectionTokenChannels("agent:"+uid, "agent:"+uid, "agent_content:"+tenant)`
 - `History(ctx, channel, n)`：取频道最近的消息（命名空间开了 history 时），测试和断线重连用
 
 ### 用 `s3x` 存文件
