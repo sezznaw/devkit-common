@@ -247,7 +247,7 @@ GORM，GORM 改之前还会逐列再比一遍。字段没有显式 `type:` 直�
 框架自己的表（PublishTx 的 `outbox`、延时任务的 `delayed_task`）也由框架在开了对应功能时按同一规则建（`EnsureFrameworkTables`，
 `NewRuntime` 调），项目里不声明它们。
 
-测试：`testx.New(t, "ser-bet", testx.WithMySQL(""), testx.WithModels(mysql.Bet{}))`，一个干净的新库，框架表和本服务的表都在，
+测试：`testx.New(t, "ser-bet", testx.WithMySQL(""), testx.WithModels(mysql.Bet{}))`，一个空库（同一进程的测试依次复用，每个测试开始前清空），框架表和本服务的表都在，
 哪里都没有 SQL 迁移。
 
 ### 用 `redisx` 连 Redis，以及幂等请求
@@ -673,7 +673,7 @@ metrics:
 
 ### 用 `testx` 写测试
 
-handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个按项目 `*.up.sql` 迁移建出来、测完就删的库（测试结束时先关 `rt.DB` 的连接池再删库；v0.74.0以前连接池不关，每个测试留下最多 5 条空闲连接直到进程退出，`go test -count` 跑很多遍时会把本机 MySQL 的连接数打满，报 1040）。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`；绕过真实登录的路由测试用 `kitexx.WithIdentity` 塞身份）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
+handler 测试先建一个和框架交给 `app.Setup` 一样的 Runtime，底下是只活一个测试的设施：`rt := testx.New(t, "order", testx.WithMySQL(testx.MigrationsDir()), testx.WithTopics("events.order"))` 给出进程内 Redis（miniredis，`rt.MiniRedis` 可直接看）、进程内 Kafka（kfake）、记录推送内容的假 Centrifugo（`rt.Pushes()`、`rt.WaitPush(channel, timeout)`），加了 `WithMySQL` 还有一个测试开始时是空的库：没有数据、AUTO_INCREMENT 都从 1 开始，框架表和 `WithModels` 的表都在（测试结束时关掉 `rt.DB` 的连接池；v0.74.0以前连接池不关，每个测试留下最多 5 条空闲连接直到进程退出，`go test -count` 跑很多遍时会把本机 MySQL 的连接数打满，报 1040）。v0.79.0 起同一个进程的测试依次复用每个服务一个库，每个测试开始前清空（删数据、AUTO_INCREMENT 归 1，前一个测试删掉的表由随后的 AutoMigrate 补回来）：以前每个测试都建库建表，每张表几十次 fsync，一个 60 个测试的 handler 包就是 6 万次，在 CI 的盘上是几分钟的 I/O 等待。清空时也删掉测试建的触发器、视图、存储过程和事件（有测试用触发器让写入失败，以前靠删库带走）；测试改了它拿到的表（改列、删索引），测完就把共用库删掉，下一个测试从新库开始，而不是撞上 AutoMigrate 拒绝收窄。别的测试还占着它时（`t.Parallel`、同一个测试建第二个 Runtime）给一个测完就删的新库；带 SQL 迁移的测试（`WithMySQL(dir)`）也每次给新库，免得清空丢掉迁移里的种子数据；测表结构本身的测试（AutoMigrate、要求某张表还不存在、另一个测试里同名表的列不同）加 `testx.WithFreshDatabase()` 要一个自己的新库。进程退出时删不了自己的共用库，同一台机器上下一个测试进程会删掉进程已结束的那些（`test_<服务>_<主机>_p<pid>`）。库是唯一不在进程内的：来自 `MYSQL_TEST_DSN_ROOT`（模板 Makefile 指向本机一键环境，CI 指向 MySQL 服务容器），连不上就跳过而不是失败。然后 `h, _ := app.Setup(&app.Config{Config: rt.Config}, rt.Runtime)`，用 `testx.Ctx(uid)`（已登录会员；其他 realm 用 `CtxAs`；绕过真实登录的路由测试用 `kitexx.WithIdentity` 塞身份）调 handler。`rt.Start()` 跑服务器在 Setup 之后会跑的东西（订阅的消费者、outbox 转发器、延时任务轮询）；`rt.RunDue()` 不等时间直接执行到点的延时任务（先把 `run_at` 改到过去）；`rt.WaitEvent(topic, type, timeout)`、`rt.Events(topic, timeout)` 读主题里到了什么。网关用 `testx.Post(t, h, "/v1/x", body, testx.Bearer(token))`、`testx.Get` 进程内调路由，拿到解析好的响应壳（`MustCode(t, 200, 0)`、`Decode(t, &out)`）；`testx.From(ip)` 设 guard 计数用的客户端 IP。`devkit lint` 的 `tests` 规则提醒 handler 包一个测试都没有的服务。
 
 ### 用 `jobx` 写定时任务
 

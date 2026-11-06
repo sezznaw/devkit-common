@@ -39,7 +39,7 @@ type migUntyped struct {
 func (migUntyped) TableName() string { return "mig_untyped" }
 
 func TestAutoMigrateCreatesThenAddsColumnsAndIndexes(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
+	rt := testx.New(t, "ser-mig", testx.WithFreshDatabase()) // these tests are about the schema: a database of their own
 	m := rt.DB.Migrator()
 
 	if err := rt.AutoMigrate(migV1{}); err != nil {
@@ -69,7 +69,7 @@ func TestAutoMigrateCreatesThenAddsColumnsAndIndexes(t *testing.T) {
 }
 
 func TestAutoMigrateRefusesAFieldWithoutAType(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
+	rt := testx.New(t, "ser-mig", testx.WithFreshDatabase()) // these tests are about the schema: a database of their own
 	err := rt.AutoMigrate(migUntyped{})
 	if err == nil || !strings.Contains(err.Error(), "Amount") || !strings.Contains(err.Error(), "type") {
 		t.Fatalf("untyped field accepted: %v", err)
@@ -80,7 +80,7 @@ func TestAutoMigrateRefusesAFieldWithoutAType(t *testing.T) {
 }
 
 func TestAutoMigrateOffOnlyReports(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
+	rt := testx.New(t, "ser-mig", testx.WithFreshDatabase()) // these tests are about the schema: a database of their own
 	off := false
 	rt.Config.MySQL.AutoMigrate = &off
 	if err := rt.AutoMigrate(migV1{}); err != nil {
@@ -127,7 +127,7 @@ func columnOf(t *testing.T, rt *testx.Runtime, table, column string) (typ string
 }
 
 func TestAutoMigrateAltersAColumnButRefusesToNarrow(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
+	rt := testx.New(t, "ser-mig", testx.WithFreshDatabase()) // these tests are about the schema: a database of their own
 	if err := rt.AutoMigrate(migV2{}); err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +167,7 @@ func (c *countingLogger) Trace(context.Context, time.Time, func() (string, int64
 }
 
 func TestAutoMigrateNoChangeIsTwoQueriesAndNoLock(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
+	rt := testx.New(t, "ser-mig", testx.WithFreshDatabase()) // these tests are about the schema: a database of their own
 	if err := rt.AutoMigrate(migV2{}, migUntypedOK{}); err != nil {
 		t.Fatal(err)
 	}
@@ -224,7 +224,7 @@ func (migColBin) TableName() string { return "mig_collate" }
 // 类型标签里的 COLLATE 和列的排序规则比较并应用（GORM 自己的迁移器不看排序规则）：不分大小写的幂等键改成按字节比较。
 // 反方向拒绝，和收窄一样：放宽后 "R1" 和 "r1" 会在唯一索引里相撞。
 func TestAutoMigrateAppliesABinaryCollationAndRefusesALooserOne(t *testing.T) {
-	rt := testx.New(t, "ser-mig", testx.WithMySQL(""))
+	rt := testx.New(t, "ser-mig", testx.WithFreshDatabase()) // these tests are about the schema: a database of their own
 	if err := rt.AutoMigrate(migColCI{}); err != nil {
 		t.Fatal(err)
 	}
