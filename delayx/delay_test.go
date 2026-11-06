@@ -103,18 +103,24 @@ func TestScheduler(t *testing.T) {
 	s.Start(ctx)
 	defer s.Stop()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for ran.Load() < 2 && time.Now().Before(deadline) {
-		time.Sleep(20 * time.Millisecond)
-	}
+	// The handler counts a run before the scheduler writes its outcome, so
+	// ran reaching 2 does not mean both rows are done (read at that moment,
+	// A1 was still running with no attempt counted, often in CI's mysql
+	// job): wait for the rows themselves.
+	byKey := map[string]Task{}
+	poll(func() bool {
+		var rows []Task
+		if err := db.Order("id").Find(&rows).Error; err != nil {
+			t.Fatal(err)
+		}
+		clear(byKey)
+		for _, r := range rows {
+			byKey[r.Key] = r
+		}
+		return byKey["A1"].Status == StatusDone && byKey["STALE"].Status == StatusDone
+	})
 	if ran.Load() != 2 {
 		t.Fatalf("expected the committed and the stale task to run, ran=%d", ran.Load())
-	}
-	var rows []Task
-	db.Order("id").Find(&rows)
-	byKey := map[string]Task{}
-	for _, r := range rows {
-		byKey[r.Key] = r
 	}
 	if byKey["A1"].Status != StatusDone || byKey["A1"].Attempts != 1 {
 		t.Fatalf("A1: %+v", byKey["A1"])
@@ -160,13 +166,22 @@ func TestScheduler(t *testing.T) {
 
 func waitFor(t *testing.T, cond func() bool) {
 	t.Helper()
+	if !poll(cond) {
+		t.Fatal("condition not met in 5s")
+	}
+}
+
+// poll calls cond every 20ms until it holds or 5s have passed and says
+// whether it held; for a test whose own checks afterwards say what is wrong.
+func poll(cond func() bool) bool {
 	deadline := time.Now().Add(5 * time.Second)
 	for !cond() {
 		if time.Now().After(deadline) {
-			t.Fatal("condition not met in 5s")
+			return false
 		}
 		time.Sleep(20 * time.Millisecond)
 	}
+	return true
 }
 
 func TestBackoff(t *testing.T) {

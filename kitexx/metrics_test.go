@@ -19,12 +19,22 @@ func TestServerMetricsCountByCode(t *testing.T) {
 	i := 0
 	mw := ServerMetrics()(func(ctx context.Context, req, resp any) error { err := results[i]; i++; return err })
 	ctx := withRPCInfo(context.Background(), "user-m", "GetProfile", "gateway")
+	// the counters belong to the process (metricsx.Registry) and keep what
+	// an earlier run of this test added (-count=2): count from a baseline
+	count := func(code string) float64 {
+		return testutil.ToFloat64(metricsx.RPCServerRequests.WithLabelValues("user-m", "GetProfile", code))
+	}
+	want := map[string]float64{"ok": 1, "2001": 1, "error": 1}
+	before := map[string]float64{}
+	for code := range want {
+		before[code] = count(code)
+	}
 	for range results {
 		_ = mw(ctx, nil, nil)
 	}
-	for code, want := range map[string]float64{"ok": 1, "2001": 1, "error": 1} {
-		if got := testutil.ToFloat64(metricsx.RPCServerRequests.WithLabelValues("user-m", "GetProfile", code)); got != want {
-			t.Errorf("code %s: %v", code, got)
+	for code, n := range want {
+		if got := count(code) - before[code]; got != n {
+			t.Errorf("code %s: counted %v times, want %v", code, got, n)
 		}
 	}
 	if n := testutil.CollectAndCount(metricsx.RPCServerDuration, "rpc_server_duration_seconds"); n < 1 {
