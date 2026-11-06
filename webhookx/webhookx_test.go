@@ -132,17 +132,27 @@ func TestSourceCIDRBasicAndCustom(t *testing.T) {
 
 	rt2 := runtimeWith(t, httpx.Callback{Verify: httpx.CallbackVerify{Type: "custom"}})
 	h2 := server.New(server.WithDisablePrintRoute(true))
+	// The custom verifier sees the source address the listener resolved (Event.ClientIP), so a whitelist
+	// kept as data (a payment provider's, edited in the back office) can be judged there.
 	Handle(rt2, h2, "pay", "/cb", func(ctx context.Context, ev *Event) error { return nil },
 		WithVerifier(func(ev *Event) error {
 			if ev.Headers.Get("X-Token") != "t" {
 				return errors.New("bad token")
+			}
+			if ev.ClientIP != "203.0.113.7" {
+				return errors.New("source " + ev.ClientIP + " not in the provider's whitelist")
 			}
 			return nil
 		}))
 	if c := ut.PerformRequest(h2.Engine, "POST", "/cb", &ut.Body{Body: bytesReader("{}"), Len: 2}).Code; c != 401 {
 		t.Errorf("custom reject: %d", c)
 	}
-	if c := ut.PerformRequest(h2.Engine, "POST", "/cb", &ut.Body{Body: bytesReader("{}"), Len: 2}, ut.Header{Key: "X-Token", Value: "t"}).Code; c != 200 {
+	if c := ut.PerformRequest(h2.Engine, "POST", "/cb", &ut.Body{Body: bytesReader("{}"), Len: 2}, ut.Header{Key: "X-Token", Value: "t"},
+		ut.Header{Key: "X-Forwarded-For", Value: "198.51.100.9"}).Code; c != 401 {
+		t.Errorf("custom reject by source: %d", c)
+	}
+	if c := ut.PerformRequest(h2.Engine, "POST", "/cb", &ut.Body{Body: bytesReader("{}"), Len: 2}, ut.Header{Key: "X-Token", Value: "t"},
+		ut.Header{Key: "X-Forwarded-For", Value: "203.0.113.7"}).Code; c != 200 {
 		t.Errorf("custom accept: %d", c)
 	}
 	defer func() {

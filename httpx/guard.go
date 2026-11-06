@@ -3,8 +3,10 @@ package httpx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"syscall"
 	"time"
 
 	"github.com/sony/gobreaker/v2"
@@ -21,6 +23,37 @@ var ErrCircuitOpen = errors.New("httpx: circuit open, provider is failing")
 // ErrTooManyInFlight: more calls to the provider are in progress than
 // max_concurrent allows and the context ended before a slot came free.
 var ErrTooManyInFlight = errors.New("httpx: too many calls in flight to provider")
+
+// ErrPrivateHost: deny_private_hosts is on and the provider's address
+// resolved to a loopback, private, link-local, multicast or unspecified
+// address; nothing was sent.
+var ErrPrivateHost = errors.New("httpx: provider address is a private or local address")
+
+// denyPrivateHosts is the dialer's Control hook under deny_private_hosts:
+// it sees the resolved address of every connection, after DNS, so a public
+// name that points into the cluster is refused like a literal 10.x.
+func denyPrivateHosts(_, address string, _ syscall.RawConn) error {
+	host, _, err := net.SplitHostPort(address)
+	if err != nil {
+		return fmt.Errorf("%w: %q", ErrPrivateHost, address)
+	}
+	ip := net.ParseIP(host)
+	if ip == nil || isPrivateOrLocal(ip) {
+		return fmt.Errorf("%w: %s", ErrPrivateHost, host)
+	}
+	return nil
+}
+
+// cgnat is 100.64.0.0/10 (RFC 6598), which net.IP.IsPrivate does not cover.
+var cgnat = net.IPNet{IP: net.IPv4(100, 64, 0, 0), Mask: net.CIDRMask(10, 32)}
+
+func isPrivateOrLocal(ip net.IP) bool {
+	if v4 := ip.To4(); v4 != nil {
+		ip = v4
+	}
+	return ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
+		ip.IsInterfaceLocalMulticast() || ip.IsMulticast() || ip.IsUnspecified() || cgnat.Contains(ip)
+}
 
 // guard is the RoundTripper between resty and otelhttp: a semaphore for
 // max_concurrent and a circuit breaker. Every attempt (retries included)
@@ -107,9 +140,13 @@ func isNetworkError(err error) bool {
 // defaults keep 2 idle connections per host, which for a vendor polled
 // many times a second means a new TLS handshake for most calls.
 func newTransport(p Provider) *http.Transport {
+	dialer := &net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	if p.DenyPrivateHosts {
+		dialer.Control = denyPrivateHosts
+	}
 	t := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}).DialContext,
+		DialContext:           dialer.DialContext,
 		ForceAttemptHTTP2:     true,
 		MaxIdleConns:          200,
 		MaxIdleConnsPerHost:   100,

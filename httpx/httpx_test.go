@@ -122,6 +122,33 @@ func TestConnectionErrorIsReported(t *testing.T) {
 
 func ptr(i int) *int { return &i }
 
+// deny_private_hosts: a provider whose address resolves to a loopback / private / link-local address is
+// refused at the dialer (nothing sent); the same server is reached when the option is off.
+func TestDenyPrivateHosts(t *testing.T) {
+	zlogtest.Capture(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { _, _ = w.Write([]byte(`{"ok":true}`)) }))
+	defer srv.Close()
+	open, _ := New("open", Provider{BaseURL: srv.URL, Retries: ptr(0)})
+	var out struct{ OK bool }
+	if err := open.GetJSON(context.Background(), "/x", &out); err != nil || !out.OK {
+		t.Fatalf("without the option the local server is reachable: %v", err)
+	}
+	denied, _ := New("denied", Provider{BaseURL: srv.URL, Retries: ptr(0), DenyPrivateHosts: true})
+	if err := denied.GetJSON(context.Background(), "/x", nil); !errors.Is(err, ErrPrivateHost) {
+		t.Fatalf("loopback with deny_private_hosts: err = %v, want ErrPrivateHost", err)
+	}
+	for _, addr := range []string{"127.0.0.1", "10.1.2.3", "192.168.0.1", "172.16.5.5", "169.254.169.254", "100.64.0.1", "0.0.0.0", "::1", "fe80::1", "fd00::1", "::ffff:10.0.0.1"} {
+		if !isPrivateOrLocal(net.ParseIP(addr)) {
+			t.Errorf("%s should be private or local", addr)
+		}
+	}
+	for _, addr := range []string{"8.8.8.8", "203.0.113.7", "2606:4700::1"} {
+		if isPrivateOrLocal(net.ParseIP(addr)) {
+			t.Errorf("%s should be allowed", addr)
+		}
+	}
+}
+
 func TestBreakerOpensAndRecovers(t *testing.T) {
 	zlogtest.Capture(t)
 	var hits atomic.Int32

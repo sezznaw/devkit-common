@@ -429,6 +429,10 @@ oauth2 是 client credentials 流程，token 缓存并在过期前刷新。hmac-
 
 一次调用最坏耗时是 (retries + 1) 次尝试、每次最多 `timeout`、加上中间的等待，默认值下约 16s；等不起的 handler 给 ctx 加
 deadline。`debug: true` 把每次请求响应连头和 body 打到日志，只在本机（APP_ENV local）生效；部署环境忽略并告警。
+`deny_private_hosts: true`（v0.80.0，默认关）在拨号时拒绝解析到回环、私网（含 100.64/10）、链路本地（含云元数据地址）、组播、
+未指定地址的连接（`httpx.ErrPrivateHost`，什么都没发出去）：请求地址来自数据的厂商（支付渠道在后台填的网关地址、场馆的 api_url）要打开，
+否则能改地址的人就能让本服务带着签名去请求集群里任何它够得着的东西。判断的是 DNS 解析后的地址，域名指向内网同样拒绝；走环境变量代理
+（HTTP_PROXY）的连接拨的是代理，不判断。
 
 每次调用都带 trace（client span `GET odds-feed /v1/odds`，请求头里有 W3C traceparent），写一条带 trace_id 的日志
 （provider、方法、不含查询串的路径、状态码、耗时、第几次尝试；绝不记头和 body；错误文本里 URL 查询参数的值一律打成 `***`，因为厂商的 key 常放在那里，返回给调用方的错误也已打码；厂商要求放在 URL 其他位置的密钥用 `c.Secret(token)` 登记一次，日志、错误、span 里的 URL 一并打码），并计数
@@ -471,7 +475,8 @@ webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPa
 ```
 
 每个回调依次经过：来源地址对照 `allow_cidrs`（403）、body 上限（413，默认 1 MiB）、验签（401；`verify.type` 为 hmac-sha256
-对带时间戳窗口的模板签名、basic，或 `custom` 配 `webhookx.WithVerifier(fn)` 走厂商算法）、原始请求复制到 Kafka 留档主题
+对带时间戳窗口的模板签名、basic，或 `custom` 配 `webhookx.WithVerifier(fn)` 走厂商算法——fn 拿到的 `Event` 带 `ClientIP`，
+是监听按可信代理规则算出的来源地址，和 `allow_cidrs` 判的同一个值，给「允许的来源是后台数据而不是配置」的厂商核白名单用，v0.80.0）、原始请求复制到 Kafka 留档主题
 （留档失败回 500 让厂商重试，没留住的绝不处理）、事件 id 查 Redis（重复投递直接应答、不跑 handler）、然后是 handler：
 返回 nil 就按路由的应答回（默认 200 "ok"，可 `WithReply`），返回 error 或 panic 回 500 并忘掉这个事件 id，厂商重试时会再跑。
 每个回调一条带 provider 和 event_id 的日志，指标 `callbacks_received_total{provider, http_route, result}`。

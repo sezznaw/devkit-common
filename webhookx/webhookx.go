@@ -45,6 +45,12 @@ type Event struct {
 	Path    string
 	Headers http.Header
 	Body    []byte
+	// ClientIP is the address the callback came from, as the listener's
+	// trusted-proxy rule sees it (the same value allow_cidrs judges and the
+	// archive records as "client"). A custom Verifier reads it when the
+	// allowed sources are data, not configuration: a payment provider's
+	// whitelist kept in the back office (v0.80.0).
+	ClientIP string
 }
 
 // Decode unmarshals the JSON body into v.
@@ -177,7 +183,7 @@ func (r *route) serve(ctx context.Context, c *app.RequestContext) {
 		result("too_large", http.StatusRequestEntityTooLarge)
 		return
 	}
-	ev := &Event{Provider: r.provider, Method: string(c.Method()), Path: string(c.Path()), Headers: http.Header{}, Body: body}
+	ev := &Event{Provider: r.provider, Method: string(c.Method()), Path: string(c.Path()), Headers: http.Header{}, Body: body, ClientIP: c.ClientIP()}
 	c.Request.Header.VisitAll(func(k, v []byte) { ev.Headers.Add(string(k), string(v)) })
 	// 3. signature
 	if err := r.verify(ev, string(c.Request.QueryString())); err != nil {

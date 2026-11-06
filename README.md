@@ -635,6 +635,15 @@ is let through and the circuit closes on success. State changes are logged
 and `http_client_breaker_state` / `http_client_rejected_total` count them.
 The connection pool keeps 100 idle connections per host (Go's default of 2
 would mean a TLS handshake for most calls to a vendor polled often).
+`deny_private_hosts: true` (v0.80.0, off by default) refuses, at the dialer,
+a connection to a loopback, private (100.64/10 included), link-local (the
+cloud metadata address included), multicast or unspecified address
+(`httpx.ErrPrivateHost`, nothing sent). Turn it on for a provider whose
+request URL comes from data (a payment channel's gateway address entered in
+the back office, a venue's api_url): otherwise whoever can edit that address
+can make the service call, signed, anything it can reach. The address judged
+is the one DNS resolved, so a name pointing into the cluster is refused too;
+a proxy from the environment (HTTP_PROXY) is dialled instead and not judged.
 
 The worst case of one call is (retries + 1) attempts of up to `timeout`
 each plus the waits between them, about 16s with the defaults; a handler
@@ -696,7 +705,11 @@ What happens to every callback, in order: source address against
 `allow_cidrs` (403), body limit (413, default 1 MiB), signature (401;
 `verify.type` hmac-sha256 over a payload template with a timestamp window,
 basic, or `custom` with `webhookx.WithVerifier(fn)` for the vendor's own
-scheme), the raw request copied to the Kafka archive topic (a failure there
+scheme; the `Event` passed to fn carries `ClientIP`, the source address the
+listener resolved through its trusted-proxy rule, the same value
+`allow_cidrs` judges, for a provider whose allowed sources are data kept in
+the back office rather than configuration, v0.80.0), the raw request copied
+to the Kafka archive topic (a failure there
 is a 500: the provider retries, we never handle what we could not keep),
 the event id checked in Redis (a redelivery is acknowledged without running
 the handler), then the handler: nil answers the route's reply (200 "ok"

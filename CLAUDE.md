@@ -556,7 +556,13 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   decoded by us, not `SetResult`, because resty only decodes a JSON
   content type and vendors forget it. Log and metrics come from
   `OnAfterResponse` + `OnError` (the final attempt; `Attempt` tells), path
-  without query (tokens live there), never headers or bodies. `Config.Providers
+  without query (tokens live there), never headers or bodies.
+  `deny_private_hosts` (v0.80.0) is a `net.Dialer.Control` hook
+  (`denyPrivateHosts` in guard.go) judging the resolved address: loopback,
+  private, CGNAT 100.64/10, link-local, multicast, unspecified → `ErrPrivateHost`
+  before anything is sent; for providers whose URL is data (sportsbook
+  payment channels' gateway addresses). A proxy from the environment is
+  dialled instead and escapes the check. `Config.Providers
   map[string]httpx.Provider`, built in `Runtime.openProviders`, which also
   enforces the deployment rule: `POD_NAMESPACE` set and not ending in
   `-provider` with providers configured is a start failure (the chart sets
@@ -604,7 +610,10 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   on the header and compares case-insensitively in constant time; `{timestamp}`
   in the payload enables the skew window. Panics in Handle (unknown
   provider, no callback entry, custom without WithVerifier) are start-time
-  on purpose. Tests: hertz `ut`, miniredis, kfake (`archive_test.go`). `webhookx.Server(rt)` (server.go) is the listener for a Kitex service:
+  on purpose. `Event.ClientIP` (v0.80.0) is `c.ClientIP()` as `serve` saw
+  it, for a custom verifier that judges a whitelist kept as data (the
+  sportsbook payment providers, whose callback IPs the finance back office
+  edits); `allow_cidrs` stays the configured form. Tests: hertz `ut`, miniredis, kfake (`archive_test.go`). `webhookx.Server(rt)` (server.go) is the listener for a Kitex service:
   one Hertz engine per Runtime (sync.Map keyed by *Runtime), the hertzx
   middlewares, started through `rt.OnStart` (new: `Runtime.starters`, run
   by `rt.Run` before Kafka and the RPC server; `RunStarters` for tests) and

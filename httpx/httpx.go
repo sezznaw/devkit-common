@@ -50,6 +50,16 @@ type Provider struct {
 	// Insecure skips TLS verification. Only for a vendor's sandbox with a
 	// self-signed certificate.
 	Insecure bool `yaml:"insecure"`
+	// DenyPrivateHosts refuses to connect to a loopback, private (RFC 1918,
+	// CGNAT), link-local (the cloud metadata address included), multicast
+	// or unspecified address, judged on the address the dialer resolved, so
+	// a name that points into the cluster is refused like a literal 10.x.
+	// For a provider whose request URL comes from data (a payment channel's
+	// gateway address entered in the back office): without it, whoever can
+	// edit that address can make this service call, signed, anything it can
+	// reach. Off by default. A proxy from the environment (HTTP_PROXY) is
+	// dialled instead of the host and is not judged (v0.80.0).
+	DenyPrivateHosts bool `yaml:"deny_private_hosts"`
 	// MaxConcurrent calls in flight to this provider; further calls wait
 	// (within their timeout) for a slot. Default 64. 0 means no limit.
 	MaxConcurrent *int `yaml:"max_concurrent"`
