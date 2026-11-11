@@ -676,7 +676,14 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   through `// @docs tag <key>: <名>` directives (else the key; /ping → 系统),
   summary = first sentence of the plugin's description (`splitSummary` on
   newline / 。 / ". " / ：), "Successful response" → Chinese, top-level
-  `tags` list in directive order. The owner wants the docs in Chinese like
+  `tags` list in directive order. `// @docs group: <名>` in a method's comment
+  (v0.81.0; `Directives.Groups` / `GroupOrder`, per file: runDir hands each
+  file its own) makes the operation's tag the child `<domain>/<名>` and adds
+  `{name, x-displayName, parent}` after the domain in `tags`: Scalar (1.73.0
+  verified) nests on the OpenAPI 3.2 `parent` field even in a 3.0.3 document,
+  openapi-typescript ignores it; x-tagGroups was not used because Scalar then
+  drops every tag outside a group. `hertzx.PermissionPoints` maps a child tag
+  back to its parent. The owner wants the docs in Chinese like
   the Casual Casino page; the UI (Scalar) itself stays English. `ServeDocs(h, cfg, spec)`: /openapi.yaml, /docs → redirect,
   /docs is a page loading the embedded Scalar bundle (`hertzx/docs/scalar.js`,
   4.4 MB, version in docs/README.md; the owner wanted the same look as the

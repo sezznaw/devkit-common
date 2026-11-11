@@ -13,7 +13,9 @@
 // receives. Afterwards the title and version are filled in.
 //
 // `// @docs title: ...`, `// @docs description: ...` and `// @docs tag <domain>: <名字>`
-// lines in the IDL name the document and its sections (docs.go); the first
+// lines in the IDL name the document and its sections (docs.go); a
+// `// @docs group: <名字>` line in a method's comment puts the method into a
+// second-level section of its domain. The first
 // line of a method's comment is its summary. A `// @public` line in a
 // method's comment marks it as needing no login; every other operation gets
 // the bearer security requirement, which is also what the gateway's

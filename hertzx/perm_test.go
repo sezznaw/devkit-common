@@ -44,6 +44,30 @@ func TestPermissionPointsAndAllowed(t *testing.T) {
 	}
 }
 
+// An operation in a group of the page (a child tag) is listed under the
+// domain the group belongs to: the role editor groups by domain.
+func TestPermissionPointsGroupTag(t *testing.T) {
+	pts := PermissionPoints([]byte(`
+paths:
+  /v1/member/list:
+    post:
+      tags: [会员/列表]
+      x-permission: member.view
+  /v1/member/get:
+    post:
+      tags: [会员]
+      x-permission: member.view
+tags:
+  - name: 会员
+  - name: 会员/列表
+    x-displayName: 列表
+    parent: 会员
+`))
+	if len(pts) != 2 || pts[0].Tag != "会员" || pts[1].Tag != "会员" {
+		t.Fatalf("%+v", pts)
+	}
+}
+
 func TestRequirePermission(t *testing.T) {
 	zlogtest.Capture(t)
 	loads := 0

@@ -196,9 +196,15 @@ func Allowed(held []string, required string) bool {
 
 // PermissionPoints lists the operations of the OpenAPI document that carry
 // an x-permission, sorted by tag then name: the catalogue a role editor
-// shows. One point may guard several operations.
+// shows. One point may guard several operations. Tag is the domain's: an
+// operation in a group of the page (`// @docs group`, a child tag with a
+// parent) is listed under the domain the group belongs to.
 func PermissionPoints(spec []byte) []PermissionPoint {
 	var doc struct {
+		Tags []struct {
+			Name   string `yaml:"name"`
+			Parent string `yaml:"parent"`
+		} `yaml:"tags"`
 		Paths map[string]map[string]struct {
 			Summary    string   `yaml:"summary"`
 			Tags       []string `yaml:"tags"`
@@ -207,6 +213,12 @@ func PermissionPoints(spec []byte) []PermissionPoint {
 	}
 	if yaml.Unmarshal(spec, &doc) != nil {
 		return nil
+	}
+	parent := map[string]string{}
+	for _, t := range doc.Tags {
+		if t.Parent != "" {
+			parent[t.Name] = t.Parent
+		}
 	}
 	var out []PermissionPoint
 	for path, ops := range doc.Paths {
@@ -217,6 +229,9 @@ func PermissionPoints(spec []byte) []PermissionPoint {
 			tag := ""
 			if len(op.Tags) > 0 {
 				tag = op.Tags[0]
+				if p := parent[tag]; p != "" {
+					tag = p
+				}
 			}
 			out = append(out, PermissionPoint{Name: op.Permission, Summary: op.Summary, Tag: tag, Method: strings.ToUpper(method), Path: path})
 		}

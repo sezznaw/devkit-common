@@ -800,7 +800,13 @@ its description. The `// @docs` lines (`// @docs title: ...`,
 `// @docs description: ...`, `// @docs tag member: 会员`) live in a file with no
 `service`, by convention `docs.thrift`; `@public`, `@perm`, `@audit` and
 `@limit` are read from all files. Operations are grouped by the second segment
-of their path, `/v1/<domain>/...`; `/ping` goes under 系统. On for local and
+of their path, `/v1/<domain>/...`; `/ping` goes under 系统. A domain with many
+operations takes a second level: a `// @docs group: <name>` line in a method's
+comment puts that method under `<domain> › <name>` (a child tag
+`<domain>/<name>` with `parent` and `x-displayName`); groups follow the order
+the domain file first names them, a method without the line stays directly
+under the domain, and neither paths nor types change (`PermissionPoints` keeps
+the domain as its Tag). On for local and
 dev, off in production.
 
 ### Response envelope and paging (`hertzx.OK`, `pagex`)

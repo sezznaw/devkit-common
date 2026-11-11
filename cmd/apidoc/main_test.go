@@ -269,3 +269,150 @@ func TestSensitiveMethods(t *testing.T) {
 		t.Fatalf("%s", out)
 	}
 }
+
+// A `// @docs group` line in a method's comment puts the method under a
+// child tag of its domain; methods without one stay under the domain, and
+// the groups follow the order the file first names them.
+func TestGroups(t *testing.T) {
+	src := []byte(`// @docs tag member: 会员
+service MemberService {
+    // 取会员资料。
+    // @docs group: 个人资料
+    Profile GetProfile(1: Req req) (api.post="/v1/member/getProfile")
+    // 改密码。成功后重新登录。
+    // @limit 10/m
+    // @docs group:  账户 安全
+    common.Empty ChangePassword(1: Req req) (api.post="/v1/member/changePassword")
+    // 推送连接令牌
+    Token ConnectionToken(1: Req req) (api.post="/v1/member/connectionToken")
+
+    // @docs group: 个人资料
+    // 换头像
+    Profile UpdateAvatar(1: Req req) (api.post="/v1/member/updateAvatar")
+}
+`)
+	d := ParseDirectives(src)
+	if len(d.Groups) != 3 || d.Groups["GetProfile"] != "个人资料" || d.Groups["ChangePassword"] != "账户 安全" || d.Groups["UpdateAvatar"] != "个人资料" {
+		t.Fatalf("groups: %+v", d.Groups)
+	}
+	if len(d.GroupOrder) != 2 || d.GroupOrder[0] != "个人资料" || d.GroupOrder[1] != "账户 安全" {
+		t.Fatalf("group order: %+v", d.GroupOrder)
+	}
+	if len(d.Tags) != 1 || d.Tags[0].Name != "会员" {
+		t.Fatalf("tags: %+v", d.Tags)
+	}
+	// Paths come sorted from the plugin, not in the file's order.
+	doc := `openapi: 3.0.3
+info:
+  title: x
+  version: "1"
+paths:
+  /v1/member/changePassword:
+    post:
+      tags: [MemberService]
+      description: "改密码。成功后重新登录。\n@limit 10/m\n@docs group:  账户 安全"
+      operationId: MemberService_ChangePassword
+      responses: {}
+  /v1/member/connectionToken:
+    post:
+      tags: [MemberService]
+      operationId: MemberService_ConnectionToken
+      responses: {}
+  /v1/member/getProfile:
+    post:
+      tags: [MemberService]
+      operationId: MemberService_GetProfile
+      responses: {}
+  /v1/member/updateAvatar:
+    post:
+      tags: [MemberService]
+      operationId: MemberService_UpdateAvatar
+      responses: {}
+`
+	out, err := Patch([]byte(doc), "x", "v1", "", "x", d, nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var got struct {
+		Paths map[string]map[string]struct {
+			Tags        []string `yaml:"tags"`
+			Summary     string   `yaml:"summary"`
+			Description string   `yaml:"description"`
+		} `yaml:"paths"`
+		Tags []map[string]string `yaml:"tags"`
+	}
+	if err := yaml.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	for path, want := range map[string]string{
+		"/v1/member/getProfile":      "会员/个人资料",
+		"/v1/member/updateAvatar":    "会员/个人资料",
+		"/v1/member/changePassword":  "会员/账户 安全",
+		"/v1/member/connectionToken": "会员",
+	} {
+		if tags := got.Paths[path]["post"].Tags; len(tags) != 1 || tags[0] != want {
+			t.Errorf("%s: tags %v, want [%s]", path, tags, want)
+		}
+	}
+	if op := got.Paths["/v1/member/changePassword"]["post"]; op.Summary != "改密码" || op.Description != "成功后重新登录。" {
+		t.Errorf("directive lines leaked into the text: %+v", op)
+	}
+	want := []map[string]string{
+		{"name": "会员"},
+		{"name": "会员/个人资料", "x-displayName": "个人资料", "parent": "会员"},
+		{"name": "会员/账户 安全", "x-displayName": "账户 安全", "parent": "会员"},
+	}
+	if len(got.Tags) != len(want) {
+		t.Fatalf("tags: %v", got.Tags)
+	}
+	for i, w := range want {
+		for k, v := range w {
+			if got.Tags[i][k] != v {
+				t.Errorf("tag %d: %v, want %v", i, got.Tags[i], w)
+			}
+		}
+		if len(got.Tags[i]) != len(w) {
+			t.Errorf("tag %d: %v, want %v", i, got.Tags[i], w)
+		}
+	}
+
+	// A file without the directive is documented as before: flat tags only.
+	plain, err := Patch([]byte(doc), "x", "v1", "", "x", ParseDirectives([]byte("// @docs tag member: 会员\n")), nil, nil, nil, nil, nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if s := string(plain); strings.Contains(s, "parent:") || strings.Contains(s, "x-displayName") || strings.Contains(s, "会员/") {
+		t.Errorf("groups without a directive:\n%s", s)
+	}
+}
+
+// Two domains may both have a group of the same name: the child tags differ
+// by their domain, and each follows its own parent in the merged list.
+func TestGroupsMerge(t *testing.T) {
+	a := "openapi: 3.0.3\npaths: {}\ntags:\n  - name: 会员\n  - name: 会员/通用\n    x-displayName: 通用\n    parent: 会员\n"
+	b := "openapi: 3.0.3\npaths: {}\ntags:\n  - name: 钱包\n  - name: 钱包/通用\n    x-displayName: 通用\n    parent: 钱包\n"
+	var ra, rb yaml.Node
+	if err := yaml.Unmarshal([]byte(a), &ra); err != nil {
+		t.Fatal(err)
+	}
+	if err := yaml.Unmarshal([]byte(b), &rb); err != nil {
+		t.Fatal(err)
+	}
+	if err := mergeDoc(ra.Content[0], rb.Content[0], "wallet.thrift"); err != nil {
+		t.Fatal(err)
+	}
+	out, _ := yaml.Marshal(&ra)
+	var got struct {
+		Tags []map[string]string `yaml:"tags"`
+	}
+	if err := yaml.Unmarshal(out, &got); err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, tg := range got.Tags {
+		names = append(names, tg["name"])
+	}
+	if strings.Join(names, ",") != "会员,会员/通用,钱包,钱包/通用" {
+		t.Fatalf("merged tags: %v", names)
+	}
+}

@@ -18,20 +18,62 @@ import (
 // A method's tag is the second segment of its path (/v1/<domain>/...),
 // shown with the name the `tag` directive gives it; /ping and anything
 // without a domain go under "系统".
+//
+// A domain with many methods can be split into a second level: a
+// `// @docs group: <名字>` line in a method's comment block puts that method
+// into the named group under its domain (the page's left column then shows
+// 会员 › 账户安全 › the method). Groups appear in the order the file first
+// names them; a method without the line stays directly under the domain.
+//
+//	// 改密码。成功后所有会话吊销。
+//	// @docs group: 账户安全
+//	common.Empty ChangePassword(1: ChangePasswordReq req) (api.post="/v1/member/changePassword")
 type Directives struct {
 	Title       string
 	Description string
 	Tags        []TagName // in the order written
+	// Groups maps a method to the group its comment names, GroupOrder lists
+	// the groups as first met. Both belong to one file: method names are only
+	// unique within a service.
+	Groups     map[string]string
+	GroupOrder []string
 }
 
 type TagName struct{ Key, Name string }
 
 var directive = regexp.MustCompile(`^\s*//\s*@docs\s+(title|description|tag)\s*(\S*?)\s*:\s*(.*?)\s*$`)
 
+var groupLine = regexp.MustCompile(`^//\s*@docs\s+group\s*:\s*(.*?)\s*$`)
+
 // ParseDirectives reads the @docs lines of a Thrift file.
 func ParseDirectives(src []byte) Directives {
 	var d Directives
+	pending := "" // the group named in the comment block being read
 	for _, line := range strings.Split(string(src), "\n") {
+		switch t := strings.TrimSpace(line); {
+		case t == "":
+		case strings.HasPrefix(t, "//"):
+			if g := groupLine.FindStringSubmatch(t); g != nil {
+				pending = g[1]
+			}
+		default:
+			if pending != "" {
+				if mm := methodLine.FindStringSubmatch(line); mm != nil {
+					if d.Groups == nil {
+						d.Groups = map[string]string{}
+					}
+					d.Groups[mm[1]] = pending
+					seen := false
+					for _, g := range d.GroupOrder {
+						seen = seen || g == pending
+					}
+					if !seen {
+						d.GroupOrder = append(d.GroupOrder, pending)
+					}
+				}
+			}
+			pending = ""
+		}
 		m := directive.FindStringSubmatch(line)
 		if m == nil {
 			continue
@@ -361,7 +403,10 @@ func Secure(top *yaml.Node, public map[string]bool) {
 // Localize rewrites the generated document for people: every operation gets
 // a summary (the first line of its IDL comment) and a tag named after its
 // domain, the top-level tag list follows the directives' order, and the
-// plugin's English placeholders become Chinese.
+// plugin's English placeholders become Chinese. A method with a
+// `@docs group` goes under a child tag of its domain's ("会员/账户安全", shown
+// as 账户安全, parent 会员): tag names are unique in a document, two domains
+// may both have a group called 通用.
 func Localize(top *yaml.Node, d Directives) {
 	names := map[string]string{}
 	for _, t := range d.Tags {
@@ -369,6 +414,7 @@ func Localize(top *yaml.Node, d Directives) {
 	}
 	used := map[string]bool{}
 	var order []string
+	groups := map[string]map[string]bool{} // domain tag -> its groups in use
 	paths := mapGet(top, "paths")
 	if paths != nil {
 		for i := 0; i+1 < len(paths.Content); i += 2 {
@@ -379,7 +425,15 @@ func Localize(top *yaml.Node, d Directives) {
 				if op.Kind != yaml.MappingNode {
 					continue
 				}
-				setTag(op, tag)
+				if g := d.Groups[methodOf(op)]; g != "" {
+					setTag(op, groupTag(tag, g))
+					if groups[tag] == nil {
+						groups[tag] = map[string]bool{}
+					}
+					groups[tag][g] = true
+				} else {
+					setTag(op, tag)
+				}
 				if !used[tag] {
 					used[tag] = true
 					order = append(order, tag)
@@ -405,15 +459,28 @@ func Localize(top *yaml.Node, d Directives) {
 			}
 		}
 	}
-	// Tag list: directives first (those in use), then the rest as met.
+	// Tag list: directives first (those in use), then the rest as met; each
+	// domain is followed by its groups. `parent` is the OpenAPI 3.2 field for
+	// a nested tag and x-displayName the name a page shows for it; tools that
+	// know neither see one more flat tag.
 	var tags []*yaml.Node
 	seen := map[string]bool{}
+	scalar := func(v string) *yaml.Node { return &yaml.Node{Kind: yaml.ScalarNode, Value: v} }
 	add := func(name string) {
 		if seen[name] || !used[name] {
 			return
 		}
 		seen[name] = true
-		tags = append(tags, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{{Kind: yaml.ScalarNode, Value: "name"}, {Kind: yaml.ScalarNode, Value: name}}})
+		tags = append(tags, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{scalar("name"), scalar(name)}})
+		for _, g := range d.GroupOrder {
+			if groups[name][g] {
+				tags = append(tags, &yaml.Node{Kind: yaml.MappingNode, Content: []*yaml.Node{
+					scalar("name"), scalar(groupTag(name, g)),
+					scalar("x-displayName"), scalar(g),
+					scalar("parent"), scalar(name),
+				}})
+			}
+		}
 	}
 	for _, t := range d.Tags {
 		add(t.Name)
@@ -437,6 +504,22 @@ func tagFor(path string, names map[string]string) string {
 		return n
 	}
 	return key
+}
+
+// groupTag names the child tag of a domain's group.
+func groupTag(domain, group string) string { return domain + "/" + group }
+
+// methodOf is the IDL method an operation was generated from: the plugin's
+// operationId is <Service>_<Method>.
+func methodOf(op *yaml.Node) string {
+	n := mapGet(op, "operationId")
+	if n == nil {
+		return ""
+	}
+	if k := strings.LastIndex(n.Value, "_"); k >= 0 {
+		return n.Value[k+1:]
+	}
+	return n.Value
 }
 
 func setTag(op *yaml.Node, tag string) {

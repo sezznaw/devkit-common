@@ -48,6 +48,7 @@ func runDir(dir, out, title, version, desc string) error {
 	// domain file may name its own tag.
 	var d Directives
 	srcs := map[string][]byte{}
+	own := map[string]Directives{} // each file's own: its method groups
 	for _, f := range files {
 		src, err := os.ReadFile(filepath.Join(dir, f))
 		if err != nil {
@@ -55,6 +56,7 @@ func runDir(dir, out, title, version, desc string) error {
 		}
 		srcs[f] = src
 		fd := ParseDirectives(src)
+		own[f] = fd
 		if d.Title == "" {
 			d.Title = fd.Title
 		}
@@ -84,7 +86,11 @@ func runDir(dir, out, title, version, desc string) error {
 		if err != nil {
 			return fmt.Errorf("%s: %w", f, err)
 		}
-		patched, err := Patch(doc, title, version, desc, fallback, d, PublicMethods(src), PermMethods(src), AuditMethods(src), LimitMethods(src), MaxBodyMethods(src), SensitiveMethods(src))
+		// The page's directives with this file's groups: a method name is only
+		// unique within its own service.
+		fd := d
+		fd.Groups, fd.GroupOrder = own[f].Groups, own[f].GroupOrder
+		patched, err := Patch(doc, title, version, desc, fallback, fd, PublicMethods(src), PermMethods(src), AuditMethods(src), LimitMethods(src), MaxBodyMethods(src), SensitiveMethods(src))
 		if err != nil {
 			return fmt.Errorf("%s: %w", f, err)
 		}
