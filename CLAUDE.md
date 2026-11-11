@@ -691,7 +691,13 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   file stays upstream's) and the page loads `/docs/scalar.js?v=<hash>`
   (the route is cacheable for a day, dev sits behind Cloudflare).
   `TestScalarNestedTags` guards the cut across Scalar upgrades. Cutting the
-  statement without leaving `0;` breaks the enclosing `for`. The owner wants the docs in Chinese like
+  statement without leaving `0;` breaks the enclosing `for`. v0.81.2 (owner's
+  request): the sidebar starts closed, `defaultOpenAllTags:false` +
+  `defaultOpenFirstTag:false` (without the second Scalar opens the first
+  tag); `customCss` hides `nav.context-bar`, Scalar's breadcrumb that shows
+  up once any tag is nested and falls back to the document's FIRST nested
+  pair wherever the chain is shorter than two ("会员 › 个人资料" while reading
+  登录); needs `!important`, the bar carries the `flex` utility class. The owner wants the docs in Chinese like
   the Casual Casino page; the UI (Scalar) itself stays English. `ServeDocs(h, cfg, spec)`: /openapi.yaml, /docs → redirect,
   /docs is a page loading the embedded Scalar bundle (`hertzx/docs/scalar.js`,
   4.4 MB, version in docs/README.md; the owner wanted the same look as the

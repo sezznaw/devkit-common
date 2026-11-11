@@ -810,7 +810,9 @@ closes with its groups nested inside (Scalar draws a domain whose methods are
 all grouped as a fixed heading with the groups level with other domains;
 `hertzx` cuts that one statement from the `/docs/scalar.js` it serves, the
 embedded file is untouched, and the page requests it with a content-hash
-`?v=` so a day-old browser or CDN copy is not reused), and neither paths nor types change (`PermissionPoints` keeps
+`?v=` so a day-old browser or CDN copy is not reused; the left column starts
+closed, the first domain included, and a link to an operation still opens its
+domain and group), and neither paths nor types change (`PermissionPoints` keeps
 the domain as its Tag). On for local and
 dev, off in production.
 

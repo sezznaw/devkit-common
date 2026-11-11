@@ -111,7 +111,14 @@ func ServeDocs(h *server.Hertz, cfg kitexx.Config, spec []byte) {
 
 // docsPage is the documentation page: Scalar reading /openapi.yaml. The
 // configuration keeps the IDL's field order and remembers the auth a reader
-// entered. The page's fetch hook attaches the access token a login answered
+// entered. The left column starts closed, the first domain too
+// (defaultOpenAllTags, defaultOpenFirstTag): a reader sees the list of
+// domains and opens the one they came for; a link to an operation still
+// opens its domain and group. customCss hides Scalar's breadcrumb bar, which
+// appears once any tag is nested (`// @docs group`) and, outside the nested
+// ones, shows the document's first nested pair whatever the reader is
+// looking at ("会员 › 个人资料" while reading 登录); !important because the bar
+// is a `flex` element and the page's own rule would lose to that class. The page's fetch hook attaches the access token a login answered
 // and, when the gateway reads X-Device-Type, that header with the first
 // configured type unless the reader filled it in.
 const docsPage = `<!doctype html>
@@ -153,7 +160,7 @@ const docsPage = `<!doctype html>
       })();
     </script>
     <script id="api-reference" data-url="/openapi.yaml"
-      data-configuration='{"orderSchemaPropertiesBy":"preserve","orderRequiredPropertiesFirst":false,"persistAuth":true,"hideClientButton":true,"defaultOpenAllTags":true,"authentication":{"preferredSecurityScheme":"bearerAuth"}}'></script>
+      data-configuration='{"orderSchemaPropertiesBy":"preserve","orderRequiredPropertiesFirst":false,"persistAuth":true,"hideClientButton":true,"defaultOpenAllTags":false,"defaultOpenFirstTag":false,"customCss":"nav.context-bar{display:none!important}","authentication":{"preferredSecurityScheme":"bearerAuth"}}'></script>
     <script src="/docs/scalar.js?v={{scalar}}"></script>
   </body>
 </html>

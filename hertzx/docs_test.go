@@ -2,6 +2,7 @@ package hertzx
 
 import (
 	"bytes"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -28,6 +29,20 @@ func TestServeDocs(t *testing.T) {
 	}
 	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); w.Code != 200 || !strings.Contains(w.Body.String(), `id="api-reference"`) || !strings.Contains(w.Body.String(), "玩家网关 · API 文档") {
 		t.Errorf("/docs page: %d", w.Code)
+	}
+	// the left column starts closed (every domain, the first one too) and the breadcrumb bar is hidden
+	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); !strings.Contains(w.Body.String(), `"defaultOpenAllTags":false,"defaultOpenFirstTag":false,`) || !strings.Contains(w.Body.String(), `"customCss":"nav.context-bar{display:none!important}"`) {
+		t.Errorf("/docs page configuration:\n%s", w.Body.String())
+	}
+	// the configuration is JSON inside a single-quoted attribute
+	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); true {
+		page := w.Body.String()
+		i := strings.Index(page, "data-configuration='")
+		j := strings.Index(page[i+len("data-configuration='"):], "'")
+		var conf map[string]any
+		if err := json.Unmarshal([]byte(page[i+len("data-configuration='"):][:j]), &conf); err != nil || conf["defaultOpenAllTags"] != false {
+			t.Errorf("data-configuration is not the JSON it should be: %v %v", err, conf)
+		}
 	}
 	if w := ut.PerformRequest(h.Engine, "GET", "/docs/scalar.js", nil); w.Code != 200 || w.Body.Len() < 1_000_000 {
 		t.Errorf("/docs/scalar.js: %d %d bytes", w.Code, w.Body.Len())
