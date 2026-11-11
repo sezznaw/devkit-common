@@ -1,6 +1,7 @@
 package hertzx
 
 import (
+	"bytes"
 	"strings"
 	"testing"
 
@@ -55,5 +56,41 @@ func TestYAMLToJSONIntKeys(t *testing.T) {
 	}
 	if !strings.Contains(string(out), `"200":{"description":"ok"}`) {
 		t.Fatalf("got %s", out)
+	}
+}
+
+// A domain whose methods all carry `// @docs group` is a tag with child tags
+// and no operation of its own. Scalar draws such a tag as a fixed heading;
+// the served bundle has that one statement cut, so the domain opens and
+// closes with its groups nested inside. Fails after a Scalar upgrade that
+// renamed or moved the statement: find its successor in the new bundle (the
+// navigation builder sets isGroup on a tag whose children are tags), update
+// scalarGroupHeading, and check /docs of a gateway with groups in a browser.
+func TestScalarNestedTags(t *testing.T) {
+	if n := bytes.Count(scalarBundle, []byte(scalarGroupHeading)); n != 1 {
+		t.Fatalf("the embedded Scalar bundle has scalarGroupHeading %d times, want 1: a domain with groups is a fixed heading again", n)
+	}
+	if bytes.Contains(scalarJS, []byte(scalarGroupHeading)) || len(scalarJS) != len(scalarBundle)-len(scalarGroupHeading)+len("0;") {
+		t.Fatalf("served bundle not patched: %d bytes from %d", len(scalarJS), len(scalarBundle))
+	}
+	// the statement was the body of a for loop: what replaces it must be one too
+	if !bytes.Contains(scalarJS, []byte("for(let[e,t]of r)0;return e.filter(")) {
+		t.Fatal("the cut left the surrounding loop without a body")
+	}
+	// an unknown bundle is served as it is, and the version follows the content
+	other, v := patchScalar([]byte("console.log(1)"))
+	if string(other) != "console.log(1)" || v == scalarVersion || len(v) != 12 {
+		t.Fatalf("unknown bundle: %q %q", other, v)
+	}
+	// the page asks for the patched copy by its version, so a cached older one is not reused
+	h := server.New(server.WithDisablePrintRoute(true))
+	cfg := kitexx.Config{}
+	cfg.Docs.Enabled = true
+	ServeDocs(h, cfg, []byte("openapi: 3.0.3\ninfo: {title: t, version: v}\npaths: {}\n"))
+	if w := ut.PerformRequest(h.Engine, "GET", "/docs", nil); !strings.Contains(w.Body.String(), `<script src="/docs/scalar.js?v=`+scalarVersion+`"></script>`) {
+		t.Errorf("/docs does not load the versioned bundle:\n%s", w.Body.String())
+	}
+	if w := ut.PerformRequest(h.Engine, "GET", "/docs/scalar.js?v="+scalarVersion, nil); w.Code != 200 || !bytes.Equal(w.Body.Bytes(), scalarJS) {
+		t.Errorf("/docs/scalar.js: %d, %d bytes", w.Code, w.Body.Len())
 	}
 }

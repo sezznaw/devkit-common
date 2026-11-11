@@ -683,7 +683,15 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   verified) nests on the OpenAPI 3.2 `parent` field even in a 3.0.3 document,
   openapi-typescript ignores it; x-tagGroups was not used because Scalar then
   drops every tag outside a group. `hertzx.PermissionPoints` maps a child tag
-  back to its parent. The owner wants the docs in Chinese like
+  back to its parent. v0.81.1: Scalar (1.73.0 and 1.78.0 alike) marks a tag
+  whose children are all tags `isGroup` = a fixed sidebar heading, the groups
+  level with the other domains; the owner wants the domain to open and close
+  with the groups inside. `hertzx/docs.go` cuts that one statement
+  (`scalarGroupHeading`) from the served copy (`patchScalar`; the embedded
+  file stays upstream's) and the page loads `/docs/scalar.js?v=<hash>`
+  (the route is cacheable for a day, dev sits behind Cloudflare).
+  `TestScalarNestedTags` guards the cut across Scalar upgrades. Cutting the
+  statement without leaving `0;` breaks the enclosing `for`. The owner wants the docs in Chinese like
   the Casual Casino page; the UI (Scalar) itself stays English. `ServeDocs(h, cfg, spec)`: /openapi.yaml, /docs → redirect,
   /docs is a page loading the embedded Scalar bundle (`hertzx/docs/scalar.js`,
   4.4 MB, version in docs/README.md; the owner wanted the same look as the

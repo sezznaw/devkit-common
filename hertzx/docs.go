@@ -1,8 +1,11 @@
 package hertzx
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -15,11 +18,45 @@ import (
 	"github.com/sezznaw/devkit-common/zlog"
 )
 
-// scalarJS is the Scalar API Reference bundle (docs/README.md says which
-// version), embedded so the page works inside the office network.
+// scalarBundle is the Scalar API Reference bundle (docs/README.md says which
+// version), embedded so the page works inside the office network. The file
+// is upstream's, byte for byte; what the page loads is scalarJS.
 //
 //go:embed docs/scalar.js
-var scalarJS []byte
+var scalarBundle []byte
+
+// scalarGroupHeading is the one statement of Scalar's navigation builder
+// that turns a tag whose children are all tags (a domain whose methods all
+// carry `// @docs group`, apidoc's `parent` tags) into a group heading: a
+// fixed title in the left column, its groups listed below it level with the
+// other domains. Without the statement such a tag is drawn like any other:
+// a row that opens and closes, the groups nested inside — which is what a
+// second level is for, and what Scalar itself does as soon as the parent
+// has one operation of its own. x-tagGroups headings are built elsewhere
+// and are not affected.
+//
+// The statement is cut from the served copy, not from the file, so the file
+// stays the download the README names. After a Scalar upgrade the test
+// TestScalarNestedTags says whether it is still there to cut.
+const scalarGroupHeading = "(t.children??[]).some(e=>e.type===`tag`)&&!i.get(e)&&(t.isGroup=!0);"
+
+// scalarJS is the bundle the page loads, scalarVersion the query string that
+// makes a browser or CDN holding yesterday's copy (the route is cacheable
+// for a day) fetch it again when it changes.
+var scalarJS, scalarVersion = patchScalar(scalarBundle)
+
+// patchScalar cuts scalarGroupHeading when the bundle has it exactly once
+// (anything else is a bundle this code does not know: served untouched, the
+// page works, a parent tag is a heading again).
+func patchScalar(bundle []byte) (js []byte, version string) {
+	js = bundle
+	if bytes.Count(bundle, []byte(scalarGroupHeading)) == 1 {
+		// "0;" keeps the `for (...)` the statement is the body of.
+		js = bytes.Replace(bundle, []byte(scalarGroupHeading), []byte("0;"), 1)
+	}
+	sum := sha256.Sum256(js)
+	return js, hex.EncodeToString(sum[:6])
+}
 
 // ServeDocs mounts the API documentation when docs.enabled: /openapi.yaml
 // and /openapi.json are the OpenAPI document generated from the IDL by
@@ -53,7 +90,7 @@ func ServeDocs(h *server.Hertz, cfg kitexx.Config, spec []byte) {
 	if title == "" {
 		title = cfg.Service.Name
 	}
-	page := []byte(strings.NewReplacer("{{title}}", title+" · API 文档", "{{device}}", device).Replace(docsPage))
+	page := []byte(strings.NewReplacer("{{title}}", title+" · API 文档", "{{device}}", device, "{{scalar}}", scalarVersion).Replace(docsPage))
 	h.GET("/openapi.yaml", func(_ context.Context, c *app.RequestContext) {
 		c.Data(200, "application/yaml; charset=utf-8", spec)
 	})
@@ -117,7 +154,7 @@ const docsPage = `<!doctype html>
     </script>
     <script id="api-reference" data-url="/openapi.yaml"
       data-configuration='{"orderSchemaPropertiesBy":"preserve","orderRequiredPropertiesFirst":false,"persistAuth":true,"hideClientButton":true,"defaultOpenAllTags":true,"authentication":{"preferredSecurityScheme":"bearerAuth"}}'></script>
-    <script src="/docs/scalar.js"></script>
+    <script src="/docs/scalar.js?v={{scalar}}"></script>
   </body>
 </html>
 `

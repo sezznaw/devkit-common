@@ -805,7 +805,12 @@ operations takes a second level: a `// @docs group: <name>` line in a method's
 comment puts that method under `<domain> › <name>` (a child tag
 `<domain>/<name>` with `parent` and `x-displayName`); groups follow the order
 the domain file first names them, a method without the line stays directly
-under the domain, and neither paths nor types change (`PermissionPoints` keeps
+under the domain. In the left column the domain is a row that opens and
+closes with its groups nested inside (Scalar draws a domain whose methods are
+all grouped as a fixed heading with the groups level with other domains;
+`hertzx` cuts that one statement from the `/docs/scalar.js` it serves, the
+embedded file is untouched, and the page requests it with a content-hash
+`?v=` so a day-old browser or CDN copy is not reused), and neither paths nor types change (`PermissionPoints` keeps
 the domain as its Tag). On for local and
 dev, off in production.
 
