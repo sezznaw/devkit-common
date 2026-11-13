@@ -101,6 +101,10 @@ type route struct {
 	cidrs       []*net.IPNet
 }
 
+// results are the values of the result label of callbacks_received_total,
+// one per way serve can end.
+var results = []string{"ok", "duplicate", "bad_source", "bad_signature", "too_large", "archive_failed", "dedupe_unavailable", "handler_error"}
+
 const (
 	defaultDedupeTTL = 7 * 24 * time.Hour
 	defaultMaxBody   = 1 << 20
@@ -129,9 +133,20 @@ func Handle(rt *kitexx.Runtime, h *server.Hertz, provider, path string, handler 
 	if r.cfg.Verify.Type == "custom" && r.verifier == nil {
 		panic(fmt.Sprintf("webhookx: providers.%s.callback.verify.type is custom: pass webhookx.WithVerifier", provider))
 	}
+	// The listener's limit comes first (the body is refused before it is
+	// read): a route that asks for more would never get it.
+	if limit := int64(rt.Config.Callbacks.MaxBodyBytes); limit > 0 && r.cfg.MaxBody > limit {
+		panic(fmt.Sprintf("webhookx: providers.%s.callback.max_body is %d, more than callbacks.max_body_bytes (%d): the listener refuses such a body before the route sees it; raise callbacks.max_body_bytes or lower max_body", provider, r.cfg.MaxBody, limit))
+	}
 	for _, c := range r.cfg.AllowCIDRs {
 		_, n, _ := net.ParseCIDR(c)
 		r.cidrs = append(r.cidrs, n)
+	}
+	// Every result series exists from the start, at 0: an alert on
+	// increase(callbacks_received_total{result="bad_signature"}) needs a
+	// sample before the first refusal, or it never sees that one.
+	for _, res := range results {
+		metricsx.CallbacksReceived.WithLabelValues(provider, path, res).Add(0)
 	}
 	log := zlog.With(zlog.Str("provider", provider), zlog.Str("path", path))
 	if r.cfg.EventID.Header == "" && r.cfg.EventID.JSON == "" {

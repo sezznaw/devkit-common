@@ -467,7 +467,12 @@ webhookx.Handle(rt, h, "payment-x", "/callbacks/payment-x/paid", func(ctx contex
 
 在 Kitex 服务（对接厂商的那个服务）上，收回调的 HTTP 监听由框架提供：配置 `callbacks: {enabled: true, addr: 8081}`，
 `app.Setup` 里 `webhookx.Server(rt)` 返回引擎（trace、指标、请求日志、panic 恢复都已装好），`rt.Run` 在起 RPC 服务器之前
-把它起来、退出时一起停。部署只把这个端口的 `/callbacks/` 开给公网。
+把它起来、退出时一起停。部署只把这个端口的 `/callbacks/` 开给公网。要设 `callbacks.max_body_bytes`（v0.82.0）：监听读取的最大请求体，
+对监听上所有路由生效（包括直接挂在引擎上的路由）；更大的请求在读请求体之前回 413（不进路由，没有请求日志，也不计入
+`callbacks_received_total`）。Hertz 按 Content-Length 一次分配整块缓冲、读完才进路由，所以厂商的 `callback.max_body` 是在内存已经
+占用之后才检查的，只有监听级上限能把大请求体挡在外面。不设时和以前一样读到 Hertz 的 4 MiB，并在启动时打一条 Warn（默认不收紧，
+因为框架不知道服务自己挂的路由最大会收到多大的合法报文）。某个厂商的 `callback.max_body` 大于 `callbacks.max_body_bytes` 时启动报错。
+`callbacks.read_timeout`（默认 Hertz 的 3 分钟）是一次读等不到数据的最长时间：能断开「发了头不发体」的连接，管不住一点一点慢慢发的请求体。
 
 ```go
 cb := webhookx.Server(rt)
@@ -479,7 +484,8 @@ webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPa
 是监听按可信代理规则算出的来源地址，和 `allow_cidrs` 判的同一个值，给「允许的来源是后台数据而不是配置」的厂商核白名单用，v0.80.0）、原始请求复制到 Kafka 留档主题
 （留档失败回 500 让厂商重试，没留住的绝不处理）、事件 id 查 Redis（重复投递直接应答、不跑 handler）、然后是 handler：
 返回 nil 就按路由的应答回（默认 200 "ok"，可 `WithReply`），返回 error 或 panic 回 500 并忘掉这个事件 id，厂商重试时会再跑。
-每个回调一条带 provider 和 event_id 的日志，指标 `callbacks_received_total{provider, http_route, result}`。
+每个回调一条带 provider 和 event_id 的日志，指标 `callbacks_received_total{provider, http_route, result}`——路由注册时各个 result 的
+序列就以 0 存在（v0.82.0），按 `increase(...{result="bad_signature"})` 告警时第一次被拒也看得到。
 handler 仍要幂等：厂商可能用两个 id 发同一件事。
 
 ### 服务之间的调用：超时、重试、熔断

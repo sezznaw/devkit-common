@@ -694,7 +694,21 @@ callbacks is the framework's: `callbacks: {enabled: true, addr: 8081}` in
 the configuration, `webhookx.Server(rt)` in `app.Setup` returns the engine
 (tracing, metrics, request log, recovery already on it), `rt.Run` starts it
 right before the RPC server and stops it with it. The deployment exposes
-only that port to the internet, under `/callbacks/`.
+only that port to the internet, under `/callbacks/`. Set
+`callbacks.max_body_bytes` (v0.82.0): it is the largest body the listener
+reads, for every route on it, the ones mounted on the engine directly
+included; a larger request is answered 413 before its body is read (no
+route, no request log, no `callbacks_received_total`). Hertz allocates a
+body by its Content-Length and reads it before any route runs, so a
+provider's `callback.max_body` is checked after the memory is already
+taken; only the listener's limit keeps a large body out. Unset, the
+listener reads up to Hertz's 4 MiB as before and warns at start (the
+default is not tightened because the framework cannot know the largest
+legitimate body of the routes a service mounts itself). A provider whose
+`callback.max_body` is larger than `callbacks.max_body_bytes` is refused at
+start. `callbacks.read_timeout` (default Hertz's 3 minutes) is how long one
+read waits for data: it closes a connection that sends its headers and
+then nothing, it does not bound a body that trickles in.
 
 ```go
 cb := webhookx.Server(rt)
@@ -716,7 +730,10 @@ the handler), then the handler: nil answers the route's reply (200 "ok"
 unless `WithReply`), an error or a panic answers 500 and forgets the event
 id, so the provider's retry runs the handler again. One log record per
 callback with provider and event_id, and
-`callbacks_received_total{provider, http_route, result}`. Handlers stay
+`callbacks_received_total{provider, http_route, result}`, whose result
+series all exist at 0 from the moment the route is registered (v0.82.0), so
+that an alert on `increase(...{result="bad_signature"})` sees the first
+refusal too. Handlers stay
 idempotent anyway: a provider may send the same notification under two ids.
 
 ### Calls between services: timeout, retry, breaker

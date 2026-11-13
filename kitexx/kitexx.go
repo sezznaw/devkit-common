@@ -637,6 +637,22 @@ type CallbacksConfig struct {
 	Enabled bool `yaml:"enabled"`
 	// Addr: a port ("8081", the default) or host:port. Never service.addr.
 	Addr string `yaml:"addr"`
+	// MaxBodyBytes is the largest request body the listener reads, for every
+	// route on it (those of webhookx.Handle and the ones mounted on the
+	// engine directly); a larger one is answered 413 before it is read.
+	// Unset: Hertz's 4 MiB, as before v0.82.0, and a warning at start that
+	// asks for a value. A provider's callback.max_body applies after the
+	// body is read and cannot be larger than this.
+	//
+	// MaxBodyBytes：监听读取的最大请求体，对监听上所有路由生效；更大的在读取之前回 413。
+	// 不设 = 沿用 Hertz 的 4 MiB（和 v0.82.0 之前一样），启动时打一条 Warn 提示去设。
+	MaxBodyBytes int `yaml:"max_body_bytes"`
+	// ReadTimeout is how long one read of a request waits for data (a
+	// connection that sends its headers and then nothing is closed after
+	// it). Unset: Hertz's 3 minutes.
+	//
+	// ReadTimeout：一次读等不到数据的最长时间。不设 = Hertz 的 3 分钟。
+	ReadTimeout config.Duration `yaml:"read_timeout"`
 }
 
 // DefaultCallbacksPort is the callback port when callbacks.addr is empty;

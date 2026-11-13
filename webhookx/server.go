@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/cloudwego/hertz/pkg/app/server"
+	hconfig "github.com/cloudwego/hertz/pkg/common/config"
 
 	"github.com/sezznaw/devkit-common/hertzx"
 	"github.com/sezznaw/devkit-common/kitexx"
@@ -35,7 +36,22 @@ func Server(rt *kitexx.Runtime) *server.Hertz {
 	if err != nil {
 		panic(err)
 	}
-	h := server.New(server.WithHostPorts(addr), server.WithDisablePrintRoute(true), server.WithExitWaitTime(kitexx.DrainTimeout(rt.Config)))
+	opts := []hconfig.Option{server.WithHostPorts(addr), server.WithDisablePrintRoute(true), server.WithExitWaitTime(kitexx.DrainTimeout(rt.Config))}
+	// callbacks.max_body_bytes: Hertz allocates a request's whole body by its
+	// Content-Length and reads it before any route runs, so a route's own
+	// max_body cannot keep a large body out of memory; only this limit does
+	// (413 before the body is read). Unset keeps Hertz's 4 MiB, because the
+	// listener also carries routes mounted on the engine directly, whose
+	// largest legitimate body the framework cannot know.
+	if n := cfg.MaxBodyBytes; n > 0 {
+		opts = append(opts, server.WithMaxRequestBodySize(n), server.WithMaxKeepBodySize(min(n, 64<<10)))
+	} else {
+		zlog.Warn("callbacks.max_body_bytes is not set: the listener reads bodies up to 4 MiB before any route's max_body applies")
+	}
+	if d := cfg.ReadTimeout.Or(0); d > 0 {
+		opts = append(opts, server.WithReadTimeout(d))
+	}
+	h := server.New(opts...)
 	// allow_cidrs and the logs need the vendor's real address: only the
 	// trusted proxies' X-Forwarded-For entries count (client.trusted_proxies).
 	trusted, err := rt.Config.Client.Trusted()

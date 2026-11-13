@@ -637,6 +637,22 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   callbacks, in the provider namespace; no separate proxy service (the
   namespace policy is the egress, the Ingress is the entry). The ingress of
   that service must not carry the office-only middleware.
+  v0.82.0: `callbacks.max_body_bytes` / `callbacks.read_timeout`
+  (`kitexx.CallbacksConfig`) become `WithMaxRequestBodySize` (+
+  `WithMaxKeepBodySize(min(n, 64 KiB))`) / `WithReadTimeout` in `Server`.
+  Hertz (v0.10.6) allocates the body by Content-Length and reads it before
+  routing, so the route's `max_body` check comes after the memory is taken;
+  the listener had no limit of its own (Hertz's 4 MiB), unlike `hertzx.New`.
+  The default is deliberately *not* tightened (unset = 4 MiB + a WARN at
+  start): the same engine carries routes services mount directly
+  (`cb.POST(...)`), with no size check of their own and bodies whose largest
+  legitimate size the framework cannot know; a 413 there would stall a
+  vendor's settlement. `Handle` panics when a provider's `max_body` exceeds
+  the listener's limit. A body over the limit is refused by Hertz at the
+  protocol layer: no middleware, no request log, no metric. `Handle` also
+  presets every `result` series of `callbacks_received_total` at 0
+  (`results`): `increase()` needs a sample before the first increment, or an
+  alert never sees the first refused callback after a restart.
 - `s3x`: aws-sdk-go-v2 s3 with `otelaws.AppendMiddlewares`, BaseEndpoint +
   UsePathStyle (SeaweedFS), static credentials. `Open` does HeadBucket (the
   bucket must exist; the chart's createBuckets makes them). Since v0.52.0 a
