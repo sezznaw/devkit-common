@@ -244,15 +244,38 @@ func redactValue(v any) any {
 	return v
 }
 
+// formKey is what the key of a form field looks like. A fragment of JSON
+// (with { " : ,) never does.
+var formKey = regexp.MustCompile(`^[A-Za-z0-9_.\-\[\]]{1,64}$`)
+
 // parseForm reads an application/x-www-form-urlencoded body (one value:
-// a string, several: a list).
+// a string, several: a list). JSON that does not parse is not a form: it
+// used to be read as one whenever it held a "=" (a base64 secret's padding,
+// a name), url.ParseQuery cut it at the first "=", and what stood before,
+// the secret included, became a key, which is never redacted. So a body
+// that starts like JSON is refused, and so is any body one of whose keys
+// does not look like a field name. The Content-Type is deliberately not
+// consulted: `curl -d '{...}'` without -H says form-urlencoded.
+//
+// 解不开的 JSON 不是表单：以前只要含 "=" 就当表单解析，url.ParseQuery 在第一个 "=" 处切开，
+// 前面那段（连同里面的密钥）成了键，而键从不打码。现在以 { [ " 开头的、或有任何一个键不像
+// 字段名的，一律不记内容。故意不看 Content-Type：curl -d '{...}' 不带 -H 时就是表单类型。
 func parseForm(body []byte) (map[string]any, bool) {
+	t := bytes.TrimLeft(body, " \t\r\n")
+	if len(t) == 0 || t[0] == '{' || t[0] == '[' || t[0] == '"' {
+		return nil, false
+	}
 	if !bytes.Contains(body, []byte("=")) || !utf8.Valid(body) {
 		return nil, false
 	}
 	q, err := url.ParseQuery(string(body))
 	if err != nil || len(q) == 0 {
 		return nil, false
+	}
+	for k := range q {
+		if !formKey.MatchString(k) {
+			return nil, false
+		}
 	}
 	out := make(map[string]any, len(q))
 	for k, vs := range q {

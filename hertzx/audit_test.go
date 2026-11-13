@@ -3,6 +3,7 @@ package hertzx
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -159,6 +160,36 @@ func TestRedact(t *testing.T) {
 	// big numbers keep their digits
 	if got = Redact([]byte(`{"id":9007199254740993}`)); got != `{"id":9007199254740993}` {
 		t.Fatal(got)
+	}
+}
+
+// TestRedactBrokenJSONIsNotAForm: JSON that does not parse is not read as a
+// form. It was: url.ParseQuery cuts at the first "=", whatever stands before
+// it became a key, and keys are never redacted, so a secret in a broken
+// body was stored in clear (the values are invented).
+func TestRedactBrokenJSONIsNotAForm(t *testing.T) {
+	const secret = "INVENTED-SECRET-0001"
+	for name, body := range map[string]string{
+		"trailing comma, a value with =": `{"request_id":"r1","code":"fake","name":"A=B","secret":"` + secret + `","status":1,"otp_code":"` + secret + `",}`,
+		"cut short, base64 padding":      `{"request_id":"r1","code":"fake","secret":"` + secret + `==","status":1`,
+		"leading white space":            " \r\n\t" + `{"name":"A=B","secret":"` + secret + `",}`,
+		"an array":                       `[{"name":"A=B","secret":"` + secret + `"},]`,
+		"a string":                       `"name=A&secret=` + secret,
+		"a form whose key is no name":    `name=A&{"secret":"` + secret + `"}=1`,
+		"a form with a quoted key":       `name=A&"secret"=` + secret,
+	} {
+		got := Redact([]byte(body))
+		if want := "<non-JSON body, " + strconv.Itoa(len(body)) + " bytes, not recorded>"; got != want {
+			t.Errorf("%s: recorded as %s, want %s", name, got, want)
+		}
+		if strings.Contains(got, secret) {
+			t.Errorf("%s: the secret is in the audit text: %s", name, got)
+		}
+	}
+	// a real form still is one: field names with the usual punctuation
+	got := Redact([]byte("user.name=sean&items[0]=a&new-password=" + secret + "&otp_code=" + secret))
+	if strings.Contains(got, secret) || !strings.Contains(got, `"user.name":"sean"`) || !strings.Contains(got, `"items[0]":"a"`) {
+		t.Errorf("form: %s", got)
 	}
 }
 

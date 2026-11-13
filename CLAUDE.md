@@ -817,6 +817,23 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   methods whose comment has `// @public` (`security: []`), so the IDL is the
   single source of what is public; the docs page gets a bearer scheme and a
   script that remembers `data.access_token` from responses and attaches it.
+- `hertzx/audit.go` `Redact` and `hertzx/bind.go` (v0.82.0, two ways one
+  malformed request put a secret into the audit log). (1) `Redact` fell back
+  to `parseForm` when the JSON did not parse, and `parseForm` only asked for
+  a "=" and valid UTF-8: `url.ParseQuery` cuts at the first "=", the JSON
+  before it became a *key*, and `redactValue` redacts values by key name,
+  never keys. Now a body starting with `{` `[` `"` is no form, and neither
+  is one with a key outside `formKey`; such a body keeps only its size. Not
+  decided by Content-Type on purpose: `curl -d '{...}'` without `-H` says
+  form-urlencoded. (2) sonic's errors end with an excerpt of the body around
+  the position (`reason\n\n\t<~60 bytes of body>\n\t...^`), quoted with %q
+  for a syntax error and inside "Mismatch type T with value  %q" for a wrong
+  type, so *valid* JSON with one field of the wrong type echoed the
+  neighbouring field's value in the 1001 `msg`, which the audit entry keeps
+  in `Response` and `Msg` (a msg is not redacted). `bindReason` cuts at the
+  first line break, real or the two characters `\n`, strips the quotes and
+  caps at 120 bytes. `TestBindErrorDoesNotEchoBody` runs the real decoder
+  through `Bind` + `Audit`, so a sonic upgrade that changes the format shows.
 - `etcdx` was removed in v0.20.0: nothing in the stack runs etcd.
 
 - `kitexx.VersionEnv` (`APP_VERSION`, v0.24.0): `Bootstrap` fills `cfg.Log.Version`
