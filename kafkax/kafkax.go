@@ -290,7 +290,7 @@ func (c *Client) claim(ctx, stop context.Context, topic, id string, log *zlog.Lo
 			if waited {
 				log.Warn("event taken over: the consumer that had claimed it did not finish")
 			}
-			return c.hold(key, token, ttl), false, nil
+			return c.hold(key, token, ttl, log), false, nil
 		}
 		v, err := c.dedupe.Get(ctx, key).Result()
 		switch {
@@ -310,7 +310,7 @@ func (c *Client) claim(ctx, stop context.Context, topic, id string, log *zlog.Lo
 			if n == 0 {
 				continue // run out between the two commands: claim again
 			}
-			return c.hold(key, token, ttl), false, nil
+			return c.hold(key, token, ttl, log), false, nil
 		}
 		// In flight in another consumer. Alive, it finishes (the key turns
 		// to handled, or is released); dead, its claim runs out.
@@ -325,7 +325,7 @@ func (c *Client) claim(ctx, stop context.Context, topic, id string, log *zlog.Lo
 				continue
 			}
 			log.Warn("event taken over after waiting: its claim was still being renewed", zlog.Dur("waited", 2*ttl))
-			return c.hold(key, token, ttl), false, nil
+			return c.hold(key, token, ttl, log), false, nil
 		}
 		if !waited {
 			waited = true
@@ -344,7 +344,7 @@ func (c *Client) claim(ctx, stop context.Context, topic, id string, log *zlog.Lo
 // hold keeps a claim alive while the handler runs: every third of the TTL
 // it is extended, as long as it is still this consumer's. A process that
 // is killed stops renewing, and the claim runs out within the TTL.
-func (c *Client) hold(key, token string, ttl time.Duration) *claim {
+func (c *Client) hold(key, token string, ttl time.Duration, log *zlog.Logger) *claim {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})
 	go func() {
@@ -359,7 +359,12 @@ func (c *Client) hold(key, token string, ttl time.Duration) *claim {
 				// A failed renewal is tried again at the next tick; a claim
 				// that is lost all the same costs a second run of the
 				// handler only when the event is redelivered meanwhile.
-				_ = renewClaim.Run(ctx, c.dedupe, []string{key}, token, ttl.Milliseconds()).Err()
+				// Said aloud: a renewal that never works (the store down,
+				// the script refused) is a claim that runs out under every
+				// handler slower than the TTL.
+				if err := renewClaim.Run(ctx, c.dedupe, []string{key}, token, ttl.Milliseconds()).Err(); err != nil && ctx.Err() == nil {
+					log.Warn("dedupe claim not renewed; it runs out unless a later renewal succeeds", zlog.Err(err))
+				}
 			}
 		}
 	}()

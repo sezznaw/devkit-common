@@ -320,6 +320,28 @@ func TestDedupeClaimIsRenewedWhileTheHandlerRuns(t *testing.T) {
 	}
 }
 
+// TestDedupeRenewalFailureIsLogged: a claim that cannot be renewed (the
+// store gone under a running handler) is not lost silently; the handler's
+// result stands all the same.
+func TestDedupeRenewalFailureIsLogged(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	shortClaims(t, 300*time.Millisecond)
+	f := newDedupeFixture(t, Config{Dedupe: DedupeConfig{InFlightTTL: config.Duration(300 * time.Millisecond)}})
+	err := f.c.process(context.Background(), eventRecord("evt-1"), func(ctx context.Context, ev *Event) error {
+		f.srv.Close()
+		waitFor(t, "the failed renewal to be logged", func() bool {
+			return logs.Has("WARN", "dedupe claim not renewed; it runs out unless a later renewal succeeds")
+		})
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !logs.Has("WARN", "handled event not marked in the dedupe store; a redelivery runs the handler again") {
+		t.Errorf("the lost confirmation is not logged:\n%s", logs)
+	}
+}
+
 // TestDedupeWaitsForTheConsumerThatHasTheEvent: an event in flight in
 // another consumer is not run next to it. When the other one finishes, it
 // is a duplicate; when the other one gives it back, it runs here.
