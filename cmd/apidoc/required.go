@@ -38,6 +38,7 @@ type field struct {
 	name string
 	kind string // "", "optional" or "required": the Thrift requiredness
 	vd   string // the api.vd expression, "" when the field has none
+	doc  string // the field's comment: the trailing "// ..." on its line, else the "//" lines right above it
 }
 
 var (
@@ -66,17 +67,24 @@ func structFields(dir string) map[string][]field {
 			ns = m[1]
 		}
 		cur := ""
+		var above []string // the "//" lines just above the current line, inside a struct
 		for _, line := range strings.Split(src, "\n") {
 			if m := structRE.FindStringSubmatch(line); m != nil {
 				cur = m[1]
 				out[ns+"."+cur] = nil
+				above = nil
 				continue
 			}
-			if strings.HasPrefix(strings.TrimSpace(line), "}") {
+			t := strings.TrimSpace(line)
+			if strings.HasPrefix(t, "}") {
 				cur = ""
 				continue
 			}
 			if cur == "" {
+				continue
+			}
+			if strings.HasPrefix(t, "//") {
+				above = append(above, strings.TrimSpace(strings.TrimPrefix(t, "//")))
 				continue
 			}
 			if m := fieldRE.FindStringSubmatch(line); m != nil {
@@ -84,12 +92,83 @@ func structFields(dir string) map[string][]field {
 				if v := vdRE.FindStringSubmatch(line); v != nil {
 					f.vd = v[1]
 				}
+				f.doc = trailingComment(line)
+				if f.doc == "" {
+					f.doc = strings.TrimSpace(strings.Join(above, "\n"))
+				}
 				out[ns+"."+cur] = append(out[ns+"."+cur], f)
 			}
+			above = nil
 		}
 		return nil
 	})
 	return out
+}
+
+// trailingComment returns the "// ..." at the end of a Thrift line, outside
+// the quoted annotation values (an api.vd regexp may hold "//"), or "".
+func trailingComment(line string) string {
+	quoted := false
+	for i := 0; i+1 < len(line); i++ {
+		switch {
+		case line[i] == '\\' && quoted:
+			i++
+		case line[i] == '"':
+			quoted = !quoted
+		case !quoted && line[i] == '/' && line[i+1] == '/':
+			return strings.TrimSpace(line[i+2:])
+		}
+	}
+	return ""
+}
+
+// Describe gives every schema property that has no description the comment
+// of its Thrift field. thrift-gen-http-swagger keeps the comment of a scalar
+// field but drops it on a field whose type is a struct or a list of structs
+// (common.Money, common.PageInfo, list<Item>): the property is a bare $ref,
+// and a reader of /docs saw `principal` with no word on what it is. A bare
+// $ref cannot carry siblings in OpenAPI 3.0, so it is wrapped in allOf first
+// (as setNullable does); the generated client types do not change.
+// 结构体类型的字段（金额、分页、列表）插件不带注释，这里按 thrift 字段注释补上。
+func Describe(top *yaml.Node, structs map[string][]field) {
+	comps := mapGet(top, "components")
+	if comps == nil {
+		return
+	}
+	schemas := mapGet(comps, "schemas")
+	if schemas == nil {
+		return
+	}
+	for i := 0; i+1 < len(schemas.Content); i += 2 {
+		name, schema := schemas.Content[i].Value, schemas.Content[i+1]
+		props := mapGet(schema, "properties")
+		if props == nil {
+			continue
+		}
+		fields, ok := lookup(structs, name)
+		if !ok {
+			// a request-side copy "<name>Request" (splitShared) documents the same struct
+			fields, ok = lookup(structs, strings.TrimRight(strings.TrimSuffix(strings.TrimRight(name, "_"), "Request"), "_"))
+		}
+		if !ok {
+			continue
+		}
+		for _, f := range fields {
+			p := mapGet(props, f.name)
+			if f.doc == "" || p == nil || p.Kind != yaml.MappingNode {
+				continue
+			}
+			if d := mapGet(p, "description"); d != nil && strings.TrimSpace(d.Value) != "" {
+				continue
+			}
+			if ref := mapGet(p, "$ref"); ref != nil {
+				mapDel(p, "$ref")
+				p.Content = append([]*yaml.Node{scalar("allOf"), {Kind: yaml.SequenceNode, Content: []*yaml.Node{{Kind: yaml.MappingNode, Content: []*yaml.Node{scalar("$ref"), scalar(ref.Value)}}}}}, p.Content...)
+			}
+			mapDel(p, "description")
+			p.Content = append(p.Content, scalar("description"), scalar(f.doc))
+		}
+	}
 }
 
 // requestNote is appended to info.description so that a reader of the

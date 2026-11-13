@@ -697,7 +697,12 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   tag); `customCss` hides `nav.context-bar`, Scalar's breadcrumb that shows
   up once any tag is nested and falls back to the document's FIRST nested
   pair wherever the chain is shorter than two ("会员 › 个人资料" while reading
-  登录); needs `!important`, the bar carries the `flex` utility class. The owner wants the docs in Chinese like
+  登录); needs `!important`, the bar carries the `flex` utility class. v0.81.3: the plugin drops the comment of a struct-typed field (bare `$ref`: Money, PageInfo, list<Item>), so
+  `Describe` (required.go) fills every property without a description from the Thrift field comment
+  (`field.doc`: trailing `//` outside quotes, else the `//` lines just above), wrapping a bare `$ref` in
+  `allOf`; `gatewayStructs` (dir.go) lets the gateway's own directory win over the rest of the IDL repo:
+  ser-finance-admin-api also has `namespace deposit` + `struct Method`/`OrderList`, and the walk reached it
+  after ser-api, so ser-api's deposit.Method got the finance struct's `required`. The owner wants the docs in Chinese like
   the Casual Casino page; the UI (Scalar) itself stays English. `ServeDocs(h, cfg, spec)`: /openapi.yaml, /docs → redirect,
   /docs is a page loading the embedded Scalar bundle (`hertzx/docs/scalar.js`,
   4.4 MB, version in docs/README.md; the owner wanted the same look as the

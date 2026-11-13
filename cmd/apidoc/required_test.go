@@ -198,3 +198,81 @@ components:
 		t.Errorf("info.description lacks the convention note: %q", d.Info.Description)
 	}
 }
+
+func TestDescribeStructFields(t *testing.T) {
+	dir := t.TempDir()
+	os.MkdirAll(filepath.Join(dir, "common"), 0o755)
+	os.MkdirAll(filepath.Join(dir, "wallet"), 0o755)
+	os.WriteFile(filepath.Join(dir, "common", "common.thrift"), []byte("namespace go common\n\nstruct PageInfo {\n    1: i32 page            // 当前页\n    2: i64 total\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(dir, "wallet", "wallet.thrift"), []byte(`namespace go wallet
+
+struct Balance {
+    1: common.Money main          // 中心钱包
+    2: list<Venue> venues         // 各场馆
+    // 分页信息
+    3: common.PageInfo page
+    4: string code (api.body="code", api.vd="regexp('^https?://x')") // 链接 // 前缀
+    5: string kept                // 插件已有
+    6: string none
+}
+`), 0o644)
+	structs := structFields(dir)
+	got := structs["wallet.Balance"]
+	if got[0].doc != "中心钱包" || got[2].doc != "分页信息" || got[3].doc != "链接 // 前缀" || got[5].doc != "" {
+		t.Fatalf("docs = %+v", got)
+	}
+	doc := `components:
+  schemas:
+    wallet.BalanceBody:
+      properties:
+        main:
+          $ref: '#/components/schemas/wallet.Money'
+        venues:
+          type: array
+          items: {$ref: '#/components/schemas/wallet.Venue'}
+        page:
+          allOf: [{$ref: '#/components/schemas/wallet.PageInfoRequest'}]
+          nullable: true
+        code: {type: string}
+        kept: {type: string, description: 原有}
+        none: {type: string}
+    wallet.PageInfoRequest:
+      properties:
+        page: {type: integer}
+`
+	var root yaml.Node
+	if err := yaml.Unmarshal([]byte(doc), &root); err != nil {
+		t.Fatal(err)
+	}
+	Describe(root.Content[0], structs)
+	out, _ := yaml.Marshal(&root)
+	s := string(out)
+	for _, want := range []string{
+		"main:\n                    allOf:\n                        - $ref: '#/components/schemas/wallet.Money'\n                    description: 中心钱包",
+		"description: 各场馆",
+		"nullable: true\n                    description: 分页信息",
+		"description: 链接 // 前缀",
+		"description: 原有",
+		"description: 当前页",
+	} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in\n%s", want, s)
+		}
+	}
+	if strings.Contains(s, "none:\n                    type: string\n                    description") {
+		t.Errorf("a field without comment got a description:\n%s", s)
+	}
+}
+
+func TestOwnGatewayStructsWin(t *testing.T) {
+	idl := t.TempDir()
+	for _, d := range []string{"ser-api", "ser-zz-admin-api"} {
+		os.MkdirAll(filepath.Join(idl, d), 0o755)
+	}
+	os.WriteFile(filepath.Join(idl, "ser-api", "deposit.thrift"), []byte("namespace go deposit\nstruct Method {\n    1: string code   // 编码\n    2: string name\n}\n"), 0o644)
+	os.WriteFile(filepath.Join(idl, "ser-zz-admin-api", "deposit.thrift"), []byte("namespace go deposit\nstruct Method {\n    1: string other\n}\n"), 0o644)
+	structs := gatewayStructs(filepath.Join(idl, "ser-api"))
+	if got := structs["deposit.Method"]; len(got) != 2 || got[0].doc != "编码" {
+		t.Fatalf("deposit.Method = %+v", got)
+	}
+}

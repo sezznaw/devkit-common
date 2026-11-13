@@ -538,6 +538,7 @@ API 服务的文档从 IDL 生成。`make gen` 对服务的 IDL 目录跑 `go ru
 CloudWeGo 的 `thrift-gen-http-swagger` 插件生成，然后合并（schema 名加 `<namespace>.` 前缀，两个领域都有 `ListReq` 不会撞；同一条路由出现在两个文件里报错），
 写到 `cmd/<服务>/openapi.yaml`，`main.go` 把它嵌进二进制。`-idl <文件>` 仍可只生成一个文件。开了 `docs.enabled`，服务就提供 `/openapi.yaml`、`/openapi.json` 和
 `/docs`（Scalar 文档页，"Send request" 直接打本服务）。
+字段的说明来自 IDL 字段注释：行尾的 `// ...`，没有就取紧贴在字段上方的 `//` 行；结构体类型的字段（`common.Money`、`common.PageInfo`、`list<Item>`）插件不带注释，apidoc 把 `$ref` 包进 `allOf` 后补上。没写注释的字段在文档里就没有说明，客户端看得到的字段都要写。结构体先在本网关目录里找、再到整个 IDL 仓库（common/）里找，别的网关用了同名 namespace 和结构体不会影响本网关的 `required`。
 
 方法的 IDL 返回类型就是数据结构体；apidoc 给每个响应包上网关要加的 `{code, msg, data}` 壳（见下一节），返回 `common.Empty` 的方法合成一个 200，
 响应结构体里没写 `optional` 的字段标成 `required`（Go 一定会序列化它们）；请求结构体（从 requestBody 能引用到的 schema）只把网关真会拒绝缺失的字段标成 `required`：thrift 写了 `required` 的，或 `api.vd` 规则不接受零值的（apidoc 用 `$` 取空值把表达式算一遍，如 `len($)>0`、`$>=1 && $<=2`；`len($)<=64`、`$>=0` 这类接受零值的不算），其余请求字段标 `nullable: true`，因为 Hertz 把缺失和 null 都绑定成零值、当作没传；读不懂的表达式按 required 处理并在 stderr 提示。请求和响应共用的结构体（如 `common.Money` 既在筛选条件里又在余额里）拆成两份：请求侧引用 `<名>Request` 副本（带 nullable），原 schema 只服务响应、required 按 Go 一定会序列化的字段写，这样前端生成器不会因为某个请求可以不传金额就把所有响应里的金额都当成可空。文档的 info.description 末尾会附上这条约定，让按文档验收的人看得到。`// @limit` 写成 `x-rate-limit`，`// @maxbody` 写成 `x-max-body`，`// @sensitive` 写成 `x-sensitive`（响应含明文个人信息的接口：审计只记请求不记响应），`idl/errors/*.thrift` 的码表写成 `x-error-codes`（code、name、message、domain）给前端生成器。

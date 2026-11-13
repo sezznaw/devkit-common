@@ -796,7 +796,14 @@ to the document's info.description for whoever tests against it, writes `// @lim
 of `idl/errors/*.thrift` as `x-error-codes` (code, name, message, domain) for
 the front-end generators. Comments on methods and fields in the IDL become the
 descriptions: the first sentence of a method's comment is its title, the rest
-its description. The `// @docs` lines (`// @docs title: ...`,
+its description. A field's comment is the `// ...` at the end of its line, else
+the `//` lines right above it; it reaches the document for struct-typed fields
+too (`common.Money`, `common.PageInfo`, `list<Item>`), which the plugin leaves
+bare (the `$ref` is wrapped in `allOf` to carry it). A field without a comment
+has no description, so write one on every field a client sees. Structs are
+looked up in the gateway's own directory first, then in the rest of the IDL
+repository (common/), so another gateway with the same namespace and struct
+name does not change this gateway's `required`. The `// @docs` lines (`// @docs title: ...`,
 `// @docs description: ...`, `// @docs tag member: 会员`) live in a file with no
 `service`, by convention `docs.thrift`; `@public`, `@perm`, `@audit` and
 `@limit` are read from all files. Operations are grouped by the second segment
