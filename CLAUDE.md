@@ -383,10 +383,23 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   deployment convention of one project; keep it that way (project facts
   live in idl/devkit.yaml, conf and infra).
 - `kafkax` dedupe: `SetDedupe(rdb)` (runtime: when rt.Redis and
-  kafka.dedupe.enabled != false; testx too). In `handle`, after the envelope
-  decodes: SETNX `dedupe:<svc>:<topic>:<id>` EX ttl; dup -> result
-  "duplicate", return (offset committed). On dlq park or ctx cancel the key is
-  DEL'd so a redelivery / replay runs. Redis error -> handle anyway (warn).
+  kafka.dedupe.enabled != false; testx too). Two phases since v0.82.0 (the
+  key used to be written as handled *before* the handler, so a consumer
+  killed mid-handler lost the event to "duplicate"; found in a review of a
+  payment consumer). In `process`, after the envelope decodes, `claim`: SETNX
+  `dedupe:<svc>:<topic>:<id>` = `p:<instance uuid>` PX `inflight_ttl` (60s,
+  floor 5s; `minInFlightTTL` is a var for the tests), renewed every ttl/3 by
+  `hold` (compare-and-pexpire script, like redisx's lock); `confirm` after
+  the handler returned nil: SET `1` EX `ttl` (24h, unconditional);
+  `release` on a handler error (compare-and-del: never another's claim, never
+  a `1`), so the dlq park / replay path is as before. Any value without the
+  `p:` prefix is "handled" (the old versions' `1` too) -> result "duplicate",
+  return (offset committed). A claim of another consumer is waited for
+  (poll 500ms; the wait ends on the *caller's* ctx, because the ctx the
+  handler gets is the record's span context, which nothing cancels) and
+  taken over after 2 x ttl with a WARN. Redis error -> handle anyway (warn),
+  no claim. `dedupe_test.go` simulates the kill by closing the dead
+  consumer's Redis client and stopping it before its handler returns.
 - `kafkax.DLQ` (the `--dlq` tool, `kitexx.DLQFlag` / `RunDLQ`, run after
   app.Setup so `c.subs` names the dlq topics): kadm on the producer client
   for ListEndOffsets / FetchOffsets (GroupIDNotFound = never committed) /

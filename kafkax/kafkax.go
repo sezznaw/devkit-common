@@ -54,7 +54,8 @@ type Config struct {
 
 	// Dedupe: a consumer skips an event id it already handled (Redis, 24h),
 	// so the at-least-once delivery of Kafka and the outbox does not reach
-	// the handler twice. On by default when the service has Redis.
+	// the handler again once it has succeeded. On by default when the
+	// service has Redis.
 	Dedupe DedupeConfig `yaml:"dedupe"`
 }
 
@@ -66,12 +67,23 @@ type DedupeConfig struct {
 	// TTL is how long a handled event id is remembered. Default 24h: longer
 	// than any redelivery (a rebalance, a replay from the outbox) takes.
 	TTL config.Duration `yaml:"ttl"`
+	// InFlightTTL is how long the claim of an event that is being handled
+	// lasts without being renewed; the consumer renews it while the handler
+	// runs. It is how long a redelivered event waits after the consumer that
+	// was handling it died (kill -9, out of memory). Default 60s, at least 5s.
+	InFlightTTL config.Duration `yaml:"inflight_ttl"`
 }
 
 // EnabledOrDefault reports whether dedupe should run: on unless
 // kafka.dedupe.enabled is false.
 func (c DedupeConfig) EnabledOrDefault() bool { return c.Enabled == nil || *c.Enabled }
 func (c DedupeConfig) ttl() time.Duration     { return c.TTL.Or(24 * time.Hour) }
+func (c DedupeConfig) inFlightTTL() time.Duration {
+	if d := c.InFlightTTL.Or(defaultInFlightTTL); d > minInFlightTTL {
+		return d
+	}
+	return minInFlightTTL
+}
 
 const (
 	SourceStatic   = "static"
@@ -82,7 +94,17 @@ const (
 	DLQSuffix = ".dlq"
 
 	defaultRetries = 3
+
+	defaultInFlightTTL = 60 * time.Second
+	// claimPoll is how often a consumer looks again at an event another
+	// consumer has in flight.
+	claimPoll = 500 * time.Millisecond
 )
+
+// minInFlightTTL is the floor of kafka.dedupe.inflight_ttl: a claim is
+// renewed every third of it, and one slow Redis round trip must not lose
+// it. A variable for the tests.
+var minInFlightTTL = 5 * time.Second
 
 func (c Config) SourceName() string {
 	if s := strings.TrimSpace(c.Source); s != "" {
@@ -183,39 +205,190 @@ type Client struct {
 	stop context.CancelFunc
 	wg   sync.WaitGroup
 
-	dedupe *redis.Client // nil: no consumer-side dedupe
+	dedupe   *redis.Client // nil: no consumer-side dedupe
+	instance string        // this process, in the value of the claims it holds
 
 	outboxState
 }
 
 // SetDedupe gives the consumers the Redis their dedupe keys live in
-// ("dedupe:<service>:<topic>:<event id>", kafka.dedupe.ttl). The runtime
-// calls it when the service has Redis and kafka.dedupe.enabled is not
-// false; a handler then sees each event id once even when Kafka delivers
-// it twice. A handler that fails (and parks the event in the dlq) forgets
-// the id, so a replay runs it again.
+// ("dedupe:<service>:<topic>:<event id>"). The runtime calls it when the
+// service has Redis and kafka.dedupe.enabled is not false; an event id whose
+// handler succeeded is then not handed to the handler again for
+// kafka.dedupe.ttl, even when Kafka delivers it twice. A handler that fails
+// (and parks the event in the dlq) forgets the id, so a replay runs it
+// again.
+//
+// The key has two states. While the handler runs it holds a claim,
+// "p:<instance>", that lasts kafka.dedupe.inflight_ttl and is renewed by the
+// consumer that holds it; only when the handler has returned nil does it
+// become "1" (handled) for kafka.dedupe.ttl. A consumer killed in the middle
+// of a handler therefore leaves a claim that runs out, and the redelivered
+// event is handled by whoever gets it next: until v0.82.0 the key was
+// written as handled before the handler ran, and such an event was skipped
+// as a duplicate and lost. So a handler can run again for an event whose
+// first run was cut short: handlers are to be idempotent.
+//
+// 去重键有两个状态：handler 运行期间是「处理中」占位 p:<实例>（kafka.dedupe.inflight_ttl，
+// 持有它的消费者续期），handler 返回 nil 之后才变成「已处理」1（kafka.dedupe.ttl）。消费者在
+// handler 中途被杀，占位到期，重投的事件会被再处理一次（v0.82.0 之前键在 handler 之前就写成
+// 已处理，这样的事件被当成重复跳过、丢失）。所以 handler 必须能重跑。
 func (c *Client) SetDedupe(rdb *redis.Client) { c.dedupe = rdb }
 
-// seen claims the event id for this consumer; false when it was handled
-// before. A Redis error lets the event through (at least once, as without
-// dedupe) and is logged.
-func (c *Client) seen(ctx context.Context, topic, id string) (dup bool, key string) {
-	if c.dedupe == nil || id == "" {
-		return false, ""
-	}
-	key = "dedupe:" + c.service + ":" + topic + ":" + id
-	ok, err := c.dedupe.SetNX(ctx, key, 1, c.cfg.Dedupe.ttl()).Result()
-	if err != nil {
-		zlog.Ctx(ctx).Warn("dedupe check failed; handling the event anyway", zlog.Err(err))
-		return false, ""
-	}
-	return !ok, key
+const (
+	// inFlight starts the value of a dedupe key while the event is being
+	// handled; any other value says it was handled (the "1" of this version
+	// and of the versions that wrote the key before the handler ran).
+	inFlight = "p:"
+	handled  = "1"
+)
+
+// The claim scripts touch the key only while it still holds this consumer's
+// claim: a claim that ran out and was taken by another consumer, or that
+// another consumer turned into "handled", is neither extended nor deleted.
+var (
+	renewClaim   = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("pexpire", KEYS[1], ARGV[2]) else return 0 end`)
+	releaseClaim = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then return redis.call("del", KEYS[1]) else return 0 end`)
+	// takeOverClaim replaces another consumer's claim (ARGV[1]) by this
+	// consumer's (ARGV[2]), and nothing else: not a key that turned to
+	// "handled" in the meantime.
+	takeOverClaim = redis.NewScript(`if redis.call("get", KEYS[1]) == ARGV[1] then redis.call("set", KEYS[1], ARGV[2], "px", ARGV[3]) return 1 else return 0 end`)
+)
+
+// claim is the right to handle one event, held in Redis until confirm
+// (handled) or release (not handled; whoever gets the event next runs it).
+type claim struct {
+	key, token string
+	stop       func() // ends the renewal
 }
 
-func (c *Client) forget(ctx context.Context, key string) {
-	if key != "" {
-		_ = c.dedupe.Del(context.WithoutCancel(ctx), key).Err()
+// claim takes the right to handle the event: (claim, false, nil). An event
+// that was handled before is (nil, true, nil). An event another consumer
+// has in flight is waited for: it becomes "handled" (a duplicate), or its
+// claim is released or runs out (this consumer handles it); a claim that is
+// still being renewed after twice the in-flight TTL is taken over, so that
+// one key cannot block the partition for good. stop ends the wait when the
+// consumer is stopping: its error is returned and the event stays where it
+// is. A Redis error lets the event through without a claim (at least once,
+// as without dedupe) and is logged.
+func (c *Client) claim(ctx, stop context.Context, topic, id string, log *zlog.Logger) (*claim, bool, error) {
+	if c.dedupe == nil || id == "" {
+		return nil, false, nil
 	}
+	key, token, ttl := "dedupe:"+c.service+":"+topic+":"+id, inFlight+c.instance, c.cfg.Dedupe.inFlightTTL()
+	unavailable := func(err error) (*claim, bool, error) {
+		log.Warn("dedupe check failed; handling the event anyway", zlog.Err(err))
+		return nil, false, nil
+	}
+	deadline, waited := time.Now().Add(2*ttl), false
+	for {
+		ok, err := c.dedupe.SetNX(ctx, key, token, ttl).Result()
+		if err != nil {
+			return unavailable(err)
+		}
+		if ok {
+			if waited {
+				log.Warn("event taken over: the consumer that had claimed it did not finish")
+			}
+			return c.hold(key, token, ttl), false, nil
+		}
+		v, err := c.dedupe.Get(ctx, key).Result()
+		switch {
+		case errors.Is(err, redis.Nil):
+			continue // released or run out between the two commands: claim again
+		case err != nil:
+			return unavailable(err)
+		case !strings.HasPrefix(v, inFlight):
+			return nil, true, nil // handled
+		case v == token:
+			// this process's own claim, left by a run whose outcome did not
+			// reach Redis: nobody else has the event, run it
+			n, err := renewClaim.Run(ctx, c.dedupe, []string{key}, token, ttl.Milliseconds()).Int()
+			if err != nil {
+				return unavailable(err)
+			}
+			if n == 0 {
+				continue // run out between the two commands: claim again
+			}
+			return c.hold(key, token, ttl), false, nil
+		}
+		// In flight in another consumer. Alive, it finishes (the key turns
+		// to handled, or is released); dead, its claim runs out.
+		if !time.Now().Before(deadline) {
+			// only the claim just seen is replaced: if its holder finished
+			// or gave it back in this instant, look again
+			n, err := takeOverClaim.Run(ctx, c.dedupe, []string{key}, v, token, ttl.Milliseconds()).Int()
+			if err != nil {
+				return unavailable(err)
+			}
+			if n == 0 {
+				continue
+			}
+			log.Warn("event taken over after waiting: its claim was still being renewed", zlog.Dur("waited", 2*ttl))
+			return c.hold(key, token, ttl), false, nil
+		}
+		if !waited {
+			waited = true
+			log.Info("event in flight in another consumer; waiting", zlog.Dur("at_most", 2*ttl))
+		}
+		t := time.NewTimer(claimPoll)
+		select {
+		case <-stop.Done():
+			t.Stop()
+			return nil, false, stop.Err()
+		case <-t.C:
+		}
+	}
+}
+
+// hold keeps a claim alive while the handler runs: every third of the TTL
+// it is extended, as long as it is still this consumer's. A process that
+// is killed stops renewing, and the claim runs out within the TTL.
+func (c *Client) hold(key, token string, ttl time.Duration) *claim {
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		t := time.NewTicker(ttl / 3)
+		defer t.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-t.C:
+				// A failed renewal is tried again at the next tick; a claim
+				// that is lost all the same costs a second run of the
+				// handler only when the event is redelivered meanwhile.
+				_ = renewClaim.Run(ctx, c.dedupe, []string{key}, token, ttl.Milliseconds()).Err()
+			}
+		}
+	}()
+	return &claim{key: key, token: token, stop: func() { cancel(); <-done }}
+}
+
+// confirm marks the event handled, after the handler returned nil.
+// Unconditional: the event is handled, whoever holds the key by now. When
+// the write fails the claim runs out by itself and a redelivery runs the
+// handler again.
+func (c *Client) confirm(ctx context.Context, cl *claim, log *zlog.Logger) {
+	if cl == nil {
+		return
+	}
+	cl.stop()
+	if err := c.dedupe.Set(context.WithoutCancel(ctx), cl.key, handled, c.cfg.Dedupe.ttl()).Err(); err != nil {
+		log.Warn("handled event not marked in the dedupe store; a redelivery runs the handler again", zlog.Err(err))
+	}
+}
+
+// release gives the claim back, after the handler failed: the event's next
+// delivery (a redelivery, a replay from the dlq) runs the handler. Only this
+// consumer's own claim is removed, never another's or a "handled".
+func (c *Client) release(ctx context.Context, cl *claim) {
+	if cl == nil {
+		return
+	}
+	cl.stop()
+	_ = releaseClaim.Run(context.WithoutCancel(ctx), c.dedupe, []string{cl.key}, cl.token).Err()
 }
 
 type subscription struct {
@@ -232,7 +405,7 @@ func Open(ctx context.Context, t Target, cfg Config, service, tenant string) (*C
 	tracer := kotel.NewTracer()
 	hooks := kotel.NewKotel(kotel.WithTracer(tracer)).Hooks()
 	hooks = append(hooks, metricsHook{})
-	c := &Client{cfg: cfg, target: t, service: service, tenant: tenant, tracer: tracer, hooks: hooks}
+	c := &Client{cfg: cfg, target: t, service: service, tenant: tenant, tracer: tracer, hooks: hooks, instance: uuid.NewString()}
 	prod, err := kgo.NewClient(append(c.baseOpts(),
 		kgo.RequiredAcks(kgo.AllISRAcks()),
 		kgo.ProducerBatchCompression(kgo.SnappyCompression(), kgo.NoCompression()),
@@ -393,14 +566,16 @@ func (c *Client) handle(ctx context.Context, r *kgo.Record, h Handler) {
 }
 
 // process runs one record through the handler the way consumption does: a
-// span under the producer's trace, the envelope decoded, the dedupe check,
+// span under the producer's trace, the envelope decoded, the dedupe claim,
 // the handler retried. nil means the record is done (handled, or a
 // duplicate); an error is what remains after the retries, for the caller to
 // decide (the consumer parks the record, the dead-letter tool keeps it
-// pending). A failure forgets the dedupe key, so the record runs when it
-// comes again. The dead-letter tool calls it with the record it rebuilt
-// from the dlq, so a replay is the handler running in this process.
+// pending). The event id is marked handled only after the handler returned
+// nil; a failure releases the claim, so the record runs when it comes
+// again. The dead-letter tool calls it with the record it rebuilt from the
+// dlq, so a replay is the handler running in this process.
 func (c *Client) process(ctx context.Context, r *kgo.Record, h Handler) error {
+	stopping := ctx // the caller's, cancelled when the consumer stops; the span's context below is the record's
 	ctx, span := c.tracer.WithProcessSpan(r)
 	defer span.End()
 	start := time.Now()
@@ -413,22 +588,25 @@ func (c *Client) process(ctx context.Context, r *kgo.Record, h Handler) error {
 	defer func() { metricsx.KafkaHandleDuration.WithLabelValues(r.Topic).Observe(time.Since(start).Seconds()) }()
 	log = log.With(zlog.Str("type", ev.Type), zlog.Str("event_id", ev.ID))
 	span.SetAttributes(attribute.String("event.type", ev.Type), attribute.String("event.id", ev.ID))
-	dup, dedupeKey := c.seen(ctx, r.Topic, ev.ID)
+	claimed, dup, err := c.claim(ctx, stopping, r.Topic, ev.ID, log)
+	if err != nil {
+		return err // stopping while another consumer had the event in flight: it is redelivered
+	}
 	if dup {
 		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "duplicate").Inc()
 		log.Info("duplicate event skipped (already handled)")
 		return nil
 	}
 
-	var err error
 	for attempt := 1; attempt <= c.cfg.retries(); attempt++ {
 		if err = safely(ctx, h, ev); err == nil {
+			c.confirm(ctx, claimed, log) // only now: a consumer killed before this line leaves a claim that runs out
 			metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "ok").Inc()
 			log.Info("event handled", zlog.Int("attempt", attempt), zlog.Dur("latency", time.Since(start)))
 			return nil
 		}
 		if ctx.Err() != nil {
-			c.forget(ctx, dedupeKey) // shutting down: the event is redelivered and must run
+			c.release(ctx, claimed) // shutting down: the event is redelivered and must run
 			return err
 		}
 		metricsx.KafkaEventsHandled.WithLabelValues(r.Topic, "retried").Inc()
@@ -438,7 +616,7 @@ func (c *Client) process(ctx context.Context, r *kgo.Record, h Handler) error {
 	span.RecordError(err)
 	span.SetStatus(codes.Error, err.Error())
 	log.Error("handler failed after retries", zlog.Err(err))
-	c.forget(ctx, dedupeKey) // a replay from the dlq must run
+	c.release(ctx, claimed) // a replay from the dlq must run
 	return err
 }
 

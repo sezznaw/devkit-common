@@ -308,7 +308,7 @@ GORM，GORM 改之前还会逐列再比一遍。字段没有显式 `type:` 直�
 
 #### 消费者只看到一次
 
-Kafka 和 outbox 都是至少一次投递，同一条事件可能到消费者两次（重平衡、回放、转发器重试）。有 Redis 时框架替你去重：handler 跑之前先占 `dedupe:<服务>:<主题>:<事件 id>`（`kafka.dedupe.ttl`，24h），第二次投递记日志、计数（`kafka_events_handled_total{result="duplicate"}`）、提交位移但不跑 handler。handler 失败进死信时会忘掉这个 id，所以从死信回放还会执行。`kafka.dedupe.enabled: false` 关掉；没有 Redis 就不去重并告警。handler 仍要幂等，覆盖去重管不到的情形（两个生产者用不同 id 发同一件事）。
+Kafka 和 outbox 都是至少一次投递，同一条事件可能到消费者两次（重平衡、回放、转发器重试）。有 Redis 时框架替你去重：处理成功的事件 id 不再交给 handler。键 `dedupe:<服务>:<主题>:<事件 id>` 有两个状态（v0.82.0 起）：handler 运行期间是「处理中」占位 `p:<实例>`，有效期 `kafka.dedupe.inflight_ttl`（60s，最小 5s），由持有它的消费者续期；handler 返回 nil 之后才变成「已处理」`1`，保留 `kafka.dedupe.ttl`（24h）。已处理的 id 再投递时记日志、计数（`kafka_events_handled_total{result="duplicate"}`）、提交位移但不跑 handler。handler 失败时交还占位（事件进死信），所以下一次投递或从死信回放还会执行。消费者在 handler 中途被杀（kill -9、内存超限）留下的占位没人续期：重投的事件等它到期后再处理一次。v0.82.0 之前键在 handler **运行之前**就写成已处理，这样的事件会被当成重复跳过、丢失。**所以 handler 必须能重跑：一个事件的第一次处理可能只做了一半。** 两个消费者同时拿到同一条事件（一个 handler 还没跑完就被踢出消费组）不会并排执行：后来的等先来的做完（算重复）、失败或死掉（由它执行）；等满两倍 `inflight_ttl` 占位仍在续期就接手并告警。`kafka.dedupe.enabled: false` 关掉；没有 Redis 就不去重并告警；Redis 出错时照常处理。handler 仍要幂等，覆盖去重管不到的情形（处理到一半被打断、两个生产者用不同 id 发同一件事）。
 
 #### 事务里的事件：outbox
 
