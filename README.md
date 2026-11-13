@@ -731,6 +731,21 @@ cb := webhookx.Server(rt)
 webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPaid)
 ```
 
+The listener judges where a callback comes from by the service's `client:`
+section (`trusted_proxies`, `edges`), the same rule as a gateway.
+`webhookx.UseClientRule(h, cfg.Client)` (v0.82.0) is that rule as one call,
+and `Server` itself installs it. A test that mounts callback routes on an
+engine of its own (`server.New()` + `ut.PerformRequest`) calls it before
+`Handle`: without it the test runs Hertz's default, which believes the
+leftmost `X-Forwarded-For` entry, the one the caller writes, so a source
+whitelist that production would refuse passes in the test.
+
+```go
+h := server.New(server.WithDisablePrintRoute(true))
+if err := webhookx.UseClientRule(h, cfg.Client); err != nil { t.Fatal(err) }   // the conf file's own client: section
+webhookx.Handle(rt, h, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPaid)
+```
+
 What happens to every callback, in order: source address against
 `allow_cidrs` (403), body limit (413, default 1 MiB), signature (401;
 `verify.type` hmac-sha256 over a payload template with a timestamp window,

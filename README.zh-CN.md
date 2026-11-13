@@ -486,6 +486,17 @@ cb := webhookx.Server(rt)
 webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPaid)
 ```
 
+监听按服务的 `client:` 段（`trusted_proxies`、`edges`）判断回调从哪来，和网关是同一条规则。`webhookx.UseClientRule(h, cfg.Client)`
+（v0.82.0）就是这条规则，`Server` 自己也是用它装的。在自己的引擎上挂回调路由的测试（`server.New()` + `ut.PerformRequest`）要在
+`Handle` 之前调它：不调的话测的是 Hertz 的默认规则——信 `X-Forwarded-For` 最左一项，而那一项是调用方自己能写的，生产会拒掉的
+来源白名单在测试里会通过。
+
+```go
+h := server.New(server.WithDisablePrintRoute(true))
+if err := webhookx.UseClientRule(h, cfg.Client); err != nil { t.Fatal(err) }   // 传 conf 文件自己的 client: 段
+webhookx.Handle(rt, h, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPaid)
+```
+
 每个回调依次经过：来源地址对照 `allow_cidrs`（403）、body 上限（413，默认 1 MiB）、验签（401；`verify.type` 为 hmac-sha256
 对带时间戳窗口的模板签名、basic，或 `custom` 配 `webhookx.WithVerifier(fn)` 走厂商算法——fn 拿到的 `Event` 带 `ClientIP`，
 是监听按可信代理规则算出的来源地址，和 `allow_cidrs` 判的同一个值，给「允许的来源是后台数据而不是配置」的厂商核白名单用，v0.80.0；fn 判断不了（它依据的数据此刻读不到）时返回 `webhookx.ErrUnavailable`

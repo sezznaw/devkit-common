@@ -679,6 +679,19 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   in `ErrNotFromProvider` with `%v`, which would lose the chain) gets 503 +
   `verify_unavailable`, before the archive and the SETNX: an unverified
   request is neither kept nor remembered, and the provider's retry runs.
+  `UseClientRule(h, cfg.Client)` (v0.82.0) is the lines of `Server` that
+  install the source rule, exported, and `Server` calls it (after its
+  `h.Use(Tracing, Metrics, RequestLog, Recovery)`, so a request the edges
+  refuse is still a log record): the engine's ClientIP function, a
+  middleware that sets the same function on each request, and `hertzx.Edge`
+  when edges are configured. The per-request middleware is what a test needs:
+  `engine.ServeHTTP` (ut.PerformRequest) never installs the engine's
+  function, and without edges nothing else did, so a service's callback
+  tests on a bare `server.New()` judged a source whitelist by Hertz's rule
+  (leftmost X-Forwarded-For) while production used ours (rightmost
+  untrusted, or the edge's header), and passed requests production refuses.
+  Exported so that such a test runs the production rule, with the `client:`
+  section of each of the service's conf files.
 - `s3x`: aws-sdk-go-v2 s3 with `otelaws.AppendMiddlewares`, BaseEndpoint +
   UsePathStyle (SeaweedFS), static credentials. `Open` does HeadBucket (the
   bucket must exist; the chart's createBuckets makes them). Since v0.52.0 a
