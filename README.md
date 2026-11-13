@@ -738,7 +738,13 @@ basic, or `custom` with `webhookx.WithVerifier(fn)` for the vendor's own
 scheme; the `Event` passed to fn carries `ClientIP`, the source address the
 listener resolved through its trusted-proxy rule, the same value
 `allow_cidrs` judges, for a provider whose allowed sources are data kept in
-the back office rather than configuration, v0.80.0), the raw request copied
+the back office rather than configuration, v0.80.0; a fn that cannot judge
+the request, because the data it judges by is not readable right now,
+returns `webhookx.ErrUnavailable`, as it is or wrapped with `%w`: that is
+answered 503, which the provider retries, counted as `verify_unavailable`
+instead of `bad_signature`, and the request is neither archived nor
+handled, v0.82.0; every other error of fn stays the 401 that says "not the
+provider"), the raw request copied
 to the Kafka archive topic (a failure there
 is a 500: the provider retries, we never handle what we could not keep),
 the event id checked in Redis (a redelivery is acknowledged without running

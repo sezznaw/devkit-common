@@ -488,7 +488,9 @@ webhookx.Handle(rt, cb, "payment-x", "/callbacks/payment-x/paid", callbacks.OnPa
 
 每个回调依次经过：来源地址对照 `allow_cidrs`（403）、body 上限（413，默认 1 MiB）、验签（401；`verify.type` 为 hmac-sha256
 对带时间戳窗口的模板签名、basic，或 `custom` 配 `webhookx.WithVerifier(fn)` 走厂商算法——fn 拿到的 `Event` 带 `ClientIP`，
-是监听按可信代理规则算出的来源地址，和 `allow_cidrs` 判的同一个值，给「允许的来源是后台数据而不是配置」的厂商核白名单用，v0.80.0）、原始请求复制到 Kafka 留档主题
+是监听按可信代理规则算出的来源地址，和 `allow_cidrs` 判的同一个值，给「允许的来源是后台数据而不是配置」的厂商核白名单用，v0.80.0；fn 判断不了（它依据的数据此刻读不到）时返回 `webhookx.ErrUnavailable`
+（原样或用 `%w` 包一层）：回 503 让厂商重试，计入 `verify_unavailable` 而不是 `bad_signature`，请求不留档、不进 handler，v0.82.0；
+fn 的其它错误仍是表示「不是这家厂商」的 401）、原始请求复制到 Kafka 留档主题
 （留档失败回 500 让厂商重试，没留住的绝不处理）、事件 id 查 Redis（重复投递直接应答、不跑 handler）、然后是 handler：
 返回 nil 就按路由的应答回（默认 200 "ok"，可 `WithReply`），返回 error 或 panic 回 500 并忘掉这个事件 id，厂商重试时会再跑。
 每个回调一条带 provider 和 event_id 的日志，指标 `callbacks_received_total{provider, http_route, result}`——路由注册时各个 result 的

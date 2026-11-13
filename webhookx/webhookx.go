@@ -68,7 +68,8 @@ func (e *Event) Decode(v any) error {
 type Handler func(ctx context.Context, ev *Event) error
 
 // Verifier is a vendor-specific check for callback.verify.type custom:
-// return an error when the request is not from the provider.
+// return an error when the request is not from the provider (401), and
+// ErrUnavailable when that cannot be told right now (503).
 type Verifier func(req *Event) error
 
 // Option configures one route.
@@ -87,6 +88,22 @@ func WithReply(status int, contentType, body string) Option {
 // ErrNotFromProvider is what a failed verification is wrapped in.
 var ErrNotFromProvider = errors.New("webhookx: request is not from the provider")
 
+// ErrUnavailable is what a custom Verifier returns (as it is, or wrapped
+// with %w) when it cannot judge the request: the data it judges by, the
+// provider's secret or its allowed sources, is not readable right now. That
+// is our failure, not the caller's, and is answered as one: 503, which a
+// provider retries, where every other error of a Verifier is the 401 of
+// ErrNotFromProvider, which many providers stop on. The request is counted
+// as verify_unavailable, not bad_signature (so that an alert on refused
+// callbacks means what it says), and since it was not verified it is
+// neither archived nor handled.
+//
+// ErrUnavailable：custom Verifier 判断不了这个请求时返回它（原样或用 %w 包一层）——它依据的
+// 数据（厂商密钥、允许的来源）此刻读不到。这是我们自己的故障，不是对方的：回 503 让厂商重试，
+// 而不是「不是这家厂商发的」那种 401；计入 verify_unavailable，不计 bad_signature；没验过的
+// 请求不留档、不进 handler。
+var ErrUnavailable = errors.New("webhookx: verifier unavailable")
+
 type route struct {
 	provider    string
 	path        string
@@ -103,7 +120,7 @@ type route struct {
 
 // results are the values of the result label of callbacks_received_total,
 // one per way serve can end.
-var results = []string{"ok", "duplicate", "bad_source", "bad_signature", "too_large", "archive_failed", "dedupe_unavailable", "handler_error"}
+var results = []string{"ok", "duplicate", "bad_source", "bad_signature", "verify_unavailable", "too_large", "archive_failed", "dedupe_unavailable", "handler_error"}
 
 const (
 	defaultDedupeTTL = 7 * 24 * time.Hour
@@ -202,6 +219,11 @@ func (r *route) serve(ctx context.Context, c *app.RequestContext) {
 	c.Request.Header.VisitAll(func(k, v []byte) { ev.Headers.Add(string(k), string(v)) })
 	// 3. signature
 	if err := r.verify(ev, string(c.Request.QueryString())); err != nil {
+		if errors.Is(err, ErrUnavailable) {
+			log.Error("callback not verified: verifier unavailable; answering 503 so the provider retries", zlog.Err(err))
+			result("verify_unavailable", http.StatusServiceUnavailable)
+			return
+		}
 		log.Warn("callback rejected: verification failed", zlog.Err(err))
 		result("bad_signature", http.StatusUnauthorized)
 		return
@@ -272,6 +294,9 @@ func (r *route) verify(ev *Event, query string) error {
 		return nil
 	case "custom":
 		if err := r.verifier(ev); err != nil {
+			if errors.Is(err, ErrUnavailable) {
+				return err // not a verdict on the caller: serve answers 503
+			}
 			return fmt.Errorf("%w: %v", ErrNotFromProvider, err)
 		}
 		return nil

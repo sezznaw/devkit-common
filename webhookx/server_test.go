@@ -57,7 +57,7 @@ func listen(t *testing.T, cb kitexx.CallbacksConfig, path string) (base string, 
 var oneShot = &http.Client{Transport: &http.Transport{DisableKeepAlives: true}}
 
 // allResults are the values of the result label of callbacks_received_total.
-var allResults = []string{"ok", "duplicate", "bad_source", "bad_signature", "too_large", "archive_failed", "dedupe_unavailable", "handler_error"}
+var allResults = []string{"ok", "duplicate", "bad_source", "bad_signature", "verify_unavailable", "too_large", "archive_failed", "dedupe_unavailable", "handler_error"}
 
 // received is callbacks_received_total of provider "pay" at path, summed
 // over every result.

@@ -128,7 +128,7 @@ var (
 		Name: "http_client_breaker_state", Help: "Circuit breaker of a provider: 0 closed (normal), 1 half-open (probing), 2 open (failing fast).",
 	}, []string{"provider"})
 	CallbacksReceived = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
-		Name: "callbacks_received_total", Help: "Provider callbacks received (webhookx), by provider, route and result: ok, duplicate, bad_source, bad_signature, too_large, archive_failed, dedupe_unavailable, handler_error.",
+		Name: "callbacks_received_total", Help: "Provider callbacks received (webhookx), by provider, route and result: ok, duplicate, bad_source, bad_signature, verify_unavailable, too_large, archive_failed, dedupe_unavailable, handler_error.",
 	}, []string{"provider", "http_route", "result"})
 	S3Requests = promauto.With(Registry).NewCounterVec(prometheus.CounterOpts{
 		Name: "s3_requests_total", Help: "Object storage calls (s3x), by operation and result: ok, not_found, error.",

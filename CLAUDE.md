@@ -671,6 +671,14 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   presets every `result` series of `callbacks_received_total` at 0
   (`results`): `increase()` needs a sample before the first increment, or an
   alert never sees the first refused callback after a restart.
+  `ErrUnavailable` (v0.82.0): every error of a custom verifier used to be a
+  401 counted as `bad_signature`, also when the verifier could not read its
+  own data (a database blip), so a provider got "not you" for our outage and
+  the metric could not be alerted on. A verifier that returns it (`errors.Is`,
+  so wrapped is fine; `route.verify` passes it through instead of wrapping it
+  in `ErrNotFromProvider` with `%v`, which would lose the chain) gets 503 +
+  `verify_unavailable`, before the archive and the SETNX: an unverified
+  request is neither kept nor remembered, and the provider's retry runs.
 - `s3x`: aws-sdk-go-v2 s3 with `otelaws.AppendMiddlewares`, BaseEndpoint +
   UsePathStyle (SeaweedFS), static credentials. `Open` does HeadBucket (the
   bucket must exist; the chart's createBuckets makes them). Since v0.52.0 a
