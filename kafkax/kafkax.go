@@ -528,6 +528,14 @@ func (c *Client) consume(ctx context.Context, cl *kgo.Client, s subscription) {
 			zlog.Error("fetch failed", zlog.Str("topic", topic), zlog.Int("partition", p), zlog.Err(err))
 		})
 		fetches.EachRecord(func(r *kgo.Record) {
+			// Stopping: the rest of this poll is left for redelivery. No
+			// offset of it is committed any more (the commit below is not
+			// sent on a cancelled context), and a record that was left
+			// while it waited for another consumer's claim must not be
+			// overtaken by the ones behind it in its partition.
+			if ctx.Err() != nil {
+				return
+			}
 			c.handle(ctx, r, s.handler)
 		})
 		// lag: how far behind the end of each partition this poll left us

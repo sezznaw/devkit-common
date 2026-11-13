@@ -424,6 +424,33 @@ func TestDedupeStopEndsTheWait(t *testing.T) {
 	}
 }
 
+// TestDedupeStopLeavesTheRestOfThePoll: a consumer that is stopped while it
+// waits for another consumer's claim does not go on with the records that
+// came in the same poll: their events would run ahead of the one that was
+// left where it is, and none of their offsets is committed any more.
+func TestDedupeStopLeavesTheRestOfThePoll(t *testing.T) {
+	logs := zlogtest.Capture(t)
+	f := newDedupeFixture(t, Config{})
+	f.srv.Set(dedupeKey("evt-1"), "p:other")
+	var runs atomic.Int32
+	f.c.Subscribe(dedupeTopic, func(ctx context.Context, ev *Event) error { runs.Add(1); return nil })
+	produceEvent(t, f.c, dedupeTopic, "evt-1") // same key: same partition, one poll
+	produceEvent(t, f.c, dedupeTopic, "evt-2")
+	if err := f.c.Start(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	waitFor(t, "the consumer to wait for the other consumer's claim", func() bool {
+		return logs.Has("INFO", "event in flight in another consumer; waiting")
+	})
+	f.c.Close()
+	if runs.Load() != 0 || f.srv.Exists(dedupeKey("evt-2")) {
+		t.Fatalf("after the stop the handler ran %d times (evt-2 marked: %v); want the rest of the poll left for redelivery, behind evt-1", runs.Load(), f.srv.Exists(dedupeKey("evt-2")))
+	}
+	if v, _ := f.srv.Get(dedupeKey("evt-1")); v != "p:other" {
+		t.Fatalf("the other consumer's claim is %q after the stop", v)
+	}
+}
+
 // TestDedupeRedisDownHandlesAnyway: without the store the event is handled
 // (at least once), as before.
 func TestDedupeRedisDownHandlesAnyway(t *testing.T) {
