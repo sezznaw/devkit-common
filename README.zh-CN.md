@@ -194,10 +194,17 @@ mysql:
   max_idle: 5
   conn_max_lifetime: 30m
   slow_query: 200ms       # 超过就记一条 warn "mysql slow query"
+  # log_values: true      # SQL 日志带绑定值；只在本机生效，其它环境写了也忽略并告警
 ```
 
 - **每条 SQL 一条日志**，带请求的 `trace_id`：正常 debug，慢的 warn，失败的 error（查不到行不算失败）；
   每条 SQL 也是请求 trace 里的一个 span（语句不带参数值）。
+- **SQL 日志不带绑定值**（v0.82.0）：`sql` 字段在所有级别、所有环境都只有占位符（`WHERE phone = ?`），失败语句的报错文本里
+  MySQL 引用的值也被遮掉（`Duplicate entry '?' for key 'member.uk_phone'`，键名和列名保留）。绑定值里有个人数据和密钥
+  （手机号、厂商回调的带签名原文、验证器种子），而失败的语句在所有环境都记 error。handler 拿到的 error 不变：
+  `errors.As` 取驱动的错误、按报错文本判断都和以前一样。调试语句要看值时，在 `conf/local.yaml` 写 `mysql.log_values: true`：
+  只在开发者自己的机器上生效（`APP_ENV` 为 local 且不是接管模式——接管模式连的是共享库的数据），其它环境写了也忽略并告警。
+  框架管不到的：handler 自己把 error 打进日志，和把值拼进语句文本而不是绑定的写法。
 - **本机连了别人也在用的库会有一条 WARN**（source static、地址不是本机、`APP_ENV` 未设置），
   和 Nacos 的"笔记本不许注册到共享 Nacos"是同一类提醒。
 - **GORM 的约束**：不用 `AutoMigrate`（表结构只来自迁移文件）；不定义关联、不用 `Preload`（要连表就写明确的 Join）；

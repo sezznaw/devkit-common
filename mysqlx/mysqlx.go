@@ -18,8 +18,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
+	gomysql "github.com/go-sql-driver/mysql"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -84,6 +86,17 @@ type Config struct {
 	// migration is a step of the release instead. true / false overrides,
 	// except in takeover mode, where it is always off.
 	AutoMigrate *bool `yaml:"auto_migrate"`
+	// LogValues puts the bound values back into the SQL the log records
+	// carry ("WHERE phone = '138...'" instead of "WHERE phone = ?"), for a
+	// developer who debugs a statement. Only on a developer's own machine
+	// (APP_ENV local, not in takeover mode, whose data is the shared dev
+	// database's); anywhere else it is ignored with a warning, because bound
+	// values are personal data and secrets (a callback's signed body, a
+	// phone number, an authenticator seed) and logs are kept and read widely.
+	//
+	// LogValues：让 SQL 日志带上绑定值，给本机调试语句用。只在本机（APP_ENV=local 且不是接管
+	// 模式）生效，其它环境写了也忽略并告警：绑定值里有个人数据和密钥，日志留存久、能看的人多。
+	LogValues bool `yaml:"log_values"`
 }
 
 // inTakeover reports takeover mode; a variable so the tests can set it.
@@ -260,9 +273,8 @@ func Open(ctx context.Context, t Target, cfg Config) (*gorm.DB, error) {
 	if t.Addr == "" || t.DB == "" || t.User == "" {
 		return nil, fmt.Errorf("mysqlx: target is incomplete: addr=%q db=%q user=%q", t.Addr, t.DB, t.User)
 	}
-	slow := cfg.SlowQuery.Or(defaultSlow)
 	db, err := gorm.Open(mysql.Open(t.DSN()), &gorm.Config{
-		Logger:                 &zlogger{slow: slow},
+		Logger:                 newLogger(cfg),
 		SkipDefaultTransaction: true, // one statement is one statement; transactions are explicit
 		PrepareStmt:            false,
 		// Times go in and come out as UTC, see the DSN.
@@ -369,7 +381,91 @@ func nonZero(v, def int) int {
 // request's logger (so it carries the trace_id), slow ones a warning, failed
 // ones an error. A row that is not there (ErrRecordNotFound) is not an error
 // of the query.
-type zlogger struct{ slow time.Duration }
+//
+// No record carries a bound value: the statement keeps its placeholders
+// (values) and MySQL's error text loses the value it quotes (maskValues).
+// The same rule as the tracing plugin's WithoutQueryVariables. Bound values
+// are a callback's signed body, a payer's name, a phone number, an
+// authenticator seed; a failed statement is logged at error in every
+// environment.
+type zlogger struct {
+	slow time.Duration
+	// values: mysql.log_values, honoured on a developer's machine only.
+	values bool
+}
+
+// recorderValues tells GORM's recorder logger (below) to keep the bound
+// values: set by a handle opened with an effective mysql.log_values.
+var recorderValues atomic.Bool
+
+// GORM does not use the handle's logger for Raw(...).Scan / Model(...).Scan:
+// it swaps in its own recorder, whose ParamsFilter is this package-level
+// variable (default: keep the values), and hands the recorded statement to
+// our Trace with the values already in it. Implementing ParamsFilter on
+// zlogger alone therefore leaves those statements with their values
+// (gorm v1.31.2, scan.go / logger.traceRecorder). Set once, at init, and
+// steered by an atomic: assigning it in Open would be a data race between
+// handles opened and used side by side.
+func init() {
+	logger.RecorderParamsFilter = func(_ context.Context, sql string, params ...any) (string, []any) {
+		if recorderValues.Load() {
+			return sql, params
+		}
+		return sql, nil
+	}
+}
+
+// newLogger is GORM's logger for cfg.
+func newLogger(cfg Config) *zlogger {
+	l := &zlogger{slow: cfg.SlowQuery.Or(defaultSlow)}
+	if cfg.LogValues {
+		if config.IsLocal() && !inTakeover() {
+			l.values = true
+			recorderValues.Store(true)
+			zlog.Warn("mysql.log_values is on: SQL records carry the bound values")
+		} else {
+			zlog.Warn("mysql.log_values is ignored outside the local environment: bound values carry personal data and secrets")
+		}
+	}
+	return l
+}
+
+// ParamsFilter makes GORM log a statement without its bound values: the
+// placeholders stay (gorm.ParamsFilter).
+func (l *zlogger) ParamsFilter(_ context.Context, sql string, params ...any) (string, []any) {
+	if l.values {
+		return sql, params
+	}
+	return sql, nil
+}
+
+// MySQL quotes the offending value in these messages (1062, 1366 and its
+// kin, 1292). The value may hold quotes itself, hence greedy up to the last
+// fixed text; what names the key or the column stays.
+var valueInError = []struct {
+	re   *regexp.Regexp
+	with string
+}{
+	{regexp.MustCompile(`(?s)Duplicate entry '.*' for key `), "Duplicate entry '?' for key "},
+	{regexp.MustCompile(`(?s)Incorrect (\w+) value: '.*' for column `), "Incorrect $1 value: '?' for column "},
+	{regexp.MustCompile(`(?s)Truncated incorrect (\w+) value: '.*'`), "Truncated incorrect $1 value: '?'"},
+}
+
+// maskValues is err for the log: when it is (or wraps) an error of the
+// MySQL server, the same text with the values the server quoted replaced by
+// "?". Only the logged copy: the caller keeps the driver's error, which code
+// matches on (errors.As for the number, the text for the key).
+func maskValues(err error) error {
+	var me *gomysql.MySQLError
+	if !errors.As(err, &me) {
+		return err
+	}
+	msg := err.Error()
+	for _, v := range valueInError {
+		msg = v.re.ReplaceAllString(msg, v.with)
+	}
+	return errors.New(msg)
+}
 
 func (l *zlogger) LogMode(logger.LogLevel) logger.Interface { return l }
 func (l *zlogger) Info(_ context.Context, msg string, args ...any) {
@@ -388,6 +484,9 @@ func (l *zlogger) Trace(ctx context.Context, begin time.Time, fc func() (string,
 	fields := []zlog.Field{zlog.Str("sql", statement), zlog.Int("rows", rows), zlog.Dur("latency", elapsed)}
 	switch {
 	case err != nil && !errors.Is(err, gorm.ErrRecordNotFound):
+		if !l.values {
+			err = maskValues(err)
+		}
 		zlog.Ctx(ctx).Error("mysql", append(fields, zlog.Err(err))...)
 	case elapsed >= l.slow:
 		zlog.Ctx(ctx).Warn("mysql slow query", fields...)

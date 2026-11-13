@@ -61,6 +61,7 @@ func TestAgainstMySQL(t *testing.T) {
 		t.Skip("MYSQL_TEST_DSN_ROOT not set")
 	}
 	t.Run("resolve and open", func(t *testing.T) { testResolveAndOpen(t, root) })
+	t.Run("failed insert logs no values", func(t *testing.T) { testFailedInsertLogsNoValues(t, root) })
 }
 
 func TestAutoMigrateNeverOnInTakeover(t *testing.T) {

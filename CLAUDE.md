@@ -328,6 +328,24 @@ go vet ./... && test -z "$(gofmt -l .)"         # what CI runs
   came out as `::1:3306`). `Runtime` must not grow service-specific fields; the next
   infrastructure (Redis, Kafka) gets the same shape: a config section with
   `enabled`, opened in `NewRuntime`, a field on `Runtime`.
+  *SQL records carry no bound values* (v0.82.0; until then every
+  environment's ERROR records, and dev's DEBUG ones, held callback bodies
+  with their signatures, payer names, authenticator seeds): `zlogger`
+  implements `gorm.ParamsFilter`, and that alone is NOT enough: for
+  `Raw(...).Scan` / `Model(...).Scan` GORM (v1.31.2) swaps in its own
+  recorder logger, whose filter is the package variable
+  `logger.RecorderParamsFilter` (default: keep the values), and hands our
+  `Trace` a statement with the values already in it. mysqlx sets that
+  variable once in `init`, steered by the atomic `recorderValues` (assigning
+  it in `Open` would be a data race between handles opened and used side by
+  side under `-race`). `mysql.log_values` puts the values back only when
+  `config.IsLocal()` and not in takeover mode (the `httpx` `debug` rule),
+  with a WARN either way. `maskValues` replaces the value MySQL quotes in
+  1062 / 1366 / 1292 texts in the *logged copy* of the error (greedy
+  regexes, the value may hold quotes); the error returned to the caller is
+  never touched, services match on its text. `logvalues_test.go` runs every
+  statement shape on a DryRun handle; the duplicate-key case is a subtest of
+  `TestAgainstMySQL` so that CI's mysql job runs it.
 - `redisx`: the `mysqlx` shape for Redis / Valkey (`Config` with enabled /
   source / role, `Target`, `Open` with `redisotel` tracing, `New` for programs
   that are not services). `source platform` reuses `mysqlx.ResolveKind` with

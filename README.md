@@ -315,12 +315,28 @@ mysql:
   max_idle: 5
   conn_max_lifetime: 30m
   slow_query: 200ms       # slower than this is a warn record "mysql slow query"
+  # log_values: true      # SQL records with the bound values; local only, ignored (with a warning) anywhere else
 ```
 
 - **Every query is one record**, with the request's `trace_id`: debug when
   fine, warn when slow, error when it failed (a row that is not there is not
   a failure); and one span of the request's trace (the statement, without
   the values).
+- **No SQL record carries a bound value** (v0.82.0): the `sql` field keeps
+  its placeholders (`WHERE phone = ?`) at every level and in every
+  environment, and the error text of a failed statement loses the value
+  MySQL quotes in it (`Duplicate entry '?' for key 'member.uk_phone'`; the
+  key and the column stay). Bound values are personal data and secrets (a
+  phone number, a provider's signed callback body, an authenticator seed),
+  and a failed statement is logged at error everywhere. The error a handler
+  gets back is untouched: `errors.As` to the driver's error and matching on
+  its text work as before. To see the values while debugging a statement,
+  set `mysql.log_values: true` in `conf/local.yaml`: it is honoured on a
+  developer's own machine only (`APP_ENV` local and not in takeover mode,
+  whose data is the shared database's) and ignored with a warning anywhere
+  else. What the framework cannot cover: a handler that logs an error
+  itself, and values concatenated into the statement's text instead of
+  bound.
 - **A laptop on a database that is not on it gets a WARN** (source static,
   an address that is not loopback, `APP_ENV` not set), the same kind of
   reminder as "a laptop does not register in the shared Nacos".
